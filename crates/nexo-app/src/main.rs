@@ -693,6 +693,20 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
                 return placeholder_skin();
             };
 
+            // Bring cosmetics up to date before drawing them. Skins and capes
+            // change independently of tokens, and an account stored by an
+            // older build has no cape recorded at all — which is exactly why
+            // an equipped cape could otherwise never appear without signing
+            // in again.
+            let account = match core.sync_active_profile().await {
+                Ok(Some(updated)) => updated,
+                Ok(None) => account,
+                Err(err) => {
+                    tracing::warn!(%err, "could not refresh the profile, using stored cosmetics");
+                    account
+                }
+            };
+
             let Some(url) = account.skin_url.clone() else {
                 return placeholder_skin();
             };

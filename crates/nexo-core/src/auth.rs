@@ -287,6 +287,25 @@ impl Auth {
         Ok(response.json().await?)
     }
 
+    /// Re-reads the account's cosmetics and returns it updated.
+    ///
+    /// Skins and capes change independently of tokens — equipping a cape
+    /// should show up without signing in again — and an account stored by an
+    /// older build may predate these fields entirely.
+    pub async fn sync_profile(&self, account: &Account) -> Result<Account> {
+        let profile = self.profile(&account.access_token).await?;
+        let skin = profile.active_skin();
+
+        Ok(Account {
+            skin_url: skin.as_ref().map(|s| s.url.clone()),
+            skin_model: skin.map(|s| s.model()).unwrap_or_default(),
+            // Deliberately overwrites with `None` when nothing is equipped, so
+            // taking a cape off in game is reflected here too.
+            cape_url: profile.active_cape().map(|c| c.url),
+            ..account.clone()
+        })
+    }
+
     async fn profile(&self, mc_access_token: &str) -> Result<McProfile> {
         let response = self
             .http

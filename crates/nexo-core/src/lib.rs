@@ -127,6 +127,27 @@ impl Nexo {
         Ok(())
     }
 
+    /// Brings the active account's cosmetics up to date and persists them.
+    ///
+    /// Returns `None` when nobody is signed in. Failures are the caller's to
+    /// treat as non-fatal: the stored values stay usable, they're just stale.
+    pub async fn sync_active_profile(&self) -> Result<Option<Account>> {
+        let Some(account) = self.accounts.active().await? else {
+            return Ok(None);
+        };
+
+        // A dead token can't read the profile, so renew first. `refresh`
+        // already re-reads the profile, making a second fetch pointless.
+        let account = if account.is_expired() {
+            self.auth.refresh(&account).await?
+        } else {
+            self.auth.sync_profile(&account).await?
+        };
+
+        self.accounts.upsert(account.clone()).await?;
+        Ok(Some(account))
+    }
+
     /// Stops a running game. Returns `false` if it wasn't running.
     pub fn stop(&self, instance_id: &str) -> bool {
         self.running.stop(instance_id)

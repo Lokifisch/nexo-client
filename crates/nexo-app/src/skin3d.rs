@@ -50,7 +50,6 @@ const MAX_PITCH: f32 = 0.9;
 const OUTLINE_OUTER: f32 = 0.9;
 const OUTLINE_INNER: f32 = 0.45;
 
-const VIOLET: [f32; 4] = [0.482, 0.235, 1.0, 1.0];
 const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// Interaction state. Lives in the widget tree, so a redraw doesn't reset the
@@ -452,7 +451,10 @@ struct Uniforms {
     colour: [f32; 4],
     expand: f32,
     textured: f32,
-    _padding: [f32; 2],
+    /// Non-zero on the outer hull, which derives its colour from position
+    /// instead of using `colour`.
+    rainbow: f32,
+    _padding: f32,
 }
 
 impl shader::Primitive for Scene {
@@ -473,26 +475,31 @@ impl shader::Primitive for Scene {
         // One uniform block per pass; only the outline width, colour and
         // whether to sample the texture differ.
         let passes = [
+            // Outer hull: rainbow, so `colour` goes unused.
             Uniforms {
                 mvp: self.mvp,
-                colour: VIOLET,
+                colour: [1.0; 4],
                 expand: OUTLINE_OUTER,
                 textured: 0.0,
-                _padding: [0.0; 2],
+                rainbow: 1.0,
+                _padding: 0.0,
             },
+            // Inner hull: the black stroke between rainbow and skin.
             Uniforms {
                 mvp: self.mvp,
                 colour: BLACK,
                 expand: OUTLINE_INNER,
                 textured: 0.0,
-                _padding: [0.0; 2],
+                rainbow: 0.0,
+                _padding: 0.0,
             },
             Uniforms {
                 mvp: self.mvp,
                 colour: [1.0; 4],
                 expand: 0.0,
                 textured: 1.0,
-                _padding: [0.0; 2],
+                rainbow: 0.0,
+                _padding: 0.0,
             },
         ];
 
@@ -952,8 +959,22 @@ struct Uniforms {
     colour: vec4<f32>,
     expand: f32,
     textured: f32,
-    padding: vec2<f32>,
+    rainbow: f32,
+    padding: f32,
 };
+
+// How quickly the outline's hue cycles across the model, per unit of model
+// space. Tuned so a 32-tall figure spans roughly one full sweep.
+const RAINBOW_SCALE: f32 = 0.026;
+
+// Hue to RGB at full saturation and value. Cheaper than a general HSV
+// conversion, and the outline only ever wants fully saturated colour.
+fn hue_to_rgb(h: f32) -> vec3<f32> {
+    let r = abs(h * 6.0 - 3.0) - 1.0;
+    let g = 2.0 - abs(h * 6.0 - 2.0);
+    let b = 2.0 - abs(h * 6.0 - 4.0);
+    return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
+}
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(0) var tex: texture_2d<f32>;
@@ -970,6 +991,7 @@ struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) shade: f32,
+    @location(2) local: vec3<f32>,
 };
 
 @vertex
@@ -980,12 +1002,21 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.clip = u.mvp * vec4<f32>(position, 1.0);
     out.uv = in.uv;
     out.shade = in.shade;
+    // Model space, not clip space: the hue must stay fixed to the figure so
+    // it doesn't crawl over the surface while the model is rotated.
+    out.local = position;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (u.textured < 0.5) {
+        if (u.rainbow > 0.5) {
+            // Diagonal sweep, so the bands run across the figure rather than
+            // as flat horizontal stripes.
+            let hue = fract((in.local.y + in.local.x) * RAINBOW_SCALE);
+            return vec4<f32>(hue_to_rgb(hue), 1.0);
+        }
         return u.colour;
     }
 
