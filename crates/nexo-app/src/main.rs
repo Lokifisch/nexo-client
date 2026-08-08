@@ -81,6 +81,7 @@ pub enum Screen {
     Home,
     Instances,
     Accounts,
+    Skins,
     /// Details for one instance, by id.
     Instance(String),
 }
@@ -165,6 +166,10 @@ pub struct App {
     /// Project icons, keyed by project id. Fetched once and kept, since
     /// scrolling a result list would otherwise refetch constantly.
     icons: std::collections::HashMap<String, image::Handle>,
+
+    // Skin and cape management.
+    capes: Vec<nexo_core::cosmetics::Cape>,
+    cape_previews: std::collections::HashMap<String, image::Handle>,
 }
 
 #[derive(Clone)]
@@ -215,6 +220,17 @@ pub enum Message {
     AddFromFile(String),
     RemoveContent { instance: String, project: String },
 
+    // Skins and capes
+    LoadCapes,
+    CapesLoaded(Vec<nexo_core::cosmetics::Cape>),
+    CapePreviewLoaded { cape: String, handle: image::Handle },
+    SetSkinModel(nexo_core::SkinModel),
+    UploadSkin,
+    ResetSkin,
+    WearCape(String),
+    HideCape,
+    CosmeticsDone(Result<(), String>),
+
     // Accounts
     StartSignIn,
     SignInFinished(Result<Account, String>),
@@ -256,6 +272,8 @@ impl App {
             content_results: Vec::new(),
             content_searching: false,
             icons: std::collections::HashMap::new(),
+            capes: Vec::new(),
+            cape_previews: std::collections::HashMap::new(),
         };
 
         let task = Task::batch([
@@ -311,7 +329,11 @@ impl App {
             }
 
             Message::Navigate(screen) => {
+                let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
                 self.screen = screen;
+                if opening_skins && self.capes.is_empty() {
+                    return Task::done(Message::LoadCapes);
+                }
                 Task::none()
             }
 
@@ -704,6 +726,171 @@ impl App {
                 )
             }
 
+            Message::LoadCapes => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let Some(account) = self.active_account().cloned() else {
+                    return Task::none();
+                };
+
+                Task::perform(
+                    async move { core.cosmetics.capes(&account).await.unwrap_or_default() },
+                    Message::CapesLoaded,
+                )
+            }
+
+            Message::CapesLoaded(capes) => {
+                // Fetch previews for any cape not already cached, one task
+                // each so a slow texture doesn't hold up the others.
+                let mut fetches = Vec::new();
+                for cape in &capes {
+                    if self.cape_previews.contains_key(&cape.id) {
+                        continue;
+                    }
+                    let Some(core) = self.core.clone() else { continue };
+                    let (id, url) = (cape.id.clone(), cape.url.clone());
+
+                    fetches.push(Task::perform(
+                        async move {
+                            nexo_core::skin::fetch_texture(core.http(), &url)
+                                .await
+                                .ok()
+                                .map(|texture| (id, texture))
+                        },
+                        |loaded| match loaded {
+                            Some((cape, texture)) => Message::CapePreviewLoaded {
+                                cape,
+                                handle: image::Handle::from_rgba(
+                                    texture.width,
+                                    texture.height,
+                                    texture.pixels,
+                                ),
+                            },
+                            None => Message::Noop,
+                        },
+                    ));
+                }
+
+                self.capes = capes;
+                Task::batch(fetches)
+            }
+
+            Message::CapePreviewLoaded { cape, handle } => {
+                self.cape_previews.insert(cape, handle);
+                Task::none()
+            }
+
+            Message::SetSkinModel(model) => {
+                // Recorded locally; it is applied to the account with the next
+                // upload, since the model is a property of the uploaded skin.
+                self.skin_model = model;
+                Task::none()
+            }
+
+            Message::UploadSkin => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let Some(account) = self.active_account().cloned() else {
+                    return Task::none();
+                };
+                let model = self.skin_model;
+                self.status = Status::Busy("Uploading skin".into());
+
+                Task::perform(
+                    async move {
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Choose a skin")
+                            .add_filter("Minecraft skin", &["png"])
+                            .pick_file()
+                            .await
+                        else {
+                            // Cancelled, which is not a failure.
+                            return Ok(());
+                        };
+
+                        core.cosmetics
+                            .upload_skin(&account, handle.path(), model)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::CosmeticsDone,
+                )
+            }
+
+            Message::ResetSkin => {
+                let (Some(core), Some(account)) =
+                    (self.core.clone(), self.active_account().cloned())
+                else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Resetting skin".into());
+
+                Task::perform(
+                    async move {
+                        core.cosmetics
+                            .reset_skin(&account)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::CosmeticsDone,
+                )
+            }
+
+            Message::WearCape(cape) => {
+                let (Some(core), Some(account)) =
+                    (self.core.clone(), self.active_account().cloned())
+                else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Changing cape".into());
+
+                Task::perform(
+                    async move {
+                        core.cosmetics
+                            .wear_cape(&account, &cape)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::CosmeticsDone,
+                )
+            }
+
+            Message::HideCape => {
+                let (Some(core), Some(account)) =
+                    (self.core.clone(), self.active_account().cloned())
+                else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Removing cape".into());
+
+                Task::perform(
+                    async move {
+                        core.cosmetics
+                            .hide_cape(&account)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::CosmeticsDone,
+                )
+            }
+
+            Message::CosmeticsDone(Ok(())) => {
+                self.status = Status::Idle;
+                // Re-read the profile so the 3D model and the cape list both
+                // reflect the change that just landed server-side.
+                let reload_capes = Task::done(Message::LoadCapes);
+                match self.core.clone() {
+                    Some(core) => Task::batch([reload(core), reload_capes]),
+                    None => reload_capes,
+                }
+            }
+            Message::CosmeticsDone(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
+            }
+
             Message::Launch(id) => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
@@ -862,6 +1049,7 @@ impl App {
             Screen::Home => screens::home::view(self),
             Screen::Instances => screens::instances::view(self),
             Screen::Accounts => screens::accounts::view(self),
+            Screen::Skins => screens::skins::view(self),
             Screen::Instance(id) => match self.instances.iter().find(|i| &i.id == id) {
                 Some(instance) => screens::instance::view(self, instance),
                 // Deleted from under us, or an id that no longer exists.

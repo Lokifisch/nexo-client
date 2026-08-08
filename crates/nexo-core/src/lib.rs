@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod content;
+pub mod cosmetics;
 pub mod auth;
 pub mod error;
 pub mod hwkey;
@@ -39,6 +40,7 @@ pub struct Nexo {
     pub installer: Installer,
     pub nexo_mod: nexo_mod::NexoMod,
     pub content: content::Content,
+    pub cosmetics: cosmetics::Cosmetics,
     /// Games this launcher started. Shared, so every clone of `Nexo` sees the
     /// same set — the UI holds one clone and each async task another.
     pub running: running::RunningGames,
@@ -71,6 +73,7 @@ impl Nexo {
             installer: Installer::new(http.clone(), paths.clone()),
             nexo_mod: nexo_mod::NexoMod::new(http.clone(), paths.clone()),
             content: content::Content::new(http.clone(), paths.clone()),
+            cosmetics: cosmetics::Cosmetics::new(http.clone()),
             running: running::RunningGames::new(),
             paths,
             http,

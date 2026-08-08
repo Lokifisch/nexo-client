@@ -15,7 +15,7 @@ nexo-core = { path = "crates/nexo-core" }
 # Async runtime + HTTP. rustls rather than native-tls so Windows/Linux
 # builds don't need a system OpenSSL.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "sync", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
 futures = "0.3"
 
 serde = { version = "1", features = ["derive"] }
