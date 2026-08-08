@@ -46,21 +46,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None => Space::new().width(272).height(372).into(),
     };
 
-    let controls = column![
-        skin_card(app, account.skin_model),
-        capes_card(app),
+    // Only the controls scroll. The shader widget draws straight to the
+    // surface with its own render pass, so it does not follow a scroll
+    // translation — inside a scrollable it stays pinned and then gets
+    // clipped. Keeping it out is also better: the preview stays visible
+    // while the controls beside it are used.
+    let controls = scrollable(
+        column![skin_card(app, account.skin_model), capes_card(app)]
+            .spacing(16)
+            .width(Fill),
+    )
+    .height(Fill);
+
+    column![
+        heading,
+        row![preview, controls].spacing(20).height(Fill),
     ]
     .spacing(16)
-    .width(Fill);
-
-    scrollable(
-        column![
-            heading,
-            row![preview, controls].spacing(20),
-        ]
-        .spacing(16)
-        .width(Fill),
-    )
     .height(Fill)
     .into()
 }
@@ -111,99 +113,125 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
     .into()
 }
 
+/// Capes as a grid of thumbnails. A list of full-width rows wasted most of
+/// the width on a 10x16 image, and capes are picked by looking at them.
 fn capes_card(app: &App) -> Element<'_, Message> {
-    let mut body = column![
-        row![
-            column![
-                text("Capes").size(17).color(theme::TEXT),
-                text("Only capes your account already owns can be worn.")
-                    .size(12)
-                    .color(theme::MUTED),
-            ]
-            .spacing(3)
-            .width(Fill),
-            button(text("Refresh").size(12))
-                .padding([7, 14])
-                .style(theme::ghost_button)
-                .on_press(Message::LoadCapes),
+    /// Tiles per row. Four fits the controls column without the tiles
+    /// becoming too small to recognise a cape by.
+    const COLUMNS: usize = 4;
+
+    let body = column![row![
+        column![
+            text("Capes").size(17).color(theme::TEXT),
+            text("Only capes your account already owns can be worn.")
+                .size(12)
+                .color(theme::MUTED),
         ]
-        .align_y(iced::Center),
+        .spacing(3)
+        .width(Fill),
+        button(text("Refresh").size(12))
+            .padding([7, 14])
+            .style(theme::ghost_button)
+            .on_press(Message::LoadCapes),
     ]
+    .align_y(iced::Center)]
     .spacing(12);
 
     if app.capes.is_empty() {
-        body = body.push(
-            text("No capes on this account.")
-                .size(12)
-                .color(theme::MUTED),
-        );
-        return container(body)
-            .padding(18)
-            .width(Fill)
-            .style(theme::card)
-            .into();
+        return container(
+            body.push(
+                text("No capes on this account.")
+                    .size(12)
+                    .color(theme::MUTED),
+            ),
+        )
+        .padding(18)
+        .width(Fill)
+        .style(theme::card)
+        .into();
     }
 
     let none_worn = !app.capes.iter().any(|c| c.is_active());
-    body = body.push(
-        button(
-            row![
-                Space::new().width(40).height(64),
-                text("No cape").size(14).color(theme::TEXT).width(Fill),
-                if none_worn {
-                    text("Worn").size(12).color(theme::MINT)
-                } else {
-                    text("").size(12)
-                },
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
-        )
-        .padding(10)
-        .width(Fill)
-        .style(theme::bare_button)
-        .on_press_maybe((!app.is_busy() && !none_worn).then_some(Message::HideCape)),
-    );
+
+    // "No cape" is a tile like any other, so taking one off is the same
+    // gesture as putting one on rather than a differently-shaped action.
+    let mut tiles: Vec<Element<'_, Message>> = vec![cape_tile(
+        Space::new().width(60).height(96).into(),
+        "No cape",
+        none_worn,
+        (!app.is_busy() && !none_worn).then_some(Message::HideCape),
+    )];
 
     for cape in &app.capes {
         let worn = cape.is_active();
-        // Cape textures are 64×32 with the design in one corner, so the whole
-        // texture is shown rather than trying to crop the visible panel out.
         let preview: Element<'_, Message> = match app.cape_previews.get(&cape.id) {
             Some(handle) => image(handle.clone())
                 .filter_method(image::FilterMethod::Nearest)
-                .width(40)
-                .height(64)
+                .width(60)
+                .height(96)
                 .into(),
-            None => Space::new().width(40).height(64).into(),
+            None => Space::new().width(60).height(96).into(),
         };
 
-        body = body.push(
-            button(
-                row![
-                    preview,
-                    text(cape.label()).size(14).color(theme::TEXT).width(Fill),
-                    if worn {
-                        text("Worn").size(12).color(theme::MINT)
-                    } else {
-                        text("Wear").size(12).color(theme::MUTED)
-                    },
-                ]
-                .spacing(12)
-                .align_y(iced::Center),
-            )
-            .padding(10)
-            .width(Fill)
-            .style(theme::bare_button)
-            .on_press_maybe(
-                (!app.is_busy() && !worn).then(|| Message::WearCape(cape.id.clone())),
-            ),
-        );
+        tiles.push(cape_tile(
+            preview,
+            cape.label(),
+            worn,
+            (!app.is_busy() && !worn).then(|| Message::WearCape(cape.id.clone())),
+        ));
     }
 
-    container(body)
+    // Pad the last row so its tiles keep the same width as the rest rather
+    // than stretching across the gap.
+    let remainder = tiles.len() % COLUMNS;
+    if remainder != 0 {
+        for _ in 0..(COLUMNS - remainder) {
+            tiles.push(Space::new().width(Fill).into());
+        }
+    }
+
+    let mut grid = column![].spacing(10);
+    let mut row_items: Vec<Element<'_, Message>> = Vec::new();
+    for tile in tiles {
+        row_items.push(tile);
+        if row_items.len() == COLUMNS {
+            grid = grid.push(row(std::mem::take(&mut row_items)).spacing(10));
+        }
+    }
+
+    container(body.push(grid))
         .padding(18)
         .width(Fill)
         .style(theme::card)
         .into()
+}
+
+fn cape_tile<'a>(
+    preview: Element<'a, Message>,
+    label: &'a str,
+    worn: bool,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let caption = if worn {
+        text("Worn").size(11).color(theme::MINT)
+    } else {
+        text(label).size(11).color(theme::MUTED)
+    };
+
+    button(
+        column![preview, caption]
+            .spacing(6)
+            .align_x(iced::Center),
+    )
+    .padding(8)
+    .width(Fill)
+    // The worn one is outlined so it reads as selected without needing the
+    // caption to be read.
+    .style(if worn {
+        theme::selected_tile
+    } else {
+        theme::tile
+    })
+    .on_press_maybe(on_press)
+    .into()
 }

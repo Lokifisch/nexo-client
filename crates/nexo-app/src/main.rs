@@ -215,6 +215,7 @@ pub enum Message {
         project: String,
         handle: image::Handle,
     },
+    LoadJarIcons(String),
     ContentResults(Result<Vec<nexo_core::modrinth::SearchHit>, String>),
     InstallProject { instance: String, project: String },
     AddFromFile(String),
@@ -440,16 +441,62 @@ impl App {
                 )
             }
 
+            Message::LoadJarIcons(id) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
+                    return Task::none();
+                };
+
+                // Read icons straight out of the installed jars. Modrinth's
+                // are only known while a search is in memory, so without this
+                // installed content is iconless after every restart.
+                let mut tasks = Vec::new();
+                for installed in &instance.mods {
+                    if self.icons.contains_key(&installed.project_id) {
+                        continue;
+                    }
+                    let core = core.clone();
+                    let instance = instance.clone();
+                    let (project, file_name) =
+                        (installed.project_id.clone(), installed.file_name.clone());
+
+                    tasks.push(Task::perform(
+                        async move {
+                            core.content
+                                .jar_icon(&instance, &file_name)
+                                .await
+                                .map(|icon| (project, icon))
+                        },
+                        |loaded| match loaded {
+                            Some((project, icon)) => Message::IconLoaded {
+                                project,
+                                handle: image::Handle::from_rgba(
+                                    icon.width,
+                                    icon.height,
+                                    icon.pixels,
+                                ),
+                            },
+                            None => Message::Noop,
+                        },
+                    ));
+                }
+
+                Task::batch(tasks)
+            }
+
             Message::OpenInstance(id) => {
+                let icons = Task::done(Message::LoadJarIcons(id.clone()));
                 self.screen = Screen::Instance(id);
                 // The details screen shows injector state, so look up what's
                 // published the first time one is opened.
                 self.browsing = false;
                 self.content_query.clear();
                 if self.nexo_release.is_none() {
-                    return Task::done(Message::FetchNexoRelease);
+                    return Task::batch([icons, Task::done(Message::FetchNexoRelease)]);
                 }
-                Task::none()
+                icons
             }
 
             Message::Stop(id) => {
@@ -544,6 +591,13 @@ impl App {
 
             Message::NexoModDone(Ok(())) => {
                 self.status = Status::Idle;
+                if let Screen::Instance(id) = self.screen.clone() {
+                    let refresh = Task::done(Message::LoadJarIcons(id));
+                    return match self.core.clone() {
+                        Some(core) => Task::batch([reload(core), refresh]),
+                        None => refresh,
+                    };
+                }
                 // Deliberately stays in the browser. Installing one thing is
                 // rarely the whole job, and closing it forced a re-open and a
                 // fresh search for every single mod.
@@ -798,11 +852,17 @@ impl App {
                         |loaded| match loaded {
                             Some((cape, texture)) => Message::CapePreviewLoaded {
                                 cape,
-                                handle: image::Handle::from_rgba(
-                                    texture.width,
-                                    texture.height,
-                                    texture.pixels,
-                                ),
+                                handle: {
+                                    // Crop to the panel that actually hangs
+                                    // off the back; the rest of a cape
+                                    // texture is empty space.
+                                    let panel = nexo_core::skin::cape_panel(&texture, 4);
+                                    image::Handle::from_rgba(
+                                        panel.width,
+                                        panel.height,
+                                        panel.pixels,
+                                    )
+                                },
                             },
                             None => Message::Noop,
                         },

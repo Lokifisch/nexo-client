@@ -295,6 +295,27 @@ pub async fn fetch(http: &reqwest::Client, url: &str, model: SkinModel) -> Resul
     Skin::decode(&bytes, model)
 }
 
+/// Crops a cape texture down to the panel that actually hangs off the
+/// player's back, scaled up.
+///
+/// A cape texture is 64×32 and mostly empty; the visible outer face is the
+/// 10×16 block at (1, 1). Showing the whole texture as a thumbnail is mostly
+/// blank space with the design squashed into a corner.
+pub fn cape_panel(texture: &Rgba, scale: u32) -> Rgba {
+    const X: u32 = 1;
+    const Y: u32 = 1;
+    const W: u32 = 10;
+    const H: u32 = 16;
+
+    let mut panel = Rgba::new(W, H);
+    for y in 0..H {
+        for x in 0..W {
+            panel.set(x, y, texture.get(X + x, Y + y));
+        }
+    }
+    panel.scaled(scale)
+}
+
 /// Downloads any image and decodes it to RGBA, without the 64×64 shape check
 /// [`Skin::decode`] applies.
 ///
@@ -485,6 +506,22 @@ mod tests {
             .unwrap();
 
         assert!(Skin::decode(&png, SkinModel::Classic).is_err());
+    }
+
+    #[test]
+    fn cape_panel_crops_to_the_visible_face() {
+        let mut texture = Rgba::new(64, 32);
+        // Mark the panel's top-left so the crop origin can be checked.
+        texture.set(1, 1, [1, 2, 3, 255]);
+        // And something outside it, which must not survive.
+        texture.set(40, 20, [9, 9, 9, 255]);
+
+        let panel = cape_panel(&texture, 1);
+        assert_eq!((panel.width, panel.height), (10, 16));
+        assert_eq!(panel.get(0, 0), [1, 2, 3, 255]);
+
+        let scaled = cape_panel(&texture, 3);
+        assert_eq!((scaled.width, scaled.height), (30, 48));
     }
 
     #[test]

@@ -207,6 +207,41 @@ pub fn bare_button(_theme: &Theme, _status: button::Status) -> button::Style {
     }
 }
 
+/// A selectable tile, used for the cape grid.
+pub fn tile(_theme: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(Background::Color(if hovered {
+            alpha(VIOLET, 0.10)
+        } else {
+            SURFACE
+        })),
+        text_color: TEXT,
+        border: Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: alpha(MUTED, 0.2),
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+/// The tile that's currently chosen.
+pub fn selected_tile(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(alpha(MINT, 0.12))),
+        text_color: TEXT,
+        border: Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: MINT,
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
 /// A content card — instance tiles, account rows.
 pub fn card(_theme: &Theme) -> container::Style {
     container::Style {

@@ -263,6 +263,77 @@ impl Content {
     pub fn http(&self) -> &reqwest::Client {
         &self.http
     }
+
+    /// The icon a mod carries inside its own jar.
+    ///
+    /// Modrinth icons are only known while a search's results are in memory,
+    /// so installed content lost its icons on every restart. A Fabric jar
+    /// declares its own icon in `fabric.mod.json`, which is right there on
+    /// disk — no network, and it works for mods that never came from Modrinth
+    /// at all.
+    pub async fn jar_icon(
+        &self,
+        instance: &Instance,
+        file_name: &str,
+    ) -> Option<crate::skin::Rgba> {
+        // Which folder a mod landed in isn't recorded, and this is three
+        // cheap existence checks.
+        let path = ProjectKind::ALL
+            .iter()
+            .map(|kind| self.folder(instance, *kind).join(file_name))
+            .find(|path| path.exists())?;
+
+        // zip and image are synchronous and this reads a whole file, so it
+        // belongs off the async runtime's worker threads.
+        tokio::task::spawn_blocking(move || read_jar_icon(&path))
+            .await
+            .ok()
+            .flatten()
+    }
+}
+
+/// Pulls the icon out of a Fabric jar, or `None` if it hasn't got one.
+///
+/// Every failure here is ordinary rather than exceptional — not a zip, no
+/// `fabric.mod.json`, no `icon` key, a path that isn't in the archive — so
+/// they all collapse to `None` rather than an error the UI would have to
+/// explain.
+fn read_jar_icon(path: &Path) -> Option<crate::skin::Rgba> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+
+    let metadata: serde_json::Value = {
+        let mut entry = archive.by_name("fabric.mod.json").ok()?;
+        let mut text = String::new();
+        entry.read_to_string(&mut text).ok()?;
+        serde_json::from_str(&text).ok()?
+    };
+
+    // `icon` is either a path, or a map of size to path for mods shipping
+    // several. The largest is wanted, since it only ever gets scaled down.
+    let icon_path = match metadata.get("icon")? {
+        serde_json::Value::String(path) => path.clone(),
+        serde_json::Value::Object(sizes) => sizes
+            .iter()
+            .filter_map(|(size, path)| Some((size.parse::<u32>().ok()?, path.as_str()?)))
+            .max_by_key(|(size, _)| *size)
+            .map(|(_, path)| path.to_string())?,
+        _ => return None,
+    };
+
+    let mut icon = archive.by_name(&icon_path).ok()?;
+    let mut bytes = Vec::new();
+    icon.read_to_end(&mut bytes).ok()?;
+
+    let decoded = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let (width, height) = decoded.dimensions();
+    Some(crate::skin::Rgba {
+        width,
+        height,
+        pixels: decoded.into_raw(),
+    })
 }
 
 #[cfg(test)]
