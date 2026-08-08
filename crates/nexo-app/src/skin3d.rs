@@ -7,14 +7,16 @@
 //! Signed in, this is a single textured pass.
 //!
 //! Signed out, the figure becomes a hollow rainbow badge instead: the model
-//! is drawn into the depth buffer with colour writes disabled, then two
-//! inverted hulls are drawn behind it — a black one, then a wider rainbow
-//! one. A hull is the model re-drawn with its faces pushed outwards and
-//! *front* faces culled, so only its far side shows; because that far side
-//! sits behind the model, the depth test keeps it only where the model does
-//! not cover it, leaving a ring. Order matters: the model must go first or
-//! the hull fills in solid, and black must precede rainbow or the rainbow
-//! never shows outside it.
+//! is drawn into the depth buffer with colour writes disabled, then a single
+//! inverted hull is drawn behind it. A hull is the model re-drawn with its
+//! faces pushed outwards and *front* faces culled, so only its far side
+//! shows; because that far side sits behind the model, the depth test keeps
+//! it only where the model does not cover it, leaving a ring. The model must
+//! be drawn first or the hull fills in solid.
+//!
+//! Deliberately one hull, not two. A second, narrower hull produced a black
+//! inner stroke, but on thin parts — arms especially — the two expanded
+//! shells intersect each other and the pair z-fights into a mess.
 //!
 //! Each cuboid expands about its own centre rather than the model's, or
 //! limbs would splay outwards as the outline grew.
@@ -49,11 +51,8 @@ const DRAG_SENSITIVITY: f32 = 0.011;
 /// Keeps the model from being tipped past vertical, where it reads as broken.
 const MAX_PITCH: f32 = 0.9;
 
-/// Outline widths, in model units (1 unit = 1 skin pixel).
-const OUTLINE_OUTER: f32 = 0.9;
-const OUTLINE_INNER: f32 = 0.45;
-
-const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// Outline width, in model units (1 unit = 1 skin pixel).
+const OUTLINE_WIDTH: f32 = 0.9;
 
 /// Interaction state. Lives in the widget tree, so a redraw doesn't reset the
 /// pose the user dragged to.
@@ -516,24 +515,17 @@ impl shader::Primitive for Scene {
         // One uniform block per pass; only the outline width, colour and
         // whether to sample the texture differ.
         let passes = [
-            // Outer hull: rainbow, so `colour` goes unused.
+            // The hull. `colour` goes unused: it derives its own from
+            // position and time.
             Uniforms {
                 mvp: self.mvp,
                 colour: [1.0; 4],
-                expand: OUTLINE_OUTER,
+                expand: OUTLINE_WIDTH,
                 textured: 0.0,
                 rainbow: 1.0,
                 time: self.time,
             },
-            // Inner hull: the black stroke between rainbow and skin.
-            Uniforms {
-                mvp: self.mvp,
-                colour: BLACK,
-                expand: OUTLINE_INNER,
-                textured: 0.0,
-                rainbow: 0.0,
-                time: 0.0,
-            },
+            // The model.
             Uniforms {
                 mvp: self.mvp,
                 colour: [1.0; 4],
@@ -619,7 +611,7 @@ impl shader::Primitive for Scene {
         } else {
             &pipeline.model
         });
-        pass.set_bind_group(0, &pipeline.uniform_bindings[2], &[]);
+        pass.set_bind_group(0, &pipeline.uniform_bindings[1], &[]);
         pass.set_bind_group(1, &pipeline.skin_binding, &[]);
         pass.draw(body, 0..1);
 
@@ -632,13 +624,9 @@ impl shader::Primitive for Scene {
 
         if self.outlined {
             pass.set_pipeline(&pipeline.outline);
+            pass.set_bind_group(0, &pipeline.uniform_bindings[0], &[]);
             pass.set_bind_group(1, &pipeline.skin_binding, &[]);
-            // Black before rainbow: the wider rainbow hull sits further back,
-            // so it only survives the depth test outside the black one.
-            for index in [1usize, 0] {
-                pass.set_bind_group(0, &pipeline.uniform_bindings[index], &[]);
-                pass.draw(0..pipeline.vertex_count, 0..1);
-            }
+            pass.draw(0..pipeline.vertex_count, 0..1);
         }
     }
 }
@@ -652,8 +640,8 @@ pub struct ModelPipeline {
     vertices: wgpu::Buffer,
     vertex_capacity: u32,
     vertex_count: u32,
-    uniforms: [wgpu::Buffer; 3],
-    uniform_bindings: [wgpu::BindGroup; 3],
+    uniforms: [wgpu::Buffer; 2],
+    uniform_bindings: [wgpu::BindGroup; 2],
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     skin_binding: wgpu::BindGroup,
@@ -790,7 +778,7 @@ impl shader::Pipeline for ModelPipeline {
         let depth_only =
             make_pipeline("nexo.skin3d.depth", wgpu::Face::Back, wgpu::ColorWrites::empty());
 
-        let uniforms: [wgpu::Buffer; 3] = std::array::from_fn(|_| {
+        let uniforms: [wgpu::Buffer; 2] = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("nexo.skin3d.uniform"),
                 size: std::mem::size_of::<Uniforms>() as u64,
@@ -1028,9 +1016,9 @@ struct Uniforms {
 // space. Tuned so a 32-tall figure spans roughly one full sweep.
 const RAINBOW_SCALE: f32 = 0.026;
 
-// Full hue cycles per second. Slow enough to read as a shimmer rather than
-// a strobe.
-const RAINBOW_DRIFT: f32 = 0.12;
+// Full hue cycles per second. Fast enough that the colour is visibly
+// moving at a glance, slow enough not to strobe.
+const RAINBOW_DRIFT: f32 = 0.35;
 
 // Hue to RGB at full saturation and value. Cheaper than a general HSV
 // conversion, and the outline only ever wants fully saturated colour.
