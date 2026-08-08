@@ -20,7 +20,7 @@ uuid.workspace = true
 sha1.workspace = true
 hex.workspace = true
 zip.workspace = true
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 aes-gcm = "0.11.0"
 sha2.workspace = true
 

@@ -1,6 +1,6 @@
 use crate::theme;
 use crate::{App, Message, Screen};
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, image, row, scrollable, text, text_input, Space};
 use iced::{Element, Fill};
 use nexo_core::nexo_mod;
 use nexo_core::Instance;
@@ -38,17 +38,18 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         row![heading, launch_control(app, instance, running)]
             .spacing(16)
             .align_y(iced::Center),
-        scrollable(
+        scrollable(if app.browsing {
+            column![browser_card(app, instance)].spacing(14).width(Fill)
+        } else {
             column![
                 nexo_mod_card(app, instance),
                 installed_card(app, instance),
-                browser_card(app, instance),
                 details_card(instance),
                 danger_card(instance, running),
             ]
             .spacing(14)
             .width(Fill)
-        )
+        })
         .height(Fill),
     ]
     .spacing(18)
@@ -219,23 +220,72 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
         .into()
 }
 
-/// What's already in the instance, with a way to take it out again.
+/// What's already in the instance: a filter over the installed list, the two
+/// ways to add more, and the entries themselves.
 fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let mut body = column![text(format!("Installed ({})", instance.mods.len()))
-        .size(16)
-        .color(theme::TEXT)]
+    let needle = app.content_query.trim().to_lowercase();
+    let matches: Vec<_> = instance
+        .mods
+        .iter()
+        .filter(|m| {
+            needle.is_empty()
+                || m.name.to_lowercase().contains(&needle)
+                || m.file_name.to_lowercase().contains(&needle)
+        })
+        .collect();
+
+    // Searches what is installed, not Modrinth — adding is a separate action.
+    let search = text_input("Search installed content…", &app.content_query)
+        .on_input(Message::ContentQueryChanged)
+        .padding(10)
+        .style(theme::input)
+        .width(Fill);
+
+    let actions = row![
+        button(text("Install from Modrinth").size(13))
+            .padding([8, 16])
+            .style(theme::primary_button)
+            .on_press(Message::OpenModrinthBrowser),
+        button(text("Add from file").size(13))
+            .padding([8, 16])
+            .style(theme::ghost_button)
+            .on_press_maybe(
+                (!app.is_busy()).then(|| Message::AddFromFile(instance.id.clone()))
+            ),
+    ]
     .spacing(10);
+
+    let mut body = column![
+        row![
+            text(format!("Content ({})", instance.mods.len()))
+                .size(16)
+                .color(theme::TEXT)
+                .width(Fill),
+            actions,
+        ]
+        .spacing(12)
+        .align_y(iced::Center),
+        search,
+    ]
+    .spacing(12);
 
     if instance.mods.is_empty() {
         body = body.push(
-            text("Nothing installed yet. Search below, or add a file.")
+            text("Nothing installed yet.")
+                .size(12)
+                .color(theme::MUTED),
+        );
+    } else if matches.is_empty() {
+        body = body.push(
+            text(format!("Nothing installed matches \"{}\".", app.content_query.trim()))
                 .size(12)
                 .color(theme::MUTED),
         );
     } else {
-        for installed in &instance.mods {
+        for installed in matches {
             body = body.push(
                 row![
+                    icon_or_placeholder(app, &installed.project_id, 32.0),
                     column![
                         text(&installed.name).size(14).color(theme::TEXT),
                         text(&installed.file_name).size(11).color(theme::MUTED),
@@ -264,13 +314,12 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
         .into()
 }
 
-/// Browse and install: a search field, the project-type filters, the two
-/// add-from paths, and the results.
+/// The Modrinth browser, shown in place of the instance's own content view.
 fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     use nexo_core::content::ProjectKind;
 
-    let search = text_input("Search Modrinth…", &app.content_query)
-        .on_input(Message::ContentQueryChanged)
+    let search = text_input("Search Modrinth…", &app.modrinth_query)
+        .on_input(Message::ModrinthQueryChanged)
         .on_submit(Message::SearchContent)
         .padding(10)
         .style(theme::input)
@@ -288,24 +337,25 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
         );
     }
 
-    let actions = row![
-        button(text("Search").size(13))
-            .padding([8, 16])
-            .style(theme::primary_button)
-            .on_press(Message::SearchContent),
-        button(text("Add from file").size(13))
-            .padding([8, 16])
-            .style(theme::ghost_button)
-            .on_press_maybe(
-                (!app.is_busy()).then(|| Message::AddFromFile(instance.id.clone()))
-            ),
-    ]
-    .spacing(10);
-
     let mut body = column![
-        text("Add content").size(16).color(theme::TEXT),
+        row![
+            text("Install from Modrinth")
+                .size(16)
+                .color(theme::TEXT)
+                .width(Fill),
+            button(text("Search").size(13))
+                .padding([8, 16])
+                .style(theme::primary_button)
+                .on_press(Message::SearchContent),
+            button(text("Done").size(13))
+                .padding([8, 16])
+                .style(theme::ghost_button)
+                .on_press(Message::CloseModrinthBrowser),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
         search,
-        row![filters.width(Fill), actions].spacing(12).align_y(iced::Center),
+        filters,
     ]
     .spacing(12);
 
@@ -313,7 +363,7 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
         body = body.push(text("Searching…").size(12).color(theme::MUTED));
     } else if app.content_results.is_empty() {
         body = body.push(
-            text("No results for this instance's version and loader.")
+            text("Nothing found for this instance's version and loader.")
                 .size(12)
                 .color(theme::MUTED),
         );
@@ -324,12 +374,20 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
             body = body.push(
                 container(
                     row![
+                        icon_or_placeholder(app, &hit.project_id, 48.0),
                         column![
                             text(&hit.title).size(14).color(theme::TEXT),
                             text(&hit.description).size(11).color(theme::MUTED),
-                            text(format!("{} downloads", compact(hit.downloads)))
-                                .size(10)
-                                .color(theme::MUTED),
+                            text(format!(
+                                "{} downloads{}",
+                                compact(hit.downloads),
+                                hit.author
+                                    .as_deref()
+                                    .map(|a| format!(" · by {a}"))
+                                    .unwrap_or_default()
+                            ))
+                            .size(10)
+                            .color(theme::MUTED),
                         ]
                         .spacing(3)
                         .width(Fill),
@@ -364,6 +422,18 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
         .width(Fill)
         .style(theme::card)
         .into()
+}
+
+/// A project's icon, or reserved space while it loads. Keeping the space
+/// stops rows from reflowing as icons arrive one by one.
+fn icon_or_placeholder<'a>(app: &'a App, project: &str, size: f32) -> Element<'a, Message> {
+    match app.icons.get(project) {
+        Some(handle) => image(handle.clone())
+            .width(size)
+            .height(size)
+            .into(),
+        None => Space::new().width(size).height(size).into(),
+    }
 }
 
 /// Download counts run to millions, which are unreadable in full.

@@ -152,11 +152,19 @@ pub struct App {
     /// unknown; the error is surfaced through `status` instead.
     nexo_release: Option<nexo_core::nexo_mod::Release>,
 
-    // Content browser, on the instance details screen.
+    // Content, on the instance details screen.
+    /// Filters the *installed* list. Modrinth has its own separate query.
     content_query: String,
     content_kind: ProjectKind,
+    /// True while the Modrinth browser is open in place of the instance's
+    /// own content view.
+    browsing: bool,
+    modrinth_query: String,
     content_results: Vec<nexo_core::modrinth::SearchHit>,
     content_searching: bool,
+    /// Project icons, keyed by project id. Fetched once and kept, since
+    /// scrolling a result list would otherwise refetch constantly.
+    icons: std::collections::HashMap<String, image::Handle>,
 }
 
 #[derive(Clone)]
@@ -191,10 +199,17 @@ pub enum Message {
     RemoveNexoMod(String),
     NexoModDone(Result<(), String>),
 
-    // Content browser
+    // Content
     ContentQueryChanged(String),
     ContentKindChanged(ProjectKind),
+    OpenModrinthBrowser,
+    CloseModrinthBrowser,
+    ModrinthQueryChanged(String),
     SearchContent,
+    IconLoaded {
+        project: String,
+        handle: image::Handle,
+    },
     ContentResults(Result<Vec<nexo_core::modrinth::SearchHit>, String>),
     InstallProject { instance: String, project: String },
     AddFromFile(String),
@@ -236,8 +251,11 @@ impl App {
             nexo_release: None,
             content_query: String::new(),
             content_kind: ProjectKind::Mod,
+            browsing: false,
+            modrinth_query: String::new(),
             content_results: Vec::new(),
             content_searching: false,
+            icons: std::collections::HashMap::new(),
         };
 
         let task = Task::batch([
@@ -369,11 +387,12 @@ impl App {
                 self.screen = Screen::Instance(id);
                 // The details screen shows injector state, so look up what's
                 // published the first time one is opened.
-                let mut tasks = vec![Task::done(Message::SearchContent)];
+                self.browsing = false;
+                self.content_query.clear();
                 if self.nexo_release.is_none() {
-                    tasks.push(Task::done(Message::FetchNexoRelease));
+                    return Task::done(Message::FetchNexoRelease);
                 }
-                Task::batch(tasks)
+                Task::none()
             }
 
             Message::Stop(id) => {
@@ -468,6 +487,7 @@ impl App {
 
             Message::NexoModDone(Ok(())) => {
                 self.status = Status::Idle;
+                self.browsing = false;
                 self.core.clone().map(reload).unwrap_or_else(Task::none)
             }
             Message::NexoModDone(Err(err)) => {
@@ -476,7 +496,25 @@ impl App {
             }
 
             Message::ContentQueryChanged(query) => {
+                // Filters the installed list in `view`; no work to do here.
                 self.content_query = query;
+                Task::none()
+            }
+
+            Message::ModrinthQueryChanged(query) => {
+                self.modrinth_query = query;
+                Task::none()
+            }
+
+            Message::OpenModrinthBrowser => {
+                self.browsing = true;
+                // Opens on the popular projects for this instance rather than
+                // an empty list waiting to be typed into.
+                Task::done(Message::SearchContent)
+            }
+
+            Message::CloseModrinthBrowser => {
+                self.browsing = false;
                 Task::none()
             }
 
@@ -484,7 +522,15 @@ impl App {
                 self.content_kind = kind;
                 // Results are kind-specific, so re-run rather than showing
                 // mods under a "Shaders" filter.
-                Task::done(Message::SearchContent)
+                if self.browsing {
+                    return Task::done(Message::SearchContent);
+                }
+                Task::none()
+            }
+
+            Message::IconLoaded { project, handle } => {
+                self.icons.insert(project, handle);
+                Task::none()
             }
 
             Message::SearchContent => {
@@ -497,7 +543,7 @@ impl App {
                 };
 
                 self.content_searching = true;
-                let query = self.content_query.clone();
+                let query = self.modrinth_query.clone();
                 let kind = self.content_kind;
 
                 Task::perform(
@@ -534,8 +580,43 @@ impl App {
 
             Message::ContentResults(Ok(hits)) => {
                 self.content_searching = false;
+
+                // Fetch any icon not already cached. One task each, so a slow
+                // or missing icon never holds up the others.
+                let mut fetches = Vec::new();
+                for hit in &hits {
+                    let (Some(url), false) = (
+                        hit.icon_url.clone(),
+                        self.icons.contains_key(&hit.project_id),
+                    ) else {
+                        continue;
+                    };
+                    let Some(core) = self.core.clone() else { continue };
+                    let project = hit.project_id.clone();
+
+                    fetches.push(Task::perform(
+                        async move {
+                            nexo_core::skin::fetch_texture(core.http(), &url)
+                                .await
+                                .ok()
+                                .map(|icon| (project, icon))
+                        },
+                        |loaded| match loaded {
+                            Some((project, icon)) => Message::IconLoaded {
+                                project,
+                                handle: image::Handle::from_rgba(
+                                    icon.width,
+                                    icon.height,
+                                    icon.pixels,
+                                ),
+                            },
+                            None => Message::Noop,
+                        },
+                    ));
+                }
+
                 self.content_results = hits;
-                Task::none()
+                Task::batch(fetches)
             }
             Message::ContentResults(Err(err)) => {
                 self.content_searching = false;

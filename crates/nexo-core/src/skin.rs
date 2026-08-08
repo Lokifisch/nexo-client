@@ -262,12 +262,15 @@ pub async fn fetch(http: &reqwest::Client, url: &str, model: SkinModel) -> Resul
     Skin::decode(&bytes, model)
 }
 
-/// Downloads any PNG and decodes it to RGBA, without the 64×64 shape check
-/// [`Skin::decode`] applies. Capes are 64×32 and have their own layout, so
-/// they can't go through the skin path.
+/// Downloads any image and decodes it to RGBA, without the 64×64 shape check
+/// [`Skin::decode`] applies.
+///
+/// Used for capes (64×32, with their own layout) and for Modrinth project
+/// icons, which are variously PNG, WebP or JPEG — hence sniffing the format
+/// from the bytes rather than assuming one.
 pub async fn fetch_texture(http: &reqwest::Client, url: &str) -> Result<Rgba> {
     let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
-    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+    let decoded = image::load_from_memory(&bytes)
         .map_err(|err| Error::invalid(format!("could not read texture: {err}")))?
         .to_rgba8();
     let (width, height) = decoded.dimensions();
