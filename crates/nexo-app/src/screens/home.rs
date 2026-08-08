@@ -20,6 +20,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             app.cape_texture.clone(),
             app.skin_model,
             app.skin_key,
+            // Only the signed-out placeholder wears the border.
+            account.is_none(),
         ))
         .width(280)
         .height(380)

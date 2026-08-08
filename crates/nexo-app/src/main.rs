@@ -17,6 +17,7 @@ use std::sync::Arc;
 use iced::{Element, Fill, Task};
 use nexo_core::minecraft::Progress;
 use nexo_core::skin;
+use nexo_core::content::ProjectKind;
 use nexo_core::{Account, Instance, Loader, Nexo};
 
 /// Minecraft version new instances default to — the single version `Mod/`
@@ -150,6 +151,12 @@ pub struct App {
     /// Latest published Nexo Mod release, once looked up. `None` while
     /// unknown; the error is surfaced through `status` instead.
     nexo_release: Option<nexo_core::nexo_mod::Release>,
+
+    // Content browser, on the instance details screen.
+    content_query: String,
+    content_kind: ProjectKind,
+    content_results: Vec<nexo_core::modrinth::SearchHit>,
+    content_searching: bool,
 }
 
 #[derive(Clone)]
@@ -183,6 +190,15 @@ pub enum Message {
     InstallNexoMod(String),
     RemoveNexoMod(String),
     NexoModDone(Result<(), String>),
+
+    // Content browser
+    ContentQueryChanged(String),
+    ContentKindChanged(ProjectKind),
+    SearchContent,
+    ContentResults(Result<Vec<nexo_core::modrinth::SearchHit>, String>),
+    InstallProject { instance: String, project: String },
+    AddFromFile(String),
+    RemoveContent { instance: String, project: String },
 
     // Accounts
     StartSignIn,
@@ -218,6 +234,10 @@ impl App {
             skin_key: 0,
             running: std::collections::HashSet::new(),
             nexo_release: None,
+            content_query: String::new(),
+            content_kind: ProjectKind::Mod,
+            content_results: Vec::new(),
+            content_searching: false,
         };
 
         let task = Task::batch([
@@ -349,10 +369,11 @@ impl App {
                 self.screen = Screen::Instance(id);
                 // The details screen shows injector state, so look up what's
                 // published the first time one is opened.
+                let mut tasks = vec![Task::done(Message::SearchContent)];
                 if self.nexo_release.is_none() {
-                    return Task::done(Message::FetchNexoRelease);
+                    tasks.push(Task::done(Message::FetchNexoRelease));
                 }
-                Task::none()
+                Task::batch(tasks)
             }
 
             Message::Stop(id) => {
@@ -452,6 +473,154 @@ impl App {
             Message::NexoModDone(Err(err)) => {
                 self.status = Status::Error(err);
                 Task::none()
+            }
+
+            Message::ContentQueryChanged(query) => {
+                self.content_query = query;
+                Task::none()
+            }
+
+            Message::ContentKindChanged(kind) => {
+                self.content_kind = kind;
+                // Results are kind-specific, so re-run rather than showing
+                // mods under a "Shaders" filter.
+                Task::done(Message::SearchContent)
+            }
+
+            Message::SearchContent => {
+                let (Some(core), Screen::Instance(id)) = (self.core.clone(), self.screen.clone())
+                else {
+                    return Task::none();
+                };
+                let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
+                    return Task::none();
+                };
+
+                self.content_searching = true;
+                let query = self.content_query.clone();
+                let kind = self.content_kind;
+
+                Task::perform(
+                    async move {
+                        use nexo_core::modrinth::{SearchQuery, SortIndex};
+                        // Narrowed to what this instance can actually install;
+                        // an unfiltered list is mostly results that won't work.
+                        let results = core
+                            .content
+                            .modrinth()
+                            .search(&SearchQuery {
+                                text: &query,
+                                loader: match kind {
+                                    ProjectKind::Mod => instance.loader.modrinth_facet(),
+                                    _ => None,
+                                },
+                                game_version: Some(&instance.game_version),
+                                project_type: Some(kind.facet()),
+                                sort: if query.trim().is_empty() {
+                                    SortIndex::Downloads
+                                } else {
+                                    SortIndex::Relevance
+                                },
+                                limit: 30,
+                                offset: 0,
+                            })
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok(results.hits)
+                    },
+                    Message::ContentResults,
+                )
+            }
+
+            Message::ContentResults(Ok(hits)) => {
+                self.content_searching = false;
+                self.content_results = hits;
+                Task::none()
+            }
+            Message::ContentResults(Err(err)) => {
+                self.content_searching = false;
+                self.status = Status::Error(err);
+                Task::none()
+            }
+
+            Message::InstallProject { instance, project } => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let kind = self.content_kind;
+                self.status = Status::Busy("Installing".into());
+
+                Task::perform(
+                    async move {
+                        let mut target = core
+                            .instances
+                            .get(&instance)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.content
+                            .install_modrinth(&mut target, &project, kind)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.instances.save(&target).await.map_err(|e| e.to_string())
+                    },
+                    Message::NexoModDone,
+                )
+            }
+
+            Message::AddFromFile(instance) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let kind = self.content_kind;
+
+                Task::perform(
+                    async move {
+                        // Portal dialog, awaited off the UI thread so the
+                        // window keeps painting while it is open.
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Add content")
+                            .add_filter("Minecraft content", &["jar", "zip"])
+                            .pick_file()
+                            .await
+                        else {
+                            // Cancelled, which is not a failure.
+                            return Ok(());
+                        };
+
+                        let mut target = core
+                            .instances
+                            .get(&instance)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.content
+                            .install_file(&mut target, handle.path(), Some(kind))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.instances.save(&target).await.map_err(|e| e.to_string())
+                    },
+                    Message::NexoModDone,
+                )
+            }
+
+            Message::RemoveContent { instance, project } => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        let mut target = core
+                            .instances
+                            .get(&instance)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.content
+                            .remove(&mut target, &project)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.instances.save(&target).await.map_err(|e| e.to_string())
+                    },
+                    Message::NexoModDone,
+                )
             }
 
             Message::Launch(id) => {

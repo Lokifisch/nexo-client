@@ -27,3 +27,4 @@ tracing-subscriber.workspace = true
 open = "5"
 glam = "0.33.3"
 bytemuck = { version = "1.25.2", features = ["derive"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }

@@ -1,6 +1,6 @@
 use crate::theme;
 use crate::{App, Message, Screen};
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Element, Fill};
 use nexo_core::nexo_mod;
 use nexo_core::Instance;
@@ -41,7 +41,8 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         scrollable(
             column![
                 nexo_mod_card(app, instance),
-                mods_card(instance),
+                installed_card(app, instance),
+                browser_card(app, instance),
                 details_card(instance),
                 danger_card(instance, running),
             ]
@@ -218,12 +219,16 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
         .into()
 }
 
-fn mods_card(instance: &Instance) -> Element<'_, Message> {
-    let mut body = column![text("Content").size(16).color(theme::TEXT)].spacing(10);
+/// What's already in the instance, with a way to take it out again.
+fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let mut body = column![text(format!("Installed ({})", instance.mods.len()))
+        .size(16)
+        .color(theme::TEXT)]
+    .spacing(10);
 
     if instance.mods.is_empty() {
         body = body.push(
-            text("Nothing installed yet.")
+            text("Nothing installed yet. Search below, or add a file.")
                 .size(12)
                 .color(theme::MUTED),
         );
@@ -238,6 +243,13 @@ fn mods_card(instance: &Instance) -> Element<'_, Message> {
                     .spacing(2)
                     .width(Fill),
                     text(&installed.version_number).size(12).color(theme::MUTED),
+                    button(text("Remove").size(12))
+                        .padding([6, 12])
+                        .style(theme::danger_button)
+                        .on_press_maybe((!app.is_busy()).then(|| Message::RemoveContent {
+                            instance: instance.id.clone(),
+                            project: installed.project_id.clone(),
+                        })),
                 ]
                 .spacing(12)
                 .align_y(iced::Center),
@@ -250,6 +262,117 @@ fn mods_card(instance: &Instance) -> Element<'_, Message> {
         .width(Fill)
         .style(theme::card)
         .into()
+}
+
+/// Browse and install: a search field, the project-type filters, the two
+/// add-from paths, and the results.
+fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    use nexo_core::content::ProjectKind;
+
+    let search = text_input("Search Modrinth…", &app.content_query)
+        .on_input(Message::ContentQueryChanged)
+        .on_submit(Message::SearchContent)
+        .padding(10)
+        .style(theme::input)
+        .width(Fill);
+
+    let mut filters = row![].spacing(8);
+    for kind in ProjectKind::ALL {
+        filters = filters.push(
+            button(text(kind.label()).size(13))
+                .padding([8, 14])
+                // Selected filter is filled, so the current scope is obvious
+                // without a separate label.
+                .style(theme::nav_button(app.content_kind == kind))
+                .on_press(Message::ContentKindChanged(kind)),
+        );
+    }
+
+    let actions = row![
+        button(text("Search").size(13))
+            .padding([8, 16])
+            .style(theme::primary_button)
+            .on_press(Message::SearchContent),
+        button(text("Add from file").size(13))
+            .padding([8, 16])
+            .style(theme::ghost_button)
+            .on_press_maybe(
+                (!app.is_busy()).then(|| Message::AddFromFile(instance.id.clone()))
+            ),
+    ]
+    .spacing(10);
+
+    let mut body = column![
+        text("Add content").size(16).color(theme::TEXT),
+        search,
+        row![filters.width(Fill), actions].spacing(12).align_y(iced::Center),
+    ]
+    .spacing(12);
+
+    if app.content_searching {
+        body = body.push(text("Searching…").size(12).color(theme::MUTED));
+    } else if app.content_results.is_empty() {
+        body = body.push(
+            text("No results for this instance's version and loader.")
+                .size(12)
+                .color(theme::MUTED),
+        );
+    } else {
+        for hit in &app.content_results {
+            let installed = instance.mods.iter().any(|m| m.project_id == hit.project_id);
+
+            body = body.push(
+                container(
+                    row![
+                        column![
+                            text(&hit.title).size(14).color(theme::TEXT),
+                            text(&hit.description).size(11).color(theme::MUTED),
+                            text(format!("{} downloads", compact(hit.downloads)))
+                                .size(10)
+                                .color(theme::MUTED),
+                        ]
+                        .spacing(3)
+                        .width(Fill),
+                        if installed {
+                            button(text("Installed").size(12))
+                                .padding([7, 14])
+                                .style(theme::ghost_button)
+                        } else {
+                            button(text("Install").size(12))
+                                .padding([7, 14])
+                                .style(theme::primary_button)
+                                .on_press_maybe((!app.is_busy()).then(|| {
+                                    Message::InstallProject {
+                                        instance: instance.id.clone(),
+                                        project: hit.project_id.clone(),
+                                    }
+                                }))
+                        },
+                    ]
+                    .spacing(12)
+                    .align_y(iced::Center),
+                )
+                .padding(12)
+                .width(Fill)
+                .style(theme::card),
+            );
+        }
+    }
+
+    container(body)
+        .padding(18)
+        .width(Fill)
+        .style(theme::card)
+        .into()
+}
+
+/// Download counts run to millions, which are unreadable in full.
+fn compact(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1_000_000.0),
+        n if n >= 1_000 => format!("{:.1}k", n as f64 / 1_000.0),
+        n => n.to_string(),
+    }
 }
 
 fn details_card(instance: &Instance) -> Element<'_, Message> {

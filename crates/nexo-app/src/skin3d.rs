@@ -63,6 +63,9 @@ pub struct Pose {
     /// When the drag ended, which starts the hold before easing back.
     released_at: Option<Instant>,
     last_tick: Option<Instant>,
+    /// Time base for the drifting rainbow. Set on the first frame rather than
+    /// at construction, so the animation starts when the widget appears.
+    started: Option<Instant>,
 }
 
 impl Default for Pose {
@@ -73,6 +76,7 @@ impl Default for Pose {
             drag_from: None,
             released_at: None,
             last_tick: None,
+            started: None,
         }
     }
 }
@@ -105,15 +109,26 @@ pub struct SkinViewer {
     /// Changes when the textures change, so they're only uploaded then rather
     /// than every frame.
     key: u64,
+    /// Draw the rainbow border. Only while signed out: it marks the
+    /// placeholder figure, and once a real skin is shown it would just
+    /// obscure it — and animating it costs a redraw every frame.
+    outlined: bool,
 }
 
 impl SkinViewer {
-    pub fn new(skin: Arc<Rgba>, cape: Option<Arc<Rgba>>, model: SkinModel, key: u64) -> Self {
+    pub fn new(
+        skin: Arc<Rgba>,
+        cape: Option<Arc<Rgba>>,
+        model: SkinModel,
+        key: u64,
+        outlined: bool,
+    ) -> Self {
         Self {
             skin,
             cape,
             model,
             key,
+            outlined,
         }
     }
 }
@@ -165,14 +180,27 @@ impl<Message> shader::Program<Message> for SkinViewer {
 
             E::Window(Window::RedrawRequested(now)) => {
                 let previous = state.last_tick.replace(*now);
+                state.started.get_or_insert(*now);
+
+                // A visible outline drifts continuously, so it needs a frame
+                // every time regardless of what the pose is doing.
+                let animating = self.outlined;
 
                 if state.drag_from.is_some() {
-                    return None;
+                    return animating.then(shader::Action::request_redraw);
                 }
-                let released_at = state.released_at?;
+
+                let Some(released_at) = state.released_at else {
+                    return animating.then(shader::Action::request_redraw);
+                };
                 if now.duration_since(released_at) < HOLD {
-                    // Still holding the pose; wake when it expires.
-                    return Some(shader::Action::request_redraw_at(released_at + HOLD));
+                    // Still holding the pose. An animated outline needs frames
+                    // anyway; otherwise just wake when the hold expires.
+                    return Some(if animating {
+                        shader::Action::request_redraw()
+                    } else {
+                        shader::Action::request_redraw_at(released_at + HOLD)
+                    });
                 }
 
                 let dt = previous
@@ -182,7 +210,7 @@ impl<Message> shader::Program<Message> for SkinViewer {
                     .min(0.1);
 
                 state.ease_back(dt);
-                (!state.at_rest()).then(shader::Action::request_redraw)
+                (animating || !state.at_rest()).then(shader::Action::request_redraw)
             }
 
             _ => None,
@@ -197,6 +225,11 @@ impl<Message> shader::Program<Message> for SkinViewer {
             cape: self.cape.clone(),
             key: self.key,
             bounds,
+            outlined: self.outlined,
+            time: state
+                .started
+                .map(|start| start.elapsed().as_secs_f32())
+                .unwrap_or(0.0),
         }
     }
 
@@ -264,10 +297,10 @@ pub struct Geometry {
 
 /// Per-face brightness. Flat cuboids look completely flat without it.
 const SHADE_TOP: f32 = 1.0;
-const SHADE_FRONT: f32 = 0.94;
-const SHADE_SIDE: f32 = 0.80;
-const SHADE_BACK: f32 = 0.72;
-const SHADE_BOTTOM: f32 = 0.62;
+const SHADE_FRONT: f32 = 1.0;
+const SHADE_SIDE: f32 = 0.93;
+const SHADE_BACK: f32 = 0.88;
+const SHADE_BOTTOM: f32 = 0.82;
 
 /// Appends one cuboid's six faces.
 ///
@@ -417,7 +450,9 @@ fn build_model(model: SkinModel, with_cape: bool) -> Geometry {
         // box would put its *back*, hence the face flip.
         push_box(
             &mut v,
-            [0.0, 16.0, -2.6],
+            // Far enough behind the torso's back face (z = -2) to read as
+            // hanging off it rather than being tucked into it.
+            [0.0, 16.0, -3.2],
             [10.0, 16.0, 1.0],
             [0.0, 0.0],
             [64.0, 32.0],
@@ -442,6 +477,8 @@ pub struct Scene {
     cape: Option<Arc<Rgba>>,
     key: u64,
     bounds: Rectangle,
+    outlined: bool,
+    time: f32,
 }
 
 #[repr(C)]
@@ -454,7 +491,8 @@ struct Uniforms {
     /// Non-zero on the outer hull, which derives its colour from position
     /// instead of using `colour`.
     rainbow: f32,
-    _padding: f32,
+    /// Seconds since the viewer appeared, so the rainbow can drift.
+    time: f32,
 }
 
 impl shader::Primitive for Scene {
@@ -482,7 +520,7 @@ impl shader::Primitive for Scene {
                 expand: OUTLINE_OUTER,
                 textured: 0.0,
                 rainbow: 1.0,
-                _padding: 0.0,
+                time: self.time,
             },
             // Inner hull: the black stroke between rainbow and skin.
             Uniforms {
@@ -491,7 +529,7 @@ impl shader::Primitive for Scene {
                 expand: OUTLINE_INNER,
                 textured: 0.0,
                 rainbow: 0.0,
-                _padding: 0.0,
+                time: 0.0,
             },
             Uniforms {
                 mvp: self.mvp,
@@ -499,7 +537,7 @@ impl shader::Primitive for Scene {
                 expand: 0.0,
                 textured: 1.0,
                 rainbow: 0.0,
-                _padding: 0.0,
+                time: 0.0,
             },
         ];
 
@@ -571,11 +609,13 @@ impl shader::Primitive for Scene {
         let cape = self.geometry.cape_start..pipeline.vertex_count;
 
         // Hulls first, front faces culled so only their far side shows.
-        pass.set_pipeline(&pipeline.outline);
-        pass.set_bind_group(1, &pipeline.skin_binding, &[]);
-        for index in 0..2 {
-            pass.set_bind_group(0, &pipeline.uniform_bindings[index], &[]);
-            pass.draw(0..pipeline.vertex_count, 0..1);
+        if self.outlined {
+            pass.set_pipeline(&pipeline.outline);
+            pass.set_bind_group(1, &pipeline.skin_binding, &[]);
+            for index in 0..2 {
+                pass.set_bind_group(0, &pipeline.uniform_bindings[index], &[]);
+                pass.draw(0..pipeline.vertex_count, 0..1);
+            }
         }
 
         // Then the model itself, one draw per texture.
@@ -875,7 +915,11 @@ fn texture_binding(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // Unorm, not UnormSrgb. Iced's surface is not an sRGB format, so an
+        // sRGB texture would be converted to linear on sample and then stored
+        // without being converted back — which is exactly what made the model
+        // render far darker than the skin actually is.
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -932,7 +976,7 @@ fn blank_binding(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -960,12 +1004,16 @@ struct Uniforms {
     expand: f32,
     textured: f32,
     rainbow: f32,
-    padding: f32,
+    time: f32,
 };
 
 // How quickly the outline's hue cycles across the model, per unit of model
 // space. Tuned so a 32-tall figure spans roughly one full sweep.
 const RAINBOW_SCALE: f32 = 0.026;
+
+// Full hue cycles per second. Slow enough to read as a shimmer rather than
+// a strobe.
+const RAINBOW_DRIFT: f32 = 0.12;
 
 // Hue to RGB at full saturation and value. Cheaper than a general HSV
 // conversion, and the outline only ever wants fully saturated colour.
@@ -1014,7 +1062,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         if (u.rainbow > 0.5) {
             // Diagonal sweep, so the bands run across the figure rather than
             // as flat horizontal stripes.
-            let hue = fract((in.local.y + in.local.x) * RAINBOW_SCALE);
+            let hue = fract((in.local.y + in.local.x) * RAINBOW_SCALE + u.time * RAINBOW_DRIFT);
             return vec4<f32>(hue_to_rgb(hue), 1.0);
         }
         return u.colour;

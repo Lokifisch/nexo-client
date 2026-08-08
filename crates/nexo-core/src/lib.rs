@@ -6,6 +6,7 @@
 //! stays testable without a window.
 
 pub mod accounts;
+pub mod content;
 pub mod auth;
 pub mod error;
 pub mod hwkey;
@@ -37,6 +38,7 @@ pub struct Nexo {
     pub auth: Auth,
     pub installer: Installer,
     pub nexo_mod: nexo_mod::NexoMod,
+    pub content: content::Content,
     /// Games this launcher started. Shared, so every clone of `Nexo` sees the
     /// same set — the UI holds one clone and each async task another.
     pub running: running::RunningGames,
@@ -68,6 +70,7 @@ impl Nexo {
             auth: Auth::with_client(http.clone()),
             installer: Installer::new(http.clone(), paths.clone()),
             nexo_mod: nexo_mod::NexoMod::new(http.clone(), paths.clone()),
+            content: content::Content::new(http.clone(), paths.clone()),
             running: running::RunningGames::new(),
             paths,
             http,
@@ -112,6 +115,13 @@ impl Nexo {
                 minecraft::fabric::latest_stable(&self.http, &instance.game_version).await?,
             );
         }
+        // Nearly every Fabric mod needs Fabric API, and its absence surfaces
+        // as a startup crash that names nothing useful — so it is installed
+        // with the loader rather than left for the user to discover.
+        if let Err(err) = self.content.ensure_fabric_api(&mut instance).await {
+            tracing::warn!(%err, "could not install Fabric API");
+        }
+
         instance.last_played = Some(instance::now());
         self.instances.save(&instance).await?;
 
