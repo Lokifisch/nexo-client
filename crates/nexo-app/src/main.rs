@@ -131,9 +131,9 @@ pub struct App {
     /// port anyway.
     signing_in: bool,
 
-    /// Small 2D avatar for the account control. The 3D viewer uses the raw
-    /// textures below instead.
-    face: Option<image::Handle>,
+    /// Small 2D avatars, keyed by account UUID. Every signed-in account gets
+    /// one, not just the active one.
+    faces: std::collections::HashMap<String, image::Handle>,
 
     /// Textures for the 3D model: the skin, and the cape when one is
     /// equipped. `Arc` because every frame's primitive clones them.
@@ -237,6 +237,10 @@ pub enum Message {
     SetActiveAccount(String),
     RemoveAccount(String),
     AccountActionDone(Result<(), String>),
+    FaceLoaded {
+        account: String,
+        handle: image::Handle,
+    },
     SkinLoaded {
         face: image::Handle,
         skin: Arc<skin::Rgba>,
@@ -258,7 +262,7 @@ impl App {
             new_name: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
             signing_in: false,
-            face: None,
+            faces: std::collections::HashMap::new(),
             skin_texture: None,
             cape_texture: None,
             skin_model: nexo_core::SkinModel::Classic,
@@ -311,14 +315,45 @@ impl App {
                 self.accounts = accounts;
                 self.active_account = active;
 
-                // Only re-fetch the skin when the active account actually
-                // changed; reload() runs after nearly every action.
+                let mut tasks = Vec::new();
+
+                // Only re-fetch the 3D textures when the active account
+                // actually changed; reload() runs after nearly every action.
                 if changed
                     && let Some(core) = self.core.clone()
                 {
-                    return load_skin(core, self.active_account().cloned());
+                    tasks.push(load_skin(core, self.active_account().cloned()));
                 }
-                Task::none()
+
+                // Every account gets an avatar, not just the active one.
+                for account in &self.accounts {
+                    let (Some(url), false) = (
+                        account.skin_url.clone(),
+                        self.faces.contains_key(&account.uuid),
+                    ) else {
+                        continue;
+                    };
+                    let Some(core) = self.core.clone() else { continue };
+                    let (uuid, model) = (account.uuid.clone(), account.skin_model);
+
+                    tasks.push(Task::perform(
+                        async move {
+                            skin::fetch(core.http(), &url, model)
+                                .await
+                                .ok()
+                                .map(|decoded| (uuid, decoded.face(FACE_SCALE)))
+                        },
+                        |loaded| match loaded {
+                            Some((account, face)) => Message::FaceLoaded {
+                                account,
+                                handle: to_handle(face),
+                            },
+                            None => Message::Noop,
+                        },
+                    ));
+                }
+
+                Task::batch(tasks)
             }
 
             Message::VersionsLoaded(versions) => {
@@ -776,6 +811,11 @@ impl App {
                 Task::batch(fetches)
             }
 
+            Message::FaceLoaded { account, handle } => {
+                self.faces.insert(account, handle);
+                Task::none()
+            }
+
             Message::CapePreviewLoaded { cape, handle } => {
                 self.cape_previews.insert(cape, handle);
                 Task::none()
@@ -1033,7 +1073,9 @@ impl App {
                 cape,
                 model,
             } => {
-                self.face = Some(face);
+                if let Some(uuid) = self.active_account.clone() {
+                    self.faces.insert(uuid, face);
+                }
                 self.skin_texture = Some(skin);
                 self.cape_texture = cape;
                 self.skin_model = model;
@@ -1149,7 +1191,7 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
                 return placeholder_skin();
             };
 
-            let decoded = match skin::fetch(core.http(), &url, account.skin_model).await {
+            let mut decoded = match skin::fetch(core.http(), &url, account.skin_model).await {
                 Ok(decoded) => decoded,
                 Err(err) => {
                     tracing::warn!(%err, "could not load skin, using the placeholder");
@@ -1170,11 +1212,17 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
                 None => None,
             };
 
+            // The texture is authoritative, not the profile's `variant`,
+            // which can be stale or simply wrong. Rendering a slim texture
+            // with classic geometry samples arm columns that slim skins leave
+            // empty, so the arms come out full of holes.
+            let model = decoded.use_detected_model();
+
             Message::SkinLoaded {
                 face: to_handle(decoded.face(FACE_SCALE)),
                 skin: Arc::new(decoded.texture().clone()),
                 cape,
-                model: account.skin_model,
+                model,
             }
         },
         |message| message,

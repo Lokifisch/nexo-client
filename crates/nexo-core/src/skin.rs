@@ -142,6 +142,39 @@ impl Skin {
         &self.texture
     }
 
+    /// The model this texture is actually laid out for.
+    ///
+    /// The profile's `variant` is metadata and can be wrong or stale; the
+    /// texture cannot. Getting it wrong is not subtle: rendering a slim
+    /// texture with classic geometry samples column 47 of each arm, which
+    /// slim skins leave empty, so the arms come out full of holes.
+    ///
+    /// Detection uses the back of the right arm. Classic occupies x 52..56;
+    /// slim only reaches 54, so 54..56 is always empty on a slim skin and
+    /// essentially never empty on a classic one.
+    pub fn detect_model(&self) -> SkinModel {
+        if self.legacy {
+            // 64x32 skins predate slim entirely.
+            return SkinModel::Classic;
+        }
+
+        let empty = (20..32)
+            .all(|y| (54..56).all(|x| self.texture.get(x, y)[3] == 0));
+
+        if empty {
+            SkinModel::Slim
+        } else {
+            SkinModel::Classic
+        }
+    }
+
+    /// Re-reads the model from the texture, so later renders use the layout
+    /// the pixels are actually in.
+    pub fn use_detected_model(&mut self) -> SkinModel {
+        self.model = self.detect_model();
+        self.model
+    }
+
     /// Width of one arm: slim skins use 3px arms instead of 4.
     fn arm_width(&self) -> u32 {
         match self.model {
@@ -399,6 +432,45 @@ mod tests {
         assert_eq!(classic.width, 16);
         assert_eq!(slim.width, 14);
         assert_eq!(classic.height, slim.height);
+    }
+
+    /// Builds a skin whose right-arm back columns (54..56) are cleared,
+    /// which is how a slim texture always looks.
+    fn slim_skin() -> Vec<u8> {
+        let mut image = image::RgbaImage::new(64, 64);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgba([255, 0, 0, 255]);
+        }
+        for y in 20..32 {
+            for x in 54..56 {
+                image.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+            }
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn detects_slim_from_the_texture_not_the_metadata() {
+        // Declared classic, but laid out slim — the texture wins, which is
+        // what stops the arms rendering full of holes.
+        let skin = Skin::decode(&slim_skin(), SkinModel::Classic).unwrap();
+        assert_eq!(skin.detect_model(), SkinModel::Slim);
+
+        let classic = Skin::decode(&solid_skin(), SkinModel::Slim).unwrap();
+        assert_eq!(classic.detect_model(), SkinModel::Classic);
+    }
+
+    #[test]
+    fn use_detected_model_changes_what_gets_rendered() {
+        let mut skin = Skin::decode(&slim_skin(), SkinModel::Classic).unwrap();
+        assert_eq!(skin.body(1).width, 16, "classic body before detection");
+
+        assert_eq!(skin.use_detected_model(), SkinModel::Slim);
+        assert_eq!(skin.body(1).width, 14, "slim body after detection");
     }
 
     #[test]

@@ -88,13 +88,15 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
         text("Signed in").size(12).color(theme::MUTED)
     };
 
-    // Only the active account's skin is rendered, so the face is shown just
-    // for that row; the rest would need their own fetches for little gain.
-    let avatar: Element<'a, Message> = match (&app.face, is_active) {
-        (Some(handle), true) => image(handle.clone())
+    // Each account shows its own head, not just the active one. Space is
+    // reserved while it loads so rows don't reflow as avatars arrive.
+    let avatar: Element<'a, Message> = match app.faces.get(&account.uuid) {
+        Some(handle) => image(handle.clone())
             .filter_method(image::FilterMethod::Nearest)
+            .width(32)
+            .height(32)
             .into(),
-        _ => Space::new().width(32).height(32).into(),
+        None => Space::new().width(32).height(32).into(),
     };
 
     let details = column![

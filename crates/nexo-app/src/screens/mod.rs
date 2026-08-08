@@ -58,9 +58,11 @@ pub fn top_bar(app: &App) -> Element<'_, Message> {
 fn account_button(app: &App) -> Element<'_, Message> {
     match app.active_account() {
         Some(account) => {
-            let face: Element<'_, Message> = match &app.face {
+            let face: Element<'_, Message> = match app.faces.get(&account.uuid) {
                 Some(handle) => image(handle.clone())
                     .filter_method(image::FilterMethod::Nearest)
+                    .width(32)
+                    .height(32)
                     .into(),
                 None => Space::new().width(32).height(32).into(),
             };
