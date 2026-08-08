@@ -59,9 +59,9 @@ install-user: build
 	# Absolute Exec/TryExec for this variant only. The desktop session's PATH
 	# doesn't always include ~/.local/bin, and a bare `Exec=nexo` that can't
 	# be resolved fails silently from the menu — no window, no error.
-	sed -i 's|^Exec=nexo$$|Exec=$(HOME)/.local/bin/nexo|; \
-	        s|^TryExec=nexo$$|TryExec=$(HOME)/.local/bin/nexo|' \
-	    $(HOME)/.local/share/applications/nexo.desktop
+	# Kept on one line: a backslash continuation inside single quotes is
+	# literal, so splitting this feeds sed a stray backslash and newline.
+	sed -i -e 's|^Exec=nexo$$|Exec=$(HOME)/.local/bin/nexo|' -e 's|^TryExec=nexo$$|TryExec=$(HOME)/.local/bin/nexo|' $(HOME)/.local/share/applications/nexo.desktop
 	-update-desktop-database $(HOME)/.local/share/applications 2>/dev/null
 	-gtk-update-icon-cache -f -t $(HOME)/.local/share/icons/hicolor 2>/dev/null
 	-kbuildsycoca6 2>/dev/null
