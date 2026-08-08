@@ -10,13 +10,19 @@ use nexo_core::SkinModel;
 /// launcher setting — it applies wherever the account is used, so the copy
 /// says so rather than implying it is local.
 pub fn view(app: &App) -> Element<'_, Message> {
-    let Some(account) = app.active_account() else {
+    // Only presence matters here: which model to show comes from
+    // `app.skin_model`, which the toggle owns.
+    if app.active_account().is_none() {
         return crate::empty_state(
             "Sign in to change your skin",
             "Skins and capes belong to the Minecraft account, so one has to be signed in first.",
         );
-    };
+    }
 
+    signed_in(app)
+}
+
+fn signed_in(app: &App) -> Element<'_, Message> {
     let heading = crate::screens::header(
         "Skin & capes",
         "Changes apply to your Minecraft account everywhere, not just here.",
@@ -52,7 +58,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // clipped. Keeping it out is also better: the preview stays visible
     // while the controls beside it are used.
     let controls = scrollable(
-        column![skin_card(app, account.skin_model), capes_card(app)]
+        // `app.skin_model` rather than `account.skin_model`: the toggle
+        // updates the former, and highlighting from the latter meant the
+        // model changed while the buttons stayed put.
+        column![skin_card(app, app.skin_model), capes_card(app)]
             .spacing(16)
             .width(Fill),
     )

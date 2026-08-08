@@ -980,13 +980,23 @@ impl App {
 
             Message::CosmeticsDone(Ok(())) => {
                 self.status = Status::Idle;
-                // Re-read the profile so the 3D model and the cape list both
-                // reflect the change that just landed server-side.
                 let reload_capes = Task::done(Message::LoadCapes);
-                match self.core.clone() {
-                    Some(core) => Task::batch([reload(core), reload_capes]),
-                    None => reload_capes,
-                }
+                let Some(core) = self.core.clone() else {
+                    return reload_capes;
+                };
+
+                // `reload` alone is not enough: it only re-fetches the skin
+                // when the *active account* changes, and putting a cape on
+                // doesn't change which account is active — so the 3D textures
+                // were never refreshed. Ask for them explicitly. `load_skin`
+                // re-reads the profile itself, so it picks up the cape that
+                // just landed server-side.
+                let account = self.active_account().cloned();
+                Task::batch([
+                    reload(core.clone()),
+                    reload_capes,
+                    load_skin(core, account),
+                ])
             }
             Message::CosmeticsDone(Err(err)) => {
                 self.status = Status::Error(err);
