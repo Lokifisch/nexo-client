@@ -1602,9 +1602,11 @@ mod tests {
 
     #[test]
     fn reveal_takes_the_short_way_round() {
-        let mut pose = Pose::default();
         // A full extra turn past the target still counts as being there.
-        pose.yaw = BACK_YAW + std::f32::consts::TAU;
+        let mut pose = Pose {
+            yaw: BACK_YAW + std::f32::consts::TAU,
+            ..Pose::default()
+        };
         assert!(!pose.reveal(BACK_YAW));
 
         // And a target just the other side of the wrap point moves a little,
