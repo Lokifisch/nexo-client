@@ -20,6 +20,14 @@ use nexo_core::{Account, DeviceCode, Instance, Loader, Nexo};
 /// targets for v1.
 const DEFAULT_GAME_VERSION: &str = "26.1.2";
 
+/// Desktop identity. Must stay in sync with `assets/nexo.desktop`'s filename
+/// and its `StartupWMClass` key.
+const APP_ID: &str = "nexo";
+
+/// Embedded so the binary is self-sufficient — a `cargo run` from a source
+/// checkout gets the right icon without anything being installed first.
+const WINDOW_ICON: &[u8] = include_bytes!("../../../assets/icons/256.png");
+
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -35,8 +43,24 @@ fn main() -> iced::Result {
         // whole builder chain, with an error that points at the chain rather
         // than at this line.
         .theme(|_state: &App| theme::nexo())
-        .window_size((1080.0, 720.0))
-        .centered()
+        // Sets the Wayland `app_id` / X11 `WM_CLASS`. It has to match the
+        // basename of the installed `nexo.desktop`, or desktop environments
+        // can't tie the running window back to its launcher entry and show a
+        // generic placeholder icon in the task switcher instead.
+        .settings(iced::Settings {
+            id: Some(APP_ID.to_string()),
+            ..Default::default()
+        })
+        .window(iced::window::Settings {
+            size: iced::Size::new(1080.0, 720.0),
+            position: iced::window::Position::Centered,
+            min_size: Some(iced::Size::new(820.0, 560.0)),
+            // Used by X11 and by Windows for the titlebar. Wayland ignores
+            // it and takes the icon from the .desktop file matched via app_id
+            // above, which is why both mechanisms are set.
+            icon: iced::window::icon::from_file_data(WINDOW_ICON, None).ok(),
+            ..Default::default()
+        })
         .antialiasing(true)
         .run()
 }

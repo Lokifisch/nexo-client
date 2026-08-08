@@ -1,0 +1,44 @@
+Source: nexo-client
+Section: games
+Priority: optional
+Maintainer: Lokifisch <lokifisch@lokifisch.dev>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc (>= 1.85),
+               pkg-config,
+               libfontconfig-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/Lokifisch/nexo-client
+Rules-Requires-Root: no
+
+Package: nexo-client
+Architecture: amd64 arm64
+# The binary links only libc, libgcc_s and libm; wgpu and winit dlopen the
+# whole graphics/windowing stack at runtime. None of it reaches
+# ${shlibs:Depends}, so it is listed by hand here — otherwise the package
+# installs fine and then fails to open a window. Verified against the
+# libraries actually mapped into a running process, not guessed.
+# libfontconfig1 is the exception: not dlopen'd, but it supplies /etc/fonts,
+# which is how the text stack finds system fonts.
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libvulkan1,
+         libxkbcommon0,
+         libwayland-client0,
+         libx11-6,
+         libxcursor1,
+         libxi6,
+         libxrandr2,
+         libfontconfig1,
+         hicolor-icon-theme
+# Java is needed to launch Minecraft, but not to run the launcher itself —
+# you can browse and manage instances without it, and the launcher reports a
+# clear error rather than crashing when it is missing.
+Recommends: openjdk-25-jre | java25-runtime
+Description: Native Minecraft launcher
+ Nexo is a Minecraft launcher written in Rust, rendering through wgpu on the
+ GPU. It ships as a single compiled binary with no webview, no embedded
+ browser engine, and no bundled Java runtime.
+ .
+ It manages instances, signs in with a Microsoft account through the OAuth2
+ device-code flow, and installs Minecraft with the Fabric loader.

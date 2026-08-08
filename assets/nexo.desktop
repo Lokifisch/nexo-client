@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nexo
+GenericName=Minecraft Launcher
+Comment=Native Minecraft launcher — manage instances, sign in, and play
+Exec=nexo
+TryExec=nexo
+Icon=nexo
+Terminal=false
+# Game rather than the more obvious Network/Utility: KDE files this under
+# Games in the application menu, which is where people look for a launcher.
+Categories=Game;
+Keywords=minecraft;launcher;fabric;mods;game;
+# Must equal the app_id the window reports (set as `Settings.id` in
+# crates/nexo-app/src/main.rs). Without the match, KDE's task manager treats
+# the window as an unknown application and shows a placeholder icon rather
+# than pinning it to this entry.
+StartupWMClass=nexo
+StartupNotify=true
+SingleMainWindow=true

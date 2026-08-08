@@ -68,6 +68,42 @@ Groundwork, no UI yet:
 Not started: CurseForge, modpack import, mod updating, an in-app log console,
 and auto-installing Nexo Mod into an instance.
 
+## Installing
+
+### Arch (yay / paru)
+
+```sh
+yay -S nexo-client        # latest tagged release
+yay -S nexo-client-git    # current main branch
+```
+
+### Debian / Ubuntu
+
+```sh
+sudo apt install ./nexo-client_0.1.0-1_amd64.deb
+```
+
+Or build the `.deb` yourself from a source checkout:
+
+```sh
+cp -r packaging/debian debian && dpkg-buildpackage -us -uc -b
+```
+
+### From source, no packaging
+
+```sh
+make install-user     # installs to ~/.local, no root needed
+```
+
+This puts the binary at `~/.local/bin/nexo`, registers the desktop entry, and
+refreshes the icon caches, so **Nexo** appears in your application launcher
+under *Games*. `make uninstall-user` reverses it. For a system-wide install
+use `sudo make install PREFIX=/usr`.
+
+The window sets its `app_id` to `nexo`, matching `nexo.desktop`'s
+`StartupWMClass`, so KDE (and GNOME) tie the running window to the launcher
+entry rather than showing a generic placeholder icon.
+
 ## Building
 
 Needs a Rust toolchain (pinned by `rust-toolchain.toml`) and, on Linux, the
@@ -77,6 +113,11 @@ usual windowing/graphics dev packages for `winit` + `wgpu`.
 cargo run            # debug build
 cargo run --release  # what you'd actually play on
 ```
+
+Note that most of the graphics and windowing stack is `dlopen`'d at runtime by
+`wgpu` and `winit` rather than linked, so it never shows up in the binary's
+`shlibs` and has to be declared by hand in both packages. Getting that wrong
+produces a package that installs cleanly and then fails to open a window.
 
 ## Testing
 

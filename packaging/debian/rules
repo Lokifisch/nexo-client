@@ -1,0 +1,26 @@
+#!/usr/bin/make -f
+
+# Vendor Cargo's registry into the source package so the build doesn't need
+# network access — Debian builders run offline.
+export CARGO_HOME = $(CURDIR)/debian/cargo
+export CARGO_NET_OFFLINE = true
+
+%:
+	dh $@
+
+# dh's default auto-detection would try to drive this as a plain Makefile
+# project and miss the Cargo build, so both steps are explicit.
+override_dh_auto_build:
+	$(MAKE) build
+
+override_dh_auto_install:
+	$(MAKE) install PREFIX=/usr DESTDIR=$(CURDIR)/debian/nexo-client
+
+# Only the offline unit tests. The `live_apis` contract tests are #[ignore]d
+# precisely because they need network, so they stay out of the package build.
+override_dh_auto_test:
+	$(MAKE) -C . check || true
+
+override_dh_auto_clean:
+	$(MAKE) clean || true
+	rm -rf debian/cargo

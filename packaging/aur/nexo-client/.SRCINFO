@@ -1,0 +1,27 @@
+pkgbase = nexo-client
+	pkgdesc = Native Minecraft launcher — no webview, no bundled runtime
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/Lokifisch/nexo-client
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	depends = vulkan-icd-loader
+	depends = libxkbcommon
+	depends = wayland
+	depends = libx11
+	depends = libxcursor
+	depends = libxi
+	depends = libxrandr
+	depends = fontconfig
+	depends = hicolor-icon-theme
+	depends = gcc-libs
+	optdepends = jdk-openjdk: required to actually launch Minecraft (Java 25+)
+	optdepends = vulkan-radeon: Vulkan driver for AMD GPUs
+	optdepends = nvidia-utils: Vulkan driver for NVIDIA GPUs
+	optdepends = vulkan-intel: Vulkan driver for Intel GPUs
+	source = nexo-client-0.1.0.tar.gz::https://github.com/Lokifisch/nexo-client/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = nexo-client

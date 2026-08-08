@@ -1,0 +1,73 @@
+# Maintainer: Lokifisch <lokifisch@lokifisch.dev>
+#
+# Builds the current main branch. Use the `nexo-client` package instead if you
+# want the last tagged release.
+pkgname=nexo-client-git
+pkgver=0.1.0.r0.gdc962e8
+pkgrel=1
+pkgdesc="Native Minecraft launcher — no webview, no bundled runtime (git)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Lokifisch/nexo-client"
+license=('MIT')
+depends=(
+	'vulkan-icd-loader'
+	'libxkbcommon'
+	'wayland'
+	'libx11'
+	'libxcursor'
+	'libxi'
+	'libxrandr'
+	'fontconfig'
+	'hicolor-icon-theme'
+	'gcc-libs'
+)
+makedepends=('cargo' 'git')
+optdepends=(
+	'jdk-openjdk: required to actually launch Minecraft (Java 25+)'
+	'vulkan-radeon: Vulkan driver for AMD GPUs'
+	'nvidia-utils: Vulkan driver for NVIDIA GPUs'
+	'vulkan-intel: Vulkan driver for Intel GPUs'
+)
+provides=('nexo-client')
+conflicts=('nexo-client')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+	cd "$pkgname"
+	# Falls back to a 0.1.0-based revision count when no tag exists yet, so
+	# this keeps producing monotonic versions before the first release.
+	git describe --long --tags 2>/dev/null \
+		| sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+		|| printf "0.1.0.r%s.g%s" \
+			"$(git rev-list --count HEAD)" \
+			"$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+	cd "$pkgname"
+	# RUSTUP_TOOLCHAIN overrides rust-toolchain.toml's pin so a rustup-based
+	# builder uses the system Rust instead of fetching a specific version.
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+	cd "$pkgname"
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	cargo build --frozen --release
+}
+
+check() {
+	cd "$pkgname"
+	export RUSTUP_TOOLCHAIN=stable
+	# Unit tests only; the `live_apis` contract tests are #[ignore]d because
+	# they need network access, which a clean build chroot does not have.
+	cargo test --frozen --release
+}
+
+package() {
+	cd "$pkgname"
+	make install PREFIX=/usr DESTDIR="$pkgdir"
+}

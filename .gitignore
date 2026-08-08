@@ -5,3 +5,6 @@
 # Local dev overrides
 .env
 .env.local
+
+# Debian packaging staging (packaging/debian is copied to ./debian to build)
+/debian
