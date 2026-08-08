@@ -4,17 +4,20 @@
 //! player's cuboids are built as geometry, textured with the account's skin,
 //! and drawn with a depth buffer into the widget's bounds.
 //!
-//! Three passes, back to front:
+//! Signed in, this is a single textured pass.
 //!
-//! 1. an outer hull in brand violet,
-//! 2. a slightly smaller hull in black,
-//! 3. the textured model itself.
+//! Signed out, the figure becomes a hollow rainbow badge instead: the model
+//! is drawn into the depth buffer with colour writes disabled, then two
+//! inverted hulls are drawn behind it — a black one, then a wider rainbow
+//! one. A hull is the model re-drawn with its faces pushed outwards and
+//! *front* faces culled, so only its far side shows; because that far side
+//! sits behind the model, the depth test keeps it only where the model does
+//! not cover it, leaving a ring. Order matters: the model must go first or
+//! the hull fills in solid, and black must precede rainbow or the rainbow
+//! never shows outside it.
 //!
-//! The hulls are the model re-drawn with its faces pushed outwards and
-//! *front* faces culled, so only the far side shows — the classic
-//! inverted-hull outline. Two of them at different widths give the stylized
-//! border with a black inner stroke. Each cuboid expands about its own centre
-//! rather than the model's, or limbs would splay outwards as the outline grew.
+//! Each cuboid expands about its own centre rather than the model's, or
+//! limbs would splay outwards as the outline grew.
 
 use iced::widget::shader;
 use iced::wgpu;
@@ -608,18 +611,14 @@ impl shader::Primitive for Scene {
         let body = 0..self.geometry.cape_start;
         let cape = self.geometry.cape_start..pipeline.vertex_count;
 
-        // Hulls first, front faces culled so only their far side shows.
-        if self.outlined {
-            pass.set_pipeline(&pipeline.outline);
-            pass.set_bind_group(1, &pipeline.skin_binding, &[]);
-            for index in 0..2 {
-                pass.set_bind_group(0, &pipeline.uniform_bindings[index], &[]);
-                pass.draw(0..pipeline.vertex_count, 0..1);
-            }
-        }
-
-        // Then the model itself, one draw per texture.
-        pass.set_pipeline(&pipeline.model);
+        // The model always goes first, so it owns the depth buffer. Signed
+        // out it contributes depth only, which is what turns the hulls behind
+        // it into rings rather than a filled silhouette.
+        pass.set_pipeline(if self.outlined {
+            &pipeline.depth_only
+        } else {
+            &pipeline.model
+        });
         pass.set_bind_group(0, &pipeline.uniform_bindings[2], &[]);
         pass.set_bind_group(1, &pipeline.skin_binding, &[]);
         pass.draw(body, 0..1);
@@ -630,6 +629,17 @@ impl shader::Primitive for Scene {
             pass.set_bind_group(1, cape_binding, &[]);
             pass.draw(cape, 0..1);
         }
+
+        if self.outlined {
+            pass.set_pipeline(&pipeline.outline);
+            pass.set_bind_group(1, &pipeline.skin_binding, &[]);
+            // Black before rainbow: the wider rainbow hull sits further back,
+            // so it only survives the depth test outside the black one.
+            for index in [1usize, 0] {
+                pass.set_bind_group(0, &pipeline.uniform_bindings[index], &[]);
+                pass.draw(0..pipeline.vertex_count, 0..1);
+            }
+        }
     }
 }
 
@@ -638,6 +648,7 @@ impl shader::Primitive for Scene {
 pub struct ModelPipeline {
     model: wgpu::RenderPipeline,
     outline: wgpu::RenderPipeline,
+    depth_only: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     vertex_capacity: u32,
     vertex_count: u32,
@@ -732,7 +743,7 @@ impl shader::Pipeline for ModelPipeline {
             ],
         };
 
-        let make_pipeline = |label: &str, cull: wgpu::Face| {
+        let make_pipeline = |label: &str, cull: wgpu::Face, writes: wgpu::ColorWrites| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -748,7 +759,7 @@ impl shader::Pipeline for ModelPipeline {
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
+                        write_mask: writes,
                     })],
                     compilation_options: Default::default(),
                 }),
@@ -770,9 +781,14 @@ impl shader::Pipeline for ModelPipeline {
             })
         };
 
-        let model = make_pipeline("nexo.skin3d.model", wgpu::Face::Back);
+        let model = make_pipeline("nexo.skin3d.model", wgpu::Face::Back, wgpu::ColorWrites::ALL);
         // Front faces culled, so an expanded hull shows only its far side.
-        let outline = make_pipeline("nexo.skin3d.outline", wgpu::Face::Front);
+        let outline =
+            make_pipeline("nexo.skin3d.outline", wgpu::Face::Front, wgpu::ColorWrites::ALL);
+        // Depth only. Used signed-out to punch the figure's shape out of the
+        // hulls behind it without drawing the skin itself.
+        let depth_only =
+            make_pipeline("nexo.skin3d.depth", wgpu::Face::Back, wgpu::ColorWrites::empty());
 
         let uniforms: [wgpu::Buffer; 3] = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -815,6 +831,7 @@ impl shader::Pipeline for ModelPipeline {
         Self {
             model,
             outline,
+            depth_only,
             vertices,
             vertex_capacity: 0,
             vertex_count: 0,
