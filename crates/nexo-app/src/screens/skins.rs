@@ -42,6 +42,7 @@ fn signed_in(app: &App) -> Element<'_, Message> {
                 // No border here: this is a real skin, and the ring exists to
                 // mark the signed-out placeholder.
                 false,
+                app.cape_reveal,
             ))
             .width(240)
             .height(340),

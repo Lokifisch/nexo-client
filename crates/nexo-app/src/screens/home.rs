@@ -22,6 +22,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             app.skin_key,
             // Only the signed-out placeholder wears the border.
             account.is_none(),
+            // Home never turns the model round; that belongs to the cape
+            // screen, where the back is the thing being changed.
+            0,
         ))
         .width(280)
         .height(380)

@@ -39,6 +39,14 @@ use std::time::{Duration, Instant};
 const REST_YAW: f32 = -0.62;
 const REST_PITCH: f32 = 0.20;
 
+/// Turned away from the viewer, so the cape is what's facing you. Half a turn
+/// from the front pose, keeping the same slight lean.
+const BACK_YAW: f32 = REST_YAW + std::f32::consts::PI;
+
+/// Close enough to a pose to treat it as already there, in radians. Stops a
+/// reveal re-triggering a move the model has effectively already made.
+const ARRIVED: f32 = 0.02;
+
 /// How long a dragged pose is left alone before it eases back.
 const HOLD: Duration = Duration::from_secs(5);
 
@@ -77,6 +85,12 @@ pub struct Pose {
     /// Time base for the drifting rainbow. Set on the first frame rather than
     /// at construction, so the animation starts when the widget appears.
     started: Option<Instant>,
+    /// Where the model settles. Normally the front pose, but a cape change
+    /// moves it round the back and leaves it there — on a cape screen, the
+    /// cape is the thing worth looking at.
+    rest_yaw: f32,
+    /// Last reveal request acted on, so one request moves the model once.
+    reveal_seen: u64,
 }
 
 impl Default for Pose {
@@ -88,26 +102,63 @@ impl Default for Pose {
             released_at: None,
             last_tick: None,
             started: None,
+            rest_yaw: REST_YAW,
+            reveal_seen: 0,
         }
     }
 }
 
 impl Pose {
     fn at_rest(&self) -> bool {
-        (self.yaw - REST_YAW).abs() < SETTLED && (self.pitch - REST_PITCH).abs() < SETTLED
+        (self.yaw - self.rest_yaw).abs() < SETTLED && (self.pitch - REST_PITCH).abs() < SETTLED
     }
 
     /// Eases toward the rest pose, framerate-independently.
     fn ease_back(&mut self, dt: f32) {
         let t = 1.0 - (-RETURN_RATE * dt).exp();
-        self.yaw += (REST_YAW - self.yaw) * t;
+        self.yaw += (self.rest_yaw - self.yaw) * t;
         self.pitch += (REST_PITCH - self.pitch) * t;
         if self.at_rest() {
-            self.yaw = REST_YAW;
+            self.yaw = self.rest_yaw;
             self.pitch = REST_PITCH;
             self.released_at = None;
         }
     }
+
+    /// Points the model at whichever side a reveal asked for, if it isn't
+    /// effectively there already.
+    ///
+    /// Returns whether anything needs animating, so an unchanged pose doesn't
+    /// start a redraw loop that has nothing to draw.
+    fn reveal(&mut self, target_yaw: f32) -> bool {
+        self.rest_yaw = target_yaw;
+
+        // Compare on the shortest angle between the two, so a model sitting
+        // at the target plus a full turn still counts as already there.
+        let delta = shortest_angle(target_yaw - self.yaw);
+        if delta.abs() < ARRIVED {
+            self.yaw = target_yaw;
+            return false;
+        }
+
+        // Rotate the short way round rather than unwinding several turns.
+        self.yaw = target_yaw - delta;
+        // Nothing is being held, so easing starts immediately.
+        self.released_at = None;
+        true
+    }
+}
+
+/// Wraps an angle to (-pi, pi].
+fn shortest_angle(mut radians: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    while radians > PI {
+        radians -= TAU;
+    }
+    while radians <= -PI {
+        radians += TAU;
+    }
+    radians
 }
 
 /// The widget program. Cheap to construct each `view`; the GPU resources live
@@ -124,6 +175,10 @@ pub struct SkinViewer {
     /// placeholder figure, and once a real skin is shown it would just
     /// obscure it — and animating it costs a redraw every frame.
     outlined: bool,
+    /// Bumped to ask the model to turn round and show its back. Carried as a
+    /// counter rather than a flag so repeating the same request moves it
+    /// again, while a redraw on its own does not.
+    reveal_back: u64,
 }
 
 impl SkinViewer {
@@ -133,6 +188,7 @@ impl SkinViewer {
         model: SkinModel,
         key: u64,
         outlined: bool,
+        reveal_back: u64,
     ) -> Self {
         Self {
             skin,
@@ -140,6 +196,7 @@ impl SkinViewer {
             model,
             key,
             outlined,
+            reveal_back,
         }
     }
 }
@@ -197,21 +254,34 @@ impl<Message> shader::Program<Message> for SkinViewer {
                 // every time regardless of what the pose is doing.
                 let animating = self.outlined;
 
+                // A new reveal request retargets the resting pose.
+                if state.reveal_seen != self.reveal_back {
+                    state.reveal_seen = self.reveal_back;
+                    // The very first frame carries the initial counter and
+                    // must not spin the model on load.
+                    if self.reveal_back != 0 {
+                        state.reveal(BACK_YAW);
+                    }
+                }
+
                 if state.drag_from.is_some() {
                     return animating.then(shader::Action::request_redraw);
                 }
 
-                let Some(released_at) = state.released_at else {
-                    return animating.then(shader::Action::request_redraw);
-                };
-                if now.duration_since(released_at) < HOLD {
-                    // Still holding the pose. An animated outline needs frames
-                    // anyway; otherwise just wake when the hold expires.
+                // Hold a dragged pose before easing away from it. A reveal
+                // clears this, so switching a cape doesn't wait five seconds.
+                if let Some(released_at) = state.released_at
+                    && now.duration_since(released_at) < HOLD
+                {
                     return Some(if animating {
                         shader::Action::request_redraw()
                     } else {
                         shader::Action::request_redraw_at(released_at + HOLD)
                     });
+                }
+
+                if state.at_rest() {
+                    return animating.then(shader::Action::request_redraw);
                 }
 
                 let dt = previous
@@ -221,7 +291,7 @@ impl<Message> shader::Program<Message> for SkinViewer {
                     .min(0.1);
 
                 state.ease_back(dt);
-                (animating || !state.at_rest()).then(shader::Action::request_redraw)
+                Some(shader::Action::request_redraw())
             }
 
             _ => None,
@@ -1501,6 +1571,58 @@ mod tests {
             .abs()
             / 2.0;
         assert!(area >= 8.0, "triangle does not cover clip space, area {area}");
+    }
+
+    #[test]
+    fn reveal_moves_to_the_back_and_settles_there() {
+        let mut pose = Pose::default();
+        assert!(pose.reveal(BACK_YAW), "a turn from the front needs animating");
+
+        for _ in 0..600 {
+            pose.ease_back(1.0 / 60.0);
+        }
+        assert!(pose.at_rest());
+        // The back is now where it settles, not the front it started from.
+        assert!((pose.yaw - BACK_YAW).abs() < SETTLED);
+    }
+
+    #[test]
+    fn revealing_a_pose_it_already_holds_does_nothing() {
+        let mut pose = Pose::default();
+        pose.yaw = BACK_YAW;
+
+        assert!(
+            !pose.reveal(BACK_YAW),
+            "already facing away, so there is nothing to animate"
+        );
+        assert_eq!(pose.yaw, BACK_YAW);
+    }
+
+    #[test]
+    fn reveal_takes_the_short_way_round() {
+        let mut pose = Pose::default();
+        // A full extra turn past the target still counts as being there.
+        pose.yaw = BACK_YAW + std::f32::consts::TAU;
+        assert!(!pose.reveal(BACK_YAW));
+
+        // And a target just the other side of the wrap point moves a little,
+        // not almost all the way round.
+        let mut pose = Pose::default();
+        pose.yaw = BACK_YAW - 0.3;
+        assert!(pose.reveal(BACK_YAW));
+        assert!(
+            (pose.yaw - (BACK_YAW - 0.3)).abs() < 0.001,
+            "should not have unwound a whole turn to get there"
+        );
+    }
+
+    #[test]
+    fn shortest_angle_wraps_into_half_turns() {
+        use std::f32::consts::{PI, TAU};
+        assert!((shortest_angle(0.5) - 0.5).abs() < 1e-5);
+        assert!((shortest_angle(TAU + 0.5) - 0.5).abs() < 1e-5);
+        assert!((shortest_angle(-TAU - 0.5) + 0.5).abs() < 1e-5);
+        assert!(shortest_angle(PI + 0.1) < 0.0, "just past half a turn goes negative");
     }
 
     #[test]

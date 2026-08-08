@@ -170,6 +170,9 @@ pub struct App {
     // Skin and cape management.
     capes: Vec<nexo_core::cosmetics::Cape>,
     cape_previews: std::collections::HashMap<String, image::Handle>,
+    /// Bumped whenever a cape is put on or taken off, which asks the 3D model
+    /// to turn round so the change is actually visible.
+    cape_reveal: u64,
 }
 
 #[derive(Clone)]
@@ -279,6 +282,7 @@ impl App {
             icons: std::collections::HashMap::new(),
             capes: Vec::new(),
             cape_previews: std::collections::HashMap::new(),
+            cape_reveal: 0,
         };
 
         let task = Task::batch([
@@ -947,6 +951,9 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Changing cape".into());
+                // Bumped on press, not on completion, so the model starts
+                // turning while the request is still in flight.
+                self.cape_reveal += 1;
 
                 Task::perform(
                     async move {
@@ -966,6 +973,7 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Removing cape".into());
+                self.cape_reveal += 1;
 
                 Task::perform(
                     async move {
