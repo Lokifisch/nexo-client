@@ -72,11 +72,26 @@ fn main() -> iced::Result {
         .run()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Not `Copy`: the details screen carries which instance it's showing, so the
+/// selected instance survives navigating away and back.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     Home,
     Instances,
     Accounts,
+    /// Details for one instance, by id.
+    Instance(String),
+}
+
+impl Screen {
+    /// Which sidebar entry should light up. The details screen belongs to
+    /// Instances, so the rail doesn't go blank when you drill in.
+    fn nav_group(&self) -> Screen {
+        match self {
+            Screen::Instance(_) => Screen::Instances,
+            other => other.clone(),
+        }
+    }
 }
 
 /// Transient feedback shown in the header strip.
@@ -117,6 +132,15 @@ pub struct App {
     /// out. Held as ready-to-draw handles so `view` never does image work.
     body: Option<image::Handle>,
     face: Option<image::Handle>,
+
+    /// Instances currently running, so Play can become Stop. Mirrors the
+    /// core registry rather than querying it during `view`, which must stay
+    /// free of locking.
+    running: std::collections::HashSet<String>,
+
+    /// Latest published Nexo Mod release, once looked up. `None` while
+    /// unknown; the error is surfaced through `status` instead.
+    nexo_release: Option<nexo_core::nexo_mod::Release>,
 }
 
 #[derive(Clone)]
@@ -138,8 +162,18 @@ pub enum Message {
     CreateInstance,
     InstanceCreated(Result<(), String>),
     DeleteInstance(String),
+    OpenInstance(String),
     Launch(String),
+    Stop(String),
+    GameExited(String),
     LaunchProgress(Progress),
+
+    // Nexo Mod injector
+    FetchNexoRelease,
+    NexoReleaseLoaded(Result<nexo_core::nexo_mod::Release, String>),
+    InstallNexoMod(String),
+    RemoveNexoMod(String),
+    NexoModDone(Result<(), String>),
 
     // Accounts
     StartSignIn,
@@ -168,6 +202,8 @@ impl App {
             signing_in: false,
             body: None,
             face: None,
+            running: std::collections::HashSet::new(),
+            nexo_release: None,
         };
 
         let task = Task::batch([
@@ -295,6 +331,115 @@ impl App {
                 )
             }
 
+            Message::OpenInstance(id) => {
+                self.screen = Screen::Instance(id);
+                // The details screen shows injector state, so look up what's
+                // published the first time one is opened.
+                if self.nexo_release.is_none() {
+                    return Task::done(Message::FetchNexoRelease);
+                }
+                Task::none()
+            }
+
+            Message::Stop(id) => {
+                if let Some(core) = &self.core {
+                    core.stop(&id);
+                }
+                // The registry deregisters asynchronously; GameExited flips
+                // the button back once the process is actually gone.
+                Task::none()
+            }
+
+            Message::GameExited(id) => {
+                self.running.remove(&id);
+                if !self.is_busy() {
+                    self.status = Status::Idle;
+                }
+                Task::none()
+            }
+
+            Message::FetchNexoRelease => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        core.nexo_mod
+                            .latest_including_prereleases()
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::NexoReleaseLoaded,
+                )
+            }
+
+            Message::NexoReleaseLoaded(Ok(release)) => {
+                self.nexo_release = Some(release);
+                Task::none()
+            }
+            Message::NexoReleaseLoaded(Err(err)) => {
+                tracing::warn!(%err, "could not look up the latest Nexo Mod release");
+                Task::none()
+            }
+
+            Message::InstallNexoMod(id) => {
+                let (Some(core), Some(release)) = (self.core.clone(), self.nexo_release.clone())
+                else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Installing Nexo Mod".into());
+
+                Task::perform(
+                    async move {
+                        let mut instance =
+                            core.instances.get(&id).await.map_err(|e| e.to_string())?;
+                        core.nexo_mod
+                            .install(&mut instance, &release)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        // Persist the content list, or the install is
+                        // invisible after a restart.
+                        core.instances
+                            .save(&instance)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::NexoModDone,
+                )
+            }
+
+            Message::RemoveNexoMod(id) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Removing Nexo Mod".into());
+
+                Task::perform(
+                    async move {
+                        let mut instance =
+                            core.instances.get(&id).await.map_err(|e| e.to_string())?;
+                        core.nexo_mod
+                            .remove(&mut instance)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.instances
+                            .save(&instance)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::NexoModDone,
+                )
+            }
+
+            Message::NexoModDone(Ok(())) => {
+                self.status = Status::Idle;
+                self.core.clone().map(reload).unwrap_or_else(Task::none)
+            }
+            Message::NexoModDone(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
+            }
+
             Message::Launch(id) => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
@@ -313,21 +458,24 @@ impl App {
                     Message::LaunchProgress,
                 );
 
+                // Marked running up front so the button flips immediately
+                // rather than after the install finishes. Any failure path
+                // still ends in GameExited, which clears it again.
+                self.running.insert(id.clone());
+
                 let run = Task::perform(
                     async move {
-                        match core.play(&id, Some(&tx)).await {
-                            // The child is intentionally dropped: stdio is
-                            // inherited, so the game keeps running on its own
-                            // once spawned.
-                            Ok(_child) => {
-                                let _ = tx.send(Progress::Done);
-                            }
-                            Err(err) => {
-                                let _ = tx.send(Progress::Failed(err.to_string()));
-                            }
+                        if let Err(err) = core.play(&id, Some(&tx)).await {
+                            let _ = tx.send(Progress::Failed(err.to_string()));
+                        } else {
+                            let _ = tx.send(Progress::Done);
+                            // Resolves when the JVM exits, however that
+                            // happens — quit from the menu, crash, or Stop.
+                            core.running.wait_for_exit(&id).await;
                         }
+                        id
                     },
-                    |()| Message::Noop,
+                    Message::GameExited,
                 );
 
                 Task::batch([progress, run])
@@ -437,10 +585,18 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let body = match self.screen {
+        let body = match &self.screen {
             Screen::Home => screens::home::view(self),
             Screen::Instances => screens::instances::view(self),
             Screen::Accounts => screens::accounts::view(self),
+            Screen::Instance(id) => match self.instances.iter().find(|i| &i.id == id) {
+                Some(instance) => screens::instance::view(self, instance),
+                // Deleted from under us, or an id that no longer exists.
+                None => empty_state(
+                    "That instance is gone",
+                    "It was deleted, or its folder was removed outside the launcher.",
+                ),
+            },
         };
 
         let content = iced::widget::column![

@@ -81,36 +81,51 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         None => "Never played".to_string(),
     };
 
-    let details = column![
-        text(&instance.name).size(17).color(theme::TEXT),
-        text(loader_line).size(12).color(theme::MUTED),
-        text(last_played).size(11).color(theme::MUTED),
-    ]
-    .spacing(3)
-    .width(Fill);
+    let running = app.running.contains(&instance.id);
 
-    // Launching without an account would fail deep inside the pipeline, so
-    // the button is disabled until one exists — the sidebar already explains
-    // how to fix that.
-    let can_launch = !app.is_busy() && app.active_account().is_some();
-
-    let play = button(text("Play").size(14))
-        .padding([9, 22])
-        .style(theme::primary_button)
-        .on_press_maybe(can_launch.then(|| Message::Launch(instance.id.clone())));
-
-    let delete = button(text("Delete").size(13))
-        .padding([9, 14])
-        .style(theme::danger_button)
-        .on_press_maybe((!app.is_busy()).then(|| Message::DeleteInstance(instance.id.clone())));
-
-    container(
-        row![details, delete, play]
-            .spacing(12)
-            .align_y(iced::Center),
+    // The whole card is the way into the details screen; a plain text button
+    // keeps it looking like a card rather than a control.
+    let details = button(
+        column![
+            text(&instance.name).size(17).color(theme::TEXT),
+            text(loader_line).size(12).color(theme::MUTED),
+            // Owned, not borrowed: the widget outlives this function.
+            text(if running {
+                "Running".to_string()
+            } else {
+                last_played
+            })
+            .size(11)
+            .color(if running { theme::MINT } else { theme::MUTED }),
+        ]
+        .spacing(3)
+        .width(Fill),
     )
-    .padding(16)
+    .padding(0)
     .width(Fill)
-    .style(theme::card)
-    .into()
+    .style(theme::bare_button)
+    .on_press(Message::OpenInstance(instance.id.clone()));
+
+    // Play becomes Stop while the game is up, mirroring the details screen so
+    // the same instance never shows two different states.
+    let action: iced::Element<'a, Message> = if running {
+        button(text("Stop").size(14))
+            .padding([9, 22])
+            .style(theme::stop_button)
+            .on_press(Message::Stop(instance.id.clone()))
+            .into()
+    } else {
+        let can_launch = !app.is_busy() && app.active_account().is_some();
+        button(text("Play").size(14))
+            .padding([9, 22])
+            .style(theme::primary_button)
+            .on_press_maybe(can_launch.then(|| Message::Launch(instance.id.clone())))
+            .into()
+    };
+
+    container(row![details, action].spacing(12).align_y(iced::Center))
+        .padding(16)
+        .width(Fill)
+        .style(theme::card)
+        .into()
 }

@@ -1,0 +1,322 @@
+use crate::theme;
+use crate::{App, Message, Screen};
+use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::{Element, Fill};
+use nexo_core::nexo_mod;
+use nexo_core::Instance;
+
+/// Details for a single instance: what it is, how to launch it, its content,
+/// and the Nexo Mod injector.
+pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let running = app.running.contains(&instance.id);
+
+    let back = button(text("‹ Instances").size(13))
+        .padding([6, 12])
+        .style(theme::ghost_button)
+        .on_press(Message::Navigate(Screen::Instances));
+
+    let heading = column![
+        text(&instance.name).size(28).color(theme::TEXT),
+        text(format!(
+            "{} {}{}",
+            instance.loader,
+            instance.game_version,
+            instance
+                .loader_version
+                .as_deref()
+                .map(|v| format!(" · loader {v}"))
+                .unwrap_or_default()
+        ))
+        .size(13)
+        .color(theme::MUTED),
+    ]
+    .spacing(4)
+    .width(Fill);
+
+    let content = column![
+        back,
+        row![heading, launch_control(app, instance, running)]
+            .spacing(16)
+            .align_y(iced::Center),
+        scrollable(
+            column![
+                nexo_mod_card(app, instance),
+                mods_card(instance),
+                details_card(instance),
+                danger_card(instance, running),
+            ]
+            .spacing(14)
+            .width(Fill)
+        )
+        .height(Fill),
+    ]
+    .spacing(18)
+    .height(Fill);
+
+    content.into()
+}
+
+/// Play, or Stop while the game is up. Red and relabelled rather than a
+/// separate control, so there's one obvious thing to press either way.
+fn launch_control<'a>(
+    app: &'a App,
+    instance: &'a Instance,
+    running: bool,
+) -> Element<'a, Message> {
+    let signed_in = app.active_account().is_some();
+
+    if running {
+        return button(text("Stop").size(15))
+            .padding([12, 32])
+            .style(theme::stop_button)
+            .on_press(Message::Stop(instance.id.clone()))
+            .into();
+    }
+
+    let label = if app.is_busy() { "Preparing…" } else { "Play" };
+
+    let play = button(text(label).size(15))
+        .padding([12, 32])
+        .style(theme::primary_button)
+        // Launching without an account fails deep in the pipeline, so the
+        // button is disabled until there is one.
+        .on_press_maybe(
+            (!app.is_busy() && signed_in).then(|| Message::Launch(instance.id.clone())),
+        );
+
+    if signed_in {
+        play.into()
+    } else {
+        column![
+            play,
+            text("Sign in first").size(11).color(theme::MUTED),
+        ]
+        .spacing(4)
+        .align_x(iced::Center)
+        .into()
+    }
+}
+
+/// The injector. Compatibility is decided by the release's own manifest, so
+/// this states what the published build targets rather than assuming.
+fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let installed = instance
+        .mods
+        .iter()
+        .find(|m| m.project_id == nexo_mod::PROJECT_ID);
+
+    let mut body = column![
+        row![
+            column![
+                text("Nexo Mod").size(17).color(theme::TEXT),
+                text("The client-side half — cosmetics, position obscuring, macros.")
+                    .size(12)
+                    .color(theme::MUTED),
+            ]
+            .spacing(3)
+            .width(Fill),
+        ]
+        .align_y(iced::Center),
+    ]
+    .spacing(12);
+
+    // Bound with an explicit type: the arms produce different widget types,
+    // so inference can't pick one for `push`.
+    let section: Element<'a, Message> = match (&app.nexo_release, installed) {
+        // Installed, and we know what's published.
+        (Some(release), Some(current)) => {
+            let up_to_date = current.version_number == release.manifest.mod_version;
+            let status = if up_to_date {
+                text(format!("Installed — {} (latest)", current.version_number))
+                    .size(12)
+                    .color(theme::MINT)
+            } else {
+                text(format!(
+                    "Installed — {} · {} is available",
+                    current.version_number, release.manifest.mod_version
+                ))
+                .size(12)
+                .color(theme::TEXT)
+            };
+
+            let mut actions = row![].spacing(10);
+            if !up_to_date && release.manifest.supports(instance) {
+                actions = actions.push(
+                    button(text("Update").size(13))
+                        .padding([8, 16])
+                        .style(theme::primary_button)
+                        .on_press(Message::InstallNexoMod(instance.id.clone())),
+                );
+            }
+            actions = actions.push(
+                button(text("Remove").size(13))
+                    .padding([8, 16])
+                    .style(theme::danger_button)
+                    .on_press(Message::RemoveNexoMod(instance.id.clone())),
+            );
+
+            column![status, actions].spacing(10).into()
+        }
+
+        // Not installed, and a release is known.
+        (Some(release), None) => match release.manifest.incompatibility(instance) {
+            // Refuses rather than adapting: installing never changes an
+            // instance's loader or Minecraft version.
+            Some(reason) => column![
+                text(reason).size(12).color(theme::MUTED),
+                text("Create an instance on that version to use Nexo Mod.")
+                    .size(11)
+                    .color(theme::MUTED),
+            ]
+            .spacing(4)
+            .into(),
+
+            None => column![
+                text(format!(
+                    "Compatible — version {} targets {} {}",
+                    release.manifest.mod_version,
+                    release.manifest.loader,
+                    release.manifest.minecraft_version
+                ))
+                .size(12)
+                .color(theme::MINT),
+                button(text("Install Nexo Mod").size(14))
+                    .padding([10, 20])
+                    .style(theme::primary_button)
+                    .on_press_maybe(
+                        (!app.is_busy()).then(|| Message::InstallNexoMod(instance.id.clone()))
+                    ),
+            ]
+            .spacing(10)
+            .into(),
+        },
+
+        // Release lookup hasn't landed (or failed) — offer a retry rather
+        // than a dead card.
+        (None, installed) => {
+            let line = match installed {
+                Some(current) => format!("Installed — {}", current.version_number),
+                None => "Checking for the latest release…".to_string(),
+            };
+            column![
+                text(line).size(12).color(theme::MUTED),
+                button(text("Check again").size(13))
+                    .padding([8, 16])
+                    .style(theme::ghost_button)
+                    .on_press(Message::FetchNexoRelease),
+            ]
+            .spacing(10)
+            .into()
+        }
+    };
+    body = body.push(section);
+
+    container(body)
+        .padding(18)
+        .width(Fill)
+        .style(theme::card)
+        .into()
+}
+
+fn mods_card(instance: &Instance) -> Element<'_, Message> {
+    let mut body = column![text("Content").size(16).color(theme::TEXT)].spacing(10);
+
+    if instance.mods.is_empty() {
+        body = body.push(
+            text("Nothing installed yet.")
+                .size(12)
+                .color(theme::MUTED),
+        );
+    } else {
+        for installed in &instance.mods {
+            body = body.push(
+                row![
+                    column![
+                        text(&installed.name).size(14).color(theme::TEXT),
+                        text(&installed.file_name).size(11).color(theme::MUTED),
+                    ]
+                    .spacing(2)
+                    .width(Fill),
+                    text(&installed.version_number).size(12).color(theme::MUTED),
+                ]
+                .spacing(12)
+                .align_y(iced::Center),
+            );
+        }
+    }
+
+    container(body)
+        .padding(18)
+        .width(Fill)
+        .style(theme::card)
+        .into()
+}
+
+fn details_card(instance: &Instance) -> Element<'_, Message> {
+    let field = |label: &'static str, value: String| {
+        row![
+            text(label).size(12).color(theme::MUTED).width(140),
+            text(value).size(12).color(theme::TEXT),
+        ]
+        .spacing(10)
+    };
+
+    container(
+        column![
+            text("Details").size(16).color(theme::TEXT),
+            Space::new().height(4),
+            field("Folder", instance.id.clone()),
+            field("Minecraft", instance.game_version.clone()),
+            field("Loader", instance.loader.to_string()),
+            field(
+                "Memory",
+                instance
+                    .memory_mb
+                    .map(|mb| format!("{mb} MiB"))
+                    .unwrap_or_else(|| "Default".to_string()),
+            ),
+            field(
+                "Java",
+                instance
+                    .java_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "Detected automatically".to_string()),
+            ),
+        ]
+        .spacing(8),
+    )
+    .padding(18)
+    .width(Fill)
+    .style(theme::card)
+    .into()
+}
+
+fn danger_card(instance: &Instance, running: bool) -> Element<'_, Message> {
+    container(
+        row![
+            column![
+                text("Delete instance").size(14).color(theme::TEXT),
+                text("Removes the folder and everything in it, saves included.")
+                    .size(12)
+                    .color(theme::MUTED),
+            ]
+            .spacing(3)
+            .width(Fill),
+            button(text("Delete").size(13))
+                .padding([9, 16])
+                .style(theme::danger_button)
+                // Deleting the folder out from under a running game would
+                // leave it writing into nothing.
+                .on_press_maybe(
+                    (!running).then(|| Message::DeleteInstance(instance.id.clone()))
+                ),
+        ]
+        .spacing(12)
+        .align_y(iced::Center),
+    )
+    .padding(18)
+    .width(Fill)
+    .style(theme::card)
+    .into()
+}

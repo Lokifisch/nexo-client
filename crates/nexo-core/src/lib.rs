@@ -13,7 +13,9 @@ pub mod instance;
 pub mod java;
 pub mod minecraft;
 pub mod modrinth;
+pub mod nexo_mod;
 pub mod paths;
+pub mod running;
 pub mod skin;
 pub mod util;
 
@@ -34,6 +36,10 @@ pub struct Nexo {
     pub accounts: AccountStore,
     pub auth: Auth,
     pub installer: Installer,
+    pub nexo_mod: nexo_mod::NexoMod,
+    /// Games this launcher started. Shared, so every clone of `Nexo` sees the
+    /// same set — the UI holds one clone and each async task another.
+    pub running: running::RunningGames,
     http: reqwest::Client,
 }
 
@@ -61,6 +67,8 @@ impl Nexo {
             accounts: AccountStore::new(&paths),
             auth: Auth::with_client(http.clone()),
             installer: Installer::new(http.clone(), paths.clone()),
+            nexo_mod: nexo_mod::NexoMod::new(http.clone(), paths.clone()),
+            running: running::RunningGames::new(),
             paths,
             http,
         })
@@ -75,12 +83,19 @@ impl Nexo {
     }
 
     /// Full play path: refresh the account, install anything missing, then
-    /// spawn the game. Returns the child so the caller can stream its log.
+    /// spawn the game and register it as running.
+    ///
+    /// Returns once the JVM is up, not when the game exits — await
+    /// [`running::RunningGames::wait_for_exit`] for that. The child itself is
+    /// handed to the registry, which is the only place that can stop it.
     pub async fn play(
         &self,
         instance_id: &str,
         progress: Option<&UnboundedSender<Progress>>,
-    ) -> Result<tokio::process::Child> {
+    ) -> Result<()> {
+        if self.running.is_running(instance_id) {
+            return Err(Error::invalid("that instance is already running"));
+        }
         let mut instance = self.instances.get(instance_id).await?;
 
         // Before anything expensive: a launch with a dead token wastes a
@@ -107,6 +122,13 @@ impl Nexo {
             extra_jvm_args: Vec::new(),
         };
 
-        self.launcher().launch(&instance, &version, &options).await
+        let child = self.launcher().launch(&instance, &version, &options).await?;
+        self.running.register(instance_id, child);
+        Ok(())
+    }
+
+    /// Stops a running game. Returns `false` if it wasn't running.
+    pub fn stop(&self, instance_id: &str) -> bool {
+        self.running.stop(instance_id)
     }
 }

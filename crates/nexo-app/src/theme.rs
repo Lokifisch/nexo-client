@@ -116,6 +116,33 @@ pub fn ghost_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Stop, shown in place of Play while a game is running. Filled red rather
+/// than outlined: it occupies the primary action's slot, so it needs the same
+/// visual weight while clearly not being "go".
+pub fn stop_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let (background, glow) = match status {
+        button::Status::Active => (DANGER, 12.0),
+        button::Status::Hovered => (lighten(DANGER, 0.10), 20.0),
+        button::Status::Pressed => (darken(DANGER, 0.10), 8.0),
+        button::Status::Disabled => (alpha(DANGER, 0.25), 0.0),
+    };
+
+    button::Style {
+        background: Some(Background::Color(background)),
+        text_color: Color::WHITE,
+        border: Border {
+            radius: 10.0.into(),
+            ..Border::default()
+        },
+        shadow: Shadow {
+            color: alpha(DANGER, 0.5),
+            offset: Vector::new(0.0, 0.0),
+            blur_radius: glow,
+        },
+        ..Default::default()
+    }
+}
+
 /// Destructive actions. Red rather than brand-violet so it can't be confused
 /// with a primary action.
 pub fn danger_button(_theme: &Theme, status: button::Status) -> button::Style {
@@ -163,6 +190,20 @@ pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::
             shadow: Shadow::default(),
             ..Default::default()
         }
+    }
+}
+
+/// Chromeless button, for making a block of content clickable without it
+/// reading as a control.
+/// `status` is deliberately ignored: the hover affordance belongs to the card
+/// this sits inside, and tinting here would double up on it.
+pub fn bare_button(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        text_color: TEXT,
+        border: Border::default(),
+        shadow: Shadow::default(),
+        ..Default::default()
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod home;
+pub mod instance;
 pub mod instances;
 
 use crate::theme;
@@ -13,7 +14,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
         button(text(label).size(15))
             .width(Fill)
             .padding([10, 14])
-            .style(theme::nav_button(app.screen == screen))
+            .style(theme::nav_button(app.screen.nav_group() == screen))
             .on_press(Message::Navigate(screen))
     };
 
