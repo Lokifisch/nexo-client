@@ -1379,10 +1379,12 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 @vertex
 fn vs_outline(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     // One oversized triangle covering the viewport — cheaper than a quad and
-    // avoids a seam down the diagonal.
-    let i = i32(index);
-    let x = f32((i << 1u) & 2) * 2.0 - 1.0;
-    let y = f32(i & 1) * 4.0 - 1.0;
+    // with no seam down the diagonal. Indices 0,1,2 must give (-1,-1),
+    // (3,-1) and (-1,3); note `& 2u` on both terms, since using `& 1u` for y
+    // collapses two corners onto each other and the triangle degenerates to a
+    // line that rasterises nothing.
+    let x = f32((index << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(index & 2u) * 2.0 - 1.0;
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
@@ -1471,6 +1473,34 @@ mod tests {
             let length = glam::Vec3::from(vertex.expand).length();
             assert!(length <= 1.001, "expand direction was not normalized");
         }
+    }
+
+    /// Mirrors `vs_outline` in OUTLINE_SHADER. Kept in step by hand, because
+    /// a wrong formula here produces no output at all rather than an error —
+    /// the triangle degenerates and rasterises nothing, which looks exactly
+    /// like the outline being switched off.
+    fn fullscreen_corner(index: u32) -> (f32, f32) {
+        let x = ((index << 1) & 2) as f32 * 2.0 - 1.0;
+        let y = (index & 2) as f32 * 2.0 - 1.0;
+        (x, y)
+    }
+
+    #[test]
+    fn fullscreen_triangle_covers_the_viewport() {
+        let corners: Vec<_> = (0..3).map(fullscreen_corner).collect();
+        assert_eq!(corners, vec![(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)]);
+
+        // All three distinct, or the triangle collapses to a line.
+        assert_ne!(corners[0], corners[1]);
+        assert_ne!(corners[1], corners[2]);
+        assert_ne!(corners[0], corners[2]);
+
+        // Non-zero area, and large enough to cover clip space in both axes.
+        let area = ((corners[1].0 - corners[0].0) * (corners[2].1 - corners[0].1)
+            - (corners[2].0 - corners[0].0) * (corners[1].1 - corners[0].1))
+            .abs()
+            / 2.0;
+        assert!(area >= 8.0, "triangle does not cover clip space, area {area}");
     }
 
     #[test]
