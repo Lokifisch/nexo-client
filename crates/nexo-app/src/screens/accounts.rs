@@ -1,21 +1,27 @@
 use crate::theme;
 use crate::{empty_state, App, Message};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, image, row, scrollable, text, Space};
 use iced::{Element, Fill};
 use nexo_core::Account;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let sign_in = button(text("Add account").size(14))
-        .padding([10, 20])
-        .style(theme::primary_button)
-        .on_press_maybe(
-            (app.core.is_some() && app.pending_code.is_none()).then_some(Message::StartSignIn),
-        );
+    let add = button(
+        text(if app.signing_in {
+            "Waiting for browser…"
+        } else {
+            "Add account"
+        })
+        .size(14),
+    )
+    .padding([10, 20])
+    .style(theme::primary_button)
+    .on_press_maybe((!app.signing_in && app.core.is_some()).then_some(Message::StartSignIn));
 
     let list: Element<'_, Message> = if app.accounts.is_empty() {
         empty_state(
             "No accounts signed in",
-            "Sign in with the Microsoft account that owns Minecraft: Java Edition.",
+            "Sign in with the Microsoft account that owns Minecraft: Java Edition. \
+             Your browser opens on Microsoft's page — there's no code to type.",
         )
     } else {
         scrollable(
@@ -29,43 +35,35 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let mut content = column![crate::screens::header(
         "Accounts",
-        "Signed in through Microsoft's device-code flow.",
-        Some(sign_in.into()),
+        "Signed in through Microsoft in your browser.",
+        Some(add.into()),
     )]
     .spacing(20)
     .height(Fill);
 
-    if let Some(code) = &app.pending_code {
-        content = content.push(device_code_prompt(code));
+    if app.signing_in {
+        content = content.push(waiting_notice());
     }
 
     content.push(list).into()
 }
 
-/// The waiting state: shows the code prominently, since the user has to read
-/// it off the screen and type it into a browser on any device.
-fn device_code_prompt(code: &nexo_core::DeviceCode) -> Element<'_, Message> {
+/// Shown while the browser tab is open. The sign-in happens entirely out
+/// there, so this exists to explain why the app appears to be idling.
+fn waiting_notice() -> Element<'static, Message> {
     container(
         column![
-            text("Finish signing in").size(16).color(theme::TEXT),
-            text("Go to this page and enter the code below. This window keeps waiting.")
-                .size(13)
-                .color(theme::MUTED),
-            row![
-                text(&code.verification_uri).size(14).color(theme::MINT),
-                button(text("Open in browser").size(13))
-                    .padding([6, 12])
-                    .style(theme::ghost_button)
-                    .on_press(Message::OpenVerificationUrl),
-            ]
-            .spacing(12)
-            .align_y(iced::Center),
-            // Oversized because it gets transcribed by hand, often onto a
-            // phone; magenta rather than the primary violet so it reads as
-            // the thing to act on, not just another accented label.
-            text(&code.user_code).size(34).color(theme::MAGENTA),
+            text("Finish signing in in your browser")
+                .size(16)
+                .color(theme::TEXT),
+            text(
+                "A tab should have opened on Microsoft's sign-in page. \
+                 This window picks up automatically once you're done."
+            )
+            .size(13)
+            .color(theme::MUTED),
         ]
-        .spacing(10),
+        .spacing(8),
     )
     .padding(20)
     .width(Fill)
@@ -88,6 +86,15 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
             .color(theme::MUTED)
     } else {
         text("Signed in").size(12).color(theme::MUTED)
+    };
+
+    // Only the active account's skin is rendered, so the face is shown just
+    // for that row; the rest would need their own fetches for little gain.
+    let avatar: Element<'a, Message> = match (&app.face, is_active) {
+        (Some(handle), true) => image(handle.clone())
+            .filter_method(image::FilterMethod::Nearest)
+            .into(),
+        _ => Space::new().width(32).height(32).into(),
     };
 
     let details = column![
@@ -115,9 +122,13 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
             .on_press(Message::RemoveAccount(account.uuid.clone())),
     );
 
-    container(row![details, actions].spacing(12).align_y(iced::Center))
-        .padding(16)
-        .width(Fill)
-        .style(theme::card)
-        .into()
+    container(
+        row![avatar, details, actions]
+            .spacing(14)
+            .align_y(iced::Center),
+    )
+    .padding(16)
+    .width(Fill)
+    .style(theme::card)
+    .into()
 }

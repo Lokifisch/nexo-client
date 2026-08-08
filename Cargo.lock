@@ -2543,6 +2543,7 @@ dependencies = [
  "directories",
  "futures",
  "hex",
+ "image",
  "reqwest",
  "serde",
  "serde_json",

@@ -11,10 +11,11 @@
 mod screens;
 mod theme;
 
-use iced::widget::{column, container, row, text};
+use iced::widget::image;
 use iced::{Element, Fill, Task};
 use nexo_core::minecraft::Progress;
-use nexo_core::{Account, DeviceCode, Instance, Loader, Nexo};
+use nexo_core::skin;
+use nexo_core::{Account, Instance, Loader, Nexo};
 
 /// Minecraft version new instances default to — the single version `Mod/`
 /// targets for v1.
@@ -27,6 +28,12 @@ const APP_ID: &str = "nexo";
 /// Embedded so the binary is self-sufficient — a `cargo run` from a source
 /// checkout gets the right icon without anything being installed first.
 const WINDOW_ICON: &[u8] = include_bytes!("../../../assets/icons/256.png");
+
+/// Upscale factors for the two skin renders. Skins are tiny pixel art (an
+/// 8×8 face, a 16×32 body), so these are integer multipliers applied with
+/// nearest-neighbour sampling.
+const BODY_SCALE: u32 = 11;
+const FACE_SCALE: u32 = 4;
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -54,7 +61,7 @@ fn main() -> iced::Result {
         .window(iced::window::Settings {
             size: iced::Size::new(1080.0, 720.0),
             position: iced::window::Position::Centered,
-            min_size: Some(iced::Size::new(820.0, 560.0)),
+            min_size: Some(iced::Size::new(880.0, 600.0)),
             // Used by X11 and by Windows for the titlebar. Wayland ignores
             // it and takes the icon from the .desktop file matched via app_id
             // above, which is why both mechanisms are set.
@@ -67,6 +74,7 @@ fn main() -> iced::Result {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    Home,
     Instances,
     Accounts,
 }
@@ -100,8 +108,15 @@ pub struct App {
     new_name: String,
     new_version: String,
 
-    /// Present while a device-code sign-in is waiting on the user.
-    pending_code: Option<DeviceCode>,
+    /// True while the browser sign-in is outstanding, so the button can't be
+    /// pressed twice — the second attempt would fail to bind the callback
+    /// port anyway.
+    signing_in: bool,
+
+    /// Rendered skin of the active account, or the placeholder when signed
+    /// out. Held as ready-to-draw handles so `view` never does image work.
+    body: Option<image::Handle>,
+    face: Option<image::Handle>,
 }
 
 #[derive(Clone)]
@@ -128,19 +143,21 @@ pub enum Message {
 
     // Accounts
     StartSignIn,
-    DeviceCodeReady(Result<DeviceCode, String>),
-    OpenVerificationUrl,
     SignInFinished(Result<Account, String>),
     SetActiveAccount(String),
     RemoveAccount(String),
     AccountActionDone(Result<(), String>),
+    SkinLoaded {
+        body: image::Handle,
+        face: image::Handle,
+    },
 }
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
         let app = Self {
             core: None,
-            screen: Screen::Instances,
+            screen: Screen::Home,
             instances: Vec::new(),
             accounts: Vec::new(),
             active_account: None,
@@ -148,13 +165,20 @@ impl App {
             status: Status::Busy("Starting up".into()),
             new_name: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
-            pending_code: None,
+            signing_in: false,
+            body: None,
+            face: None,
         };
 
-        let task = Task::perform(
-            async { Nexo::new().await.map_err(|e| e.to_string()) },
-            Message::Booted,
-        );
+        let task = Task::batch([
+            Task::perform(
+                async { Nexo::new().await.map_err(|e| e.to_string()) },
+                Message::Booted,
+            ),
+            // Draw the placeholder immediately rather than leaving a hole
+            // until the account list has loaded.
+            Task::done(placeholder_skin()),
+        ]);
 
         (app, task)
     }
@@ -176,9 +200,18 @@ impl App {
                 accounts,
                 active,
             } => {
+                let changed = self.active_account != active;
                 self.instances = instances;
                 self.accounts = accounts;
                 self.active_account = active;
+
+                // Only re-fetch the skin when the active account actually
+                // changed; reload() runs after nearly every action.
+                if changed {
+                    if let Some(core) = self.core.clone() {
+                        return load_skin(core, self.active_account().cloned());
+                    }
+                }
                 Task::none()
             }
 
@@ -323,32 +356,28 @@ impl App {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
-                self.status = Status::Busy("Asking Microsoft for a code".into());
-
-                Task::perform(
-                    async move { core.auth.start_device_code().await.map_err(|e| e.to_string()) },
-                    Message::DeviceCodeReady,
-                )
-            }
-
-            Message::DeviceCodeReady(Ok(code)) => {
-                let Some(core) = self.core.clone() else {
+                if self.signing_in {
                     return Task::none();
-                };
-                self.status = Status::Idle;
-                self.pending_code = Some(code.clone());
+                }
 
-                // Opening the browser is a convenience; the code and URL stay
-                // on screen so a failed open isn't a dead end.
-                let _ = open::that_detached(&code.verification_uri);
+                self.signing_in = true;
+                self.status = Status::Busy("Waiting for you to sign in in your browser".into());
 
                 Task::perform(
                     async move {
                         let account = core
                             .auth
-                            .poll_for_account(&code, || true)
+                            // The callback fires once the loopback listener
+                            // is bound, so the browser can't beat us to the
+                            // redirect.
+                            .login(|url| {
+                                if let Err(err) = open::that_detached(url) {
+                                    tracing::warn!(%err, "couldn't open a browser");
+                                }
+                            })
                             .await
                             .map_err(|e| e.to_string())?;
+
                         core.accounts
                             .upsert(account.clone())
                             .await
@@ -358,26 +387,15 @@ impl App {
                     Message::SignInFinished,
                 )
             }
-            Message::DeviceCodeReady(Err(err)) => {
-                self.status = Status::Error(err);
-                Task::none()
-            }
-
-            Message::OpenVerificationUrl => {
-                if let Some(code) = &self.pending_code {
-                    let _ = open::that_detached(&code.verification_uri);
-                }
-                Task::none()
-            }
 
             Message::SignInFinished(Ok(account)) => {
-                self.pending_code = None;
+                self.signing_in = false;
                 self.status = Status::Idle;
                 tracing::info!(user = %account.username, "signed in");
                 self.core.clone().map(reload).unwrap_or_else(Task::none)
             }
             Message::SignInFinished(Err(err)) => {
-                self.pending_code = None;
+                self.signing_in = false;
                 self.status = Status::Error(err);
                 Task::none()
             }
@@ -409,27 +427,38 @@ impl App {
                 self.status = Status::Error(err);
                 Task::none()
             }
+
+            Message::SkinLoaded { body, face } => {
+                self.body = Some(body);
+                self.face = Some(face);
+                Task::none()
+            }
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
         let body = match self.screen {
+            Screen::Home => screens::home::view(self),
             Screen::Instances => screens::instances::view(self),
             Screen::Accounts => screens::accounts::view(self),
         };
 
-        let content = column![screens::status_bar(&self.status), body]
-            .spacing(16)
-            .padding(24)
-            .width(Fill)
-            .height(Fill);
+        let content = iced::widget::column![
+            screens::top_bar(self),
+            screens::status_bar(&self.status),
+            body
+        ]
+        .spacing(16)
+        .padding(24)
+        .width(Fill)
+        .height(Fill);
 
-        row![screens::sidebar(self), content]
+        iced::widget::row![screens::sidebar(self), content]
             .height(Fill)
             .into()
     }
 
-    /// The account launches will use, for display in the sidebar.
+    /// The account launches will use.
     fn active_account(&self) -> Option<&Account> {
         let uuid = self.active_account.as_deref()?;
         self.accounts.iter().find(|a| a.uuid == uuid)
@@ -447,13 +476,7 @@ fn reload(core: Nexo) -> Task<Message> {
         async move {
             let instances = core.instances.list().await.unwrap_or_default();
             let accounts = core.accounts.list().await.unwrap_or_default();
-            let active = core
-                .accounts
-                .active()
-                .await
-                .ok()
-                .flatten()
-                .map(|a| a.uuid);
+            let active = core.accounts.active().await.ok().flatten().map(|a| a.uuid);
             (instances, accounts, active)
         },
         |(instances, accounts, active)| Message::Loaded {
@@ -470,11 +493,7 @@ fn load_versions(core: Nexo) -> Task<Message> {
     Task::perform(
         async move {
             match core.installer.version_manifest().await {
-                Ok(manifest) => manifest
-                    .releases()
-                    .map(|v| v.id.clone())
-                    .take(60)
-                    .collect(),
+                Ok(manifest) => manifest.releases().map(|v| v.id.clone()).take(60).collect(),
                 Err(err) => {
                     tracing::warn!(%err, "could not load the Minecraft version list");
                     Vec::new()
@@ -485,12 +504,52 @@ fn load_versions(core: Nexo) -> Task<Message> {
     )
 }
 
-/// Shared empty-state block, used by both screens.
+/// Fetches and renders the account's skin, falling back to the placeholder
+/// for a signed-out state, an account with no skin, or a failed download —
+/// none of which is worth surfacing as an error.
+fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
+    Task::perform(
+        async move {
+            let Some(account) = account else {
+                return None;
+            };
+            let url = account.skin_url.clone()?;
+
+            match skin::fetch(core.http(), &url, account.skin_model).await {
+                Ok(skin) => Some((
+                    to_handle(skin.body(BODY_SCALE)),
+                    to_handle(skin.face(FACE_SCALE)),
+                )),
+                Err(err) => {
+                    tracing::warn!(%err, "could not load skin, using the placeholder");
+                    None
+                }
+            }
+        },
+        |rendered| match rendered {
+            Some((body, face)) => Message::SkinLoaded { body, face },
+            None => placeholder_skin(),
+        },
+    )
+}
+
+fn placeholder_skin() -> Message {
+    Message::SkinLoaded {
+        body: to_handle(skin::placeholder_body(BODY_SCALE)),
+        face: to_handle(skin::placeholder_face(FACE_SCALE)),
+    }
+}
+
+fn to_handle(rgba: skin::Rgba) -> image::Handle {
+    image::Handle::from_rgba(rgba.width, rgba.height, rgba.pixels)
+}
+
+/// Shared empty-state block, used by several screens.
 fn empty_state<'a>(title: &'a str, hint: &'a str) -> Element<'a, Message> {
-    container(
-        column![
-            text(title).size(18).color(theme::TEXT),
-            text(hint).size(14).color(theme::MUTED),
+    iced::widget::container(
+        iced::widget::column![
+            iced::widget::text(title).size(18).color(theme::TEXT),
+            iced::widget::text(hint).size(14).color(theme::MUTED),
         ]
         .spacing(8),
     )

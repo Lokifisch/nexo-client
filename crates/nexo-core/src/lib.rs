@@ -13,10 +13,11 @@ pub mod java;
 pub mod minecraft;
 pub mod modrinth;
 pub mod paths;
+pub mod skin;
 pub mod util;
 
 pub use accounts::AccountStore;
-pub use auth::{Account, Auth, DeviceCode};
+pub use auth::{Account, Auth, SkinModel};
 pub use error::{Error, Result};
 pub use instance::{Instance, InstanceStore, Loader};
 pub use paths::Paths;

@@ -1,0 +1,393 @@
+//! Minecraft skin decoding and 2D rendering.
+//!
+//! Produces two things the UI needs: the front of the head (the small avatar
+//! next to a username) and a front-on full-body render.
+//!
+//! Skins are 64×64 pixel-art textures — occasionally still 64×32 for very old
+//! accounts. Scaling is deliberately nearest-neighbour: any smoothing turns
+//! pixel art into mush.
+//!
+//! Every part has an *overlay* layer (hat, jacket, sleeves, trouser legs)
+//! drawn over the base with alpha. Skipping those is the usual reason a
+//! rendered skin looks subtly wrong — hair and jacket detail simply vanish.
+
+use crate::auth::SkinModel;
+use crate::error::{Error, Result};
+
+/// An RGBA8 image, ready to hand to the UI layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rgba {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major, 4 bytes per pixel.
+    pub pixels: Vec<u8>,
+}
+
+impl Rgba {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            pixels: vec![0; (width * height * 4) as usize],
+        }
+    }
+
+    fn set(&mut self, x: u32, y: u32, rgba: [u8; 4]) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let index = ((y * self.width + x) * 4) as usize;
+        self.pixels[index..index + 4].copy_from_slice(&rgba);
+    }
+
+    fn get(&self, x: u32, y: u32) -> [u8; 4] {
+        if x >= self.width || y >= self.height {
+            return [0, 0, 0, 0];
+        }
+        let index = ((y * self.width + x) * 4) as usize;
+        [
+            self.pixels[index],
+            self.pixels[index + 1],
+            self.pixels[index + 2],
+            self.pixels[index + 3],
+        ]
+    }
+
+    /// Alpha-composites one pixel over whatever is already there — how
+    /// overlay layers get applied.
+    fn blend(&mut self, x: u32, y: u32, src: [u8; 4]) {
+        if src[3] == 0 {
+            return;
+        }
+        if src[3] == 255 {
+            self.set(x, y, src);
+            return;
+        }
+
+        let dst = self.get(x, y);
+        let sa = src[3] as f32 / 255.0;
+        let da = dst[3] as f32 / 255.0;
+        let out_a = sa + da * (1.0 - sa);
+        if out_a <= 0.0 {
+            self.set(x, y, [0, 0, 0, 0]);
+            return;
+        }
+
+        let mut out = [0u8; 4];
+        for i in 0..3 {
+            let s = src[i] as f32 / 255.0;
+            let d = dst[i] as f32 / 255.0;
+            out[i] = (((s * sa + d * da * (1.0 - sa)) / out_a) * 255.0).round() as u8;
+        }
+        out[3] = (out_a * 255.0).round() as u8;
+        self.set(x, y, out);
+    }
+
+    /// Nearest-neighbour upscale by an integer factor.
+    fn scaled(&self, factor: u32) -> Rgba {
+        if factor <= 1 {
+            return self.clone();
+        }
+        let mut out = Rgba::new(self.width * factor, self.height * factor);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let pixel = self.get(x, y);
+                for dy in 0..factor {
+                    for dx in 0..factor {
+                        out.set(x * factor + dx, y * factor + dy, pixel);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A decoded skin texture.
+pub struct Skin {
+    texture: Rgba,
+    model: SkinModel,
+    /// Old 64×32 skins have no left-limb regions, so the right ones get
+    /// mirrored instead.
+    legacy: bool,
+}
+
+impl Skin {
+    pub fn decode(png: &[u8], model: SkinModel) -> Result<Self> {
+        let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .map_err(|err| Error::invalid(format!("could not read skin image: {err}")))?
+            .to_rgba8();
+
+        let (width, height) = decoded.dimensions();
+        if width != 64 || (height != 64 && height != 32) {
+            return Err(Error::invalid(format!(
+                "unexpected skin dimensions {width}×{height}, expected 64×64"
+            )));
+        }
+
+        Ok(Self {
+            texture: Rgba {
+                width,
+                height,
+                pixels: decoded.into_raw(),
+            },
+            model,
+            legacy: height == 32,
+        })
+    }
+
+    /// Width of one arm: slim skins use 3px arms instead of 4.
+    fn arm_width(&self) -> u32 {
+        match self.model {
+            SkinModel::Classic => 4,
+            SkinModel::Slim => 3,
+        }
+    }
+
+    /// Copies a rectangle out of the texture, optionally mirrored (needed
+    /// when synthesising left limbs from right ones on legacy skins).
+    fn part(&self, x: u32, y: u32, w: u32, h: u32, mirror: bool) -> Rgba {
+        let mut out = Rgba::new(w, h);
+        for row in 0..h {
+            for col in 0..w {
+                let src_col = if mirror { w - 1 - col } else { col };
+                out.set(col, row, self.texture.get(x + src_col, y + row));
+            }
+        }
+        out
+    }
+
+    fn draw(&self, target: &mut Rgba, part: &Rgba, at_x: u32, at_y: u32) {
+        for y in 0..part.height {
+            for x in 0..part.width {
+                target.blend(at_x + x, at_y + y, part.get(x, y));
+            }
+        }
+    }
+
+    /// The front of the head with the hat layer composited on, scaled up.
+    /// This is the avatar shown beside a username.
+    pub fn face(&self, scale: u32) -> Rgba {
+        let mut face = self.part(8, 8, 8, 8, false);
+
+        // Hat layer. Present on every modern skin and often carries the hair.
+        let hat = self.part(40, 8, 8, 8, false);
+        for y in 0..8 {
+            for x in 0..8 {
+                face.blend(x, y, hat.get(x, y));
+            }
+        }
+
+        face.scaled(scale)
+    }
+
+    /// Front-on full body: head, torso, both arms, both legs, each with its
+    /// overlay layer.
+    pub fn body(&self, scale: u32) -> Rgba {
+        let arm = self.arm_width();
+        // 8-wide torso flanked by an arm on each side; 8 head + 12 torso + 12 legs.
+        let width = 8 + arm * 2;
+        let height = 32;
+        let mut canvas = Rgba::new(width, height);
+
+        // Torso sits centred, so everything else is placed relative to it.
+        let torso_x = arm;
+
+        // Head, centred over the torso.
+        let head = self.part(8, 8, 8, 8, false);
+        self.draw(&mut canvas, &head, torso_x, 0);
+        let hat = self.part(40, 8, 8, 8, false);
+        self.draw(&mut canvas, &hat, torso_x, 0);
+
+        // Torso + jacket.
+        let torso = self.part(20, 20, 8, 12, false);
+        self.draw(&mut canvas, &torso, torso_x, 8);
+        if !self.legacy {
+            let jacket = self.part(20, 36, 8, 12, false);
+            self.draw(&mut canvas, &jacket, torso_x, 8);
+        }
+
+        // The player's right arm/leg appear on the viewer's left.
+        let right_arm = self.part(44, 20, arm, 12, false);
+        self.draw(&mut canvas, &right_arm, 0, 8);
+        if !self.legacy {
+            let right_sleeve = self.part(44, 36, arm, 12, false);
+            self.draw(&mut canvas, &right_sleeve, 0, 8);
+        }
+
+        // Legacy skins store only one arm and one leg; the other side is a
+        // mirror image, which is exactly how the game rendered them.
+        let left_arm = if self.legacy {
+            self.part(44, 20, arm, 12, true)
+        } else {
+            self.part(36, 52, arm, 12, false)
+        };
+        self.draw(&mut canvas, &left_arm, torso_x + 8, 8);
+        if !self.legacy {
+            let left_sleeve = self.part(52, 52, arm, 12, false);
+            self.draw(&mut canvas, &left_sleeve, torso_x + 8, 8);
+        }
+
+        let right_leg = self.part(4, 20, 4, 12, false);
+        self.draw(&mut canvas, &right_leg, torso_x, 20);
+        if !self.legacy {
+            let right_pant = self.part(4, 36, 4, 12, false);
+            self.draw(&mut canvas, &right_pant, torso_x, 20);
+        }
+
+        let left_leg = if self.legacy {
+            self.part(4, 20, 4, 12, true)
+        } else {
+            self.part(20, 52, 4, 12, false)
+        };
+        self.draw(&mut canvas, &left_leg, torso_x + 4, 20);
+        if !self.legacy {
+            let left_pant = self.part(4, 52, 4, 12, false);
+            self.draw(&mut canvas, &left_pant, torso_x + 4, 20);
+        }
+
+        canvas.scaled(scale)
+    }
+}
+
+/// Downloads a skin texture and decodes it.
+pub async fn fetch(http: &reqwest::Client, url: &str, model: SkinModel) -> Result<Skin> {
+    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+    Skin::decode(&bytes, model)
+}
+
+/// Stand-in shown before sign-in.
+///
+/// A brand-styled silhouette rather than Minecraft's Steve, because that
+/// texture is Mojang's asset and this project ships none. It's generated in
+/// the same body proportions as a real render, so swapping in a fetched
+/// default skin later is a change of source, not of layout — see
+/// [`placeholder_face`] for the matching avatar.
+pub fn placeholder_body(scale: u32) -> Rgba {
+    let mut canvas = Rgba::new(16, 32);
+
+    // Head, torso, arms and legs, in the same geometry `Skin::body` uses.
+    let regions: [(u32, u32, u32, u32); 6] = [
+        (4, 0, 8, 8),   // head
+        (4, 8, 8, 12),  // torso
+        (0, 8, 4, 12),  // right arm
+        (12, 8, 4, 12), // left arm
+        (4, 20, 4, 12), // right leg
+        (8, 20, 4, 12), // left leg
+    ];
+
+    for (x, y, w, h) in regions {
+        for py in y..y + h {
+            for px in x..x + w {
+                canvas.set(px, py, gradient(py, 32));
+            }
+        }
+    }
+
+    canvas.scaled(scale)
+}
+
+/// Avatar counterpart to [`placeholder_body`], so a signed-out state looks
+/// consistent wherever a face would normally appear.
+pub fn placeholder_face(scale: u32) -> Rgba {
+    let mut canvas = Rgba::new(8, 8);
+    for y in 0..8 {
+        for x in 0..8 {
+            canvas.set(x, y, gradient(y, 8));
+        }
+    }
+    canvas.scaled(scale)
+}
+
+/// Vertical violet-to-magenta ramp, sampled from the logo's gradient stops.
+fn gradient(y: u32, height: u32) -> [u8; 4] {
+    let t = y as f32 / (height.max(1) - 1).max(1) as f32;
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    [
+        lerp(0x7b, 0xff),
+        lerp(0x3c, 0x3c),
+        lerp(0xff, 0xac),
+        0xff,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a 64×64 skin where every pixel is opaque red, so any region
+    /// copied out of it is easy to assert on.
+    fn solid_skin() -> Vec<u8> {
+        let mut image = image::RgbaImage::new(64, 64);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgba([255, 0, 0, 255]);
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn face_is_eight_by_eight_before_scaling() {
+        let skin = Skin::decode(&solid_skin(), SkinModel::Classic).unwrap();
+        let face = skin.face(1);
+        assert_eq!((face.width, face.height), (8, 8));
+        assert_eq!(face.get(0, 0), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn scaling_is_nearest_neighbour() {
+        let skin = Skin::decode(&solid_skin(), SkinModel::Classic).unwrap();
+        let face = skin.face(8);
+        assert_eq!((face.width, face.height), (64, 64));
+        // A blur would have produced intermediate values at the edges.
+        assert_eq!(face.get(63, 63), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn slim_model_is_two_pixels_narrower() {
+        let png = solid_skin();
+        let classic = Skin::decode(&png, SkinModel::Classic).unwrap().body(1);
+        let slim = Skin::decode(&png, SkinModel::Slim).unwrap().body(1);
+        assert_eq!(classic.width, 16);
+        assert_eq!(slim.width, 14);
+        assert_eq!(classic.height, slim.height);
+    }
+
+    #[test]
+    fn rejects_wrong_dimensions() {
+        let mut image = image::RgbaImage::new(32, 32);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgba([0, 0, 0, 255]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        assert!(Skin::decode(&png, SkinModel::Classic).is_err());
+    }
+
+    #[test]
+    fn placeholder_matches_classic_body_geometry() {
+        let placeholder = placeholder_body(1);
+        assert_eq!((placeholder.width, placeholder.height), (16, 32));
+        // Corners sit outside the silhouette and must stay transparent.
+        assert_eq!(placeholder.get(0, 0)[3], 0);
+        // Centre of the torso is filled.
+        assert_eq!(placeholder.get(8, 12)[3], 255);
+    }
+
+    #[test]
+    fn blend_composites_semi_transparent_over_opaque() {
+        let mut canvas = Rgba::new(1, 1);
+        canvas.set(0, 0, [0, 0, 0, 255]);
+        canvas.blend(0, 0, [255, 255, 255, 128]);
+        let result = canvas.get(0, 0);
+        assert_eq!(result[3], 255);
+        // Halfway between black and white, allowing for rounding.
+        assert!((result[0] as i32 - 128).abs() <= 2);
+    }
+}

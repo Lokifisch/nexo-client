@@ -1,36 +1,41 @@
-//! Microsoft account sign-in via the OAuth2 device-code flow.
+//! Microsoft account sign-in via the OAuth2 authorization-code flow.
+//!
+//! The user clicks sign in, their normal browser opens on Microsoft's login
+//! page, and when they finish, Microsoft redirects to a one-shot HTTP server
+//! this process runs on loopback. Nothing to read off the screen and retype —
+//! the same shape Modrinth's launcher and `Mod/`'s in-game sign-in use.
 //!
 //! Four hops, all required, in this order:
 //!
-//! 1. **MSA** — device code issued, user approves in a browser, we poll for
-//!    an access token.
+//! 1. **MSA** — browser login, redirect captured, code exchanged for a token.
 //! 2. **Xbox Live** — the MSA token is exchanged for an XBL token.
 //! 3. **XSTS** — the XBL token is authorized against Minecraft's relying
 //!    party. This is the step that rejects accounts with no Xbox profile or
-//!    an unmigrated/child account, and it reports why via an `XErr` code.
+//!    a child account, and it reports why via an `XErr` code.
 //! 4. **Minecraft Services** — the XSTS token becomes a Minecraft bearer
-//!    token, which finally lets us read the profile (uuid + username) the
-//!    game is launched with.
-//!
-//! Device code rather than a redirect-URI flow specifically because it needs
-//! no loopback HTTP server and no custom URL scheme registration — the user
-//! opens a page, types a short code, and we poll. Same flow the vanilla
-//! launcher uses on consoles and the same one `Mod/`'s in-game sign-in uses.
+//!    token, which finally lets us read the profile the game launches with.
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
-/// Azure application id. Shared with `Mod/`'s in-game sign-in so both halves
-/// of the project present the same consent screen. Registering a separate
-/// app id for the launcher is fine too — it only has to be an Azure app with
-/// the `XboxLive.signin` delegated permission and device-code flow enabled.
+/// Azure application id, shared with `Mod/`'s in-game sign-in so both halves
+/// of the project present the same consent screen.
 const CLIENT_ID: &str = "e16699bb-2aa8-46da-b5e3-45cbcce29091";
+
+/// **Fixed, not arbitrary.** Azure matches redirect URIs exactly, and this
+/// exact host/port/path is what's registered against [`CLIENT_ID`]. Changing
+/// the port here without changing the registration breaks sign-in. It also
+/// means only one sign-in can be in flight per machine — a second one, or a
+/// concurrent in-game sign-in from `Mod/`, will fail to bind.
+const CALLBACK_PORT: u16 = 25585;
+const REDIRECT_URI: &str = "http://localhost:25585/callback";
 
 /// `consumers` (not `common`) because Minecraft accounts are personal
 /// Microsoft accounts; the tenant endpoints reject them.
-const DEVICE_CODE_URL: &str =
-    "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
+const AUTHORIZE_URL: &str =
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const XBL_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
@@ -38,21 +43,8 @@ const MC_LOGIN_URL: &str = "https://api.minecraftservices.com/authentication/log
 const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 
 /// `offline_access` is what gets us a refresh token; without it the user
-/// would have to re-approve on every launch.
+/// would have to sign in again on every launch.
 const SCOPE: &str = "XboxLive.signin offline_access";
-
-/// What the UI shows the user while we poll.
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeviceCode {
-    pub device_code: String,
-    /// The short code the user types, e.g. `A1B2C3D4`.
-    pub user_code: String,
-    /// Where they type it — normally <https://microsoft.com/link>.
-    pub verification_uri: String,
-    pub expires_in: u64,
-    /// Seconds Microsoft asks us to wait between polls.
-    pub interval: u64,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
@@ -64,6 +56,13 @@ pub struct Account {
     pub refresh_token: String,
     /// Unix seconds at which `access_token` stops working.
     pub expires_at: u64,
+    /// URL of the account's active skin texture, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skin_url: Option<String>,
+    /// `CLASSIC` (4px arms) or `SLIM` (3px arms) — changes how the body is
+    /// drawn, so it has to survive alongside the URL.
+    #[serde(default)]
+    pub skin_model: SkinModel,
 }
 
 impl Account {
@@ -72,6 +71,14 @@ impl Account {
     pub fn is_expired(&self) -> bool {
         crate::instance::now() + 60 >= self.expires_at
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum SkinModel {
+    #[default]
+    Classic,
+    Slim,
 }
 
 #[derive(Debug, Clone)]
@@ -96,94 +103,57 @@ impl Auth {
         Self { http }
     }
 
-    /// Step 1. Ask Microsoft for a code to show the user.
-    pub async fn start_device_code(&self) -> Result<DeviceCode> {
+    /// Runs the whole sign-in and returns a ready-to-launch account.
+    ///
+    /// `open_url` is called once the loopback listener is actually bound,
+    /// with the URL to send the user to. Taking it as a callback rather than
+    /// opening a browser here keeps this crate free of any desktop
+    /// dependency, and guarantees we're already listening before the browser
+    /// can possibly redirect back.
+    pub async fn login<F>(&self, open_url: F) -> Result<Account>
+    where
+        F: FnOnce(&str) + Send,
+    {
+        // Bind first: if the port is taken, fail before sending the user off
+        // to a browser page whose redirect could never be received.
+        let listener = TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+            .await
+            .map_err(|err| {
+                Error::auth(format!(
+                    "couldn't listen on port {CALLBACK_PORT} for the sign-in redirect \
+                     ({err}) — another sign-in may already be in progress"
+                ))
+            })?;
+
+        // Guards against a stray or forged request hitting the callback.
+        let state = uuid::Uuid::new_v4().to_string();
+        open_url(&authorize_url(&state));
+
+        let code = wait_for_code(&listener, &state).await?;
+        let msa = self.exchange_code(&code).await?;
+        self.complete_login(msa).await
+    }
+
+    async fn exchange_code(&self, code: &str) -> Result<MsaToken> {
         let response = self
             .http
-            .post(DEVICE_CODE_URL)
-            .form(&[("client_id", CLIENT_ID), ("scope", SCOPE)])
+            .post(TOKEN_URL)
+            .form(&[
+                ("client_id", CLIENT_ID),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", REDIRECT_URI),
+            ])
             .send()
             .await?;
 
         if !response.status().is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(Error::auth(format!("Microsoft rejected the request: {body}")));
+            return Err(Error::auth(format!(
+                "Microsoft rejected the sign-in: {body}"
+            )));
         }
         Ok(response.json().await?)
-    }
-
-    /// Steps 1b–4. Polls until the user approves, then runs the full token
-    /// exchange and returns a ready-to-launch account.
-    ///
-    /// `on_tick` fires once per poll so the UI can show a countdown; return
-    /// `false` from it to cancel.
-    pub async fn poll_for_account<F>(&self, code: &DeviceCode, mut on_tick: F) -> Result<Account>
-    where
-        F: FnMut() -> bool,
-    {
-        let msa = self.poll_for_msa_token(code, &mut on_tick).await?;
-        self.complete_login(msa).await
-    }
-
-    async fn poll_for_msa_token<F>(&self, code: &DeviceCode, on_tick: &mut F) -> Result<MsaToken>
-    where
-        F: FnMut() -> bool,
-    {
-        // Microsoft's `interval` is a floor, not a suggestion — polling
-        // faster earns a `slow_down` and a longer wait.
-        let mut interval = Duration::from_secs(code.interval.max(1));
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(code.expires_in);
-
-        loop {
-            tokio::time::sleep(interval).await;
-
-            if !on_tick() {
-                return Err(Error::auth("sign-in cancelled"));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(Error::auth("the sign-in code expired — start again"));
-            }
-
-            let response = self
-                .http
-                .post(TOKEN_URL)
-                .form(&[
-                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                    ("client_id", CLIENT_ID),
-                    ("device_code", &code.device_code),
-                ])
-                .send()
-                .await?;
-
-            if response.status().is_success() {
-                return Ok(response.json().await?);
-            }
-
-            let error: TokenError = response.json().await.unwrap_or(TokenError {
-                error: "unknown_error".into(),
-                error_description: None,
-            });
-
-            match error.error.as_str() {
-                // Expected while the user is still typing the code.
-                "authorization_pending" => continue,
-                "slow_down" => {
-                    interval += Duration::from_secs(5);
-                    continue;
-                }
-                "expired_token" => {
-                    return Err(Error::auth("the sign-in code expired — start again"));
-                }
-                "authorization_declined" => {
-                    return Err(Error::auth("sign-in was declined"));
-                }
-                other => {
-                    return Err(Error::auth(
-                        error.error_description.unwrap_or_else(|| other.to_string()),
-                    ));
-                }
-            }
-        }
     }
 
     /// Steps 2–4, shared by first sign-in and silent refresh.
@@ -198,6 +168,7 @@ impl Auth {
         let xsts = self.xsts(&xbl.token).await?;
         let mc_token = self.minecraft_token(&user_hash, &xsts.token).await?;
         let profile = self.profile(&mc_token.access_token).await?;
+        let skin = profile.active_skin();
 
         Ok(Account {
             uuid: profile.id,
@@ -205,12 +176,14 @@ impl Auth {
             access_token: mc_token.access_token,
             refresh_token: msa.refresh_token,
             expires_at: crate::instance::now() + mc_token.expires_in,
+            skin_url: skin.as_ref().map(|s| s.url.clone()),
+            skin_model: skin.map(|s| s.model()).unwrap_or_default(),
         })
     }
 
-    /// Renews an account without user interaction. Falls back to an error the
-    /// UI should treat as "make them sign in again" if the refresh token has
-    /// been revoked (password change, consent withdrawn).
+    /// Renews an account without user interaction. The error here should be
+    /// treated as "make them sign in again" — it means the refresh token was
+    /// revoked, e.g. by a password change.
     pub async fn refresh(&self, account: &Account) -> Result<Account> {
         let response = self
             .http
@@ -225,9 +198,7 @@ impl Auth {
             .await?;
 
         if !response.status().is_success() {
-            return Err(Error::auth(
-                "this account's sign-in expired — sign in again",
-            ));
+            return Err(Error::auth("this account's sign-in expired — sign in again"));
         }
 
         let msa: MsaToken = response.json().await?;
@@ -299,12 +270,7 @@ impl Auth {
             "identityToken": format!("XBL3.0 x={user_hash};{xsts_token}"),
         });
 
-        let response = self
-            .http
-            .post(MC_LOGIN_URL)
-            .json(&body)
-            .send()
-            .await?;
+        let response = self.http.post(MC_LOGIN_URL).json(&body).send().await?;
 
         if !response.status().is_success() {
             return Err(Error::auth("Minecraft services rejected this account"));
@@ -320,12 +286,10 @@ impl Auth {
             .send()
             .await?;
 
-        // A 404 here means the account authenticated fine but owns no copy
-        // of the game — worth saying plainly rather than "profile missing".
+        // A 404 means the account authenticated fine but owns no copy of the
+        // game — worth saying plainly rather than "profile missing".
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(Error::auth(
-                "this account doesn't own Minecraft: Java Edition",
-            ));
+            return Err(Error::auth("this account doesn't own Minecraft: Java Edition"));
         }
         if !response.status().is_success() {
             return Err(Error::auth("could not read the Minecraft profile"));
@@ -334,17 +298,184 @@ impl Auth {
     }
 }
 
+fn authorize_url(state: &str) -> String {
+    format!(
+        "{AUTHORIZE_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}",
+        urlencode(CLIENT_ID),
+        urlencode(REDIRECT_URI),
+        urlencode(SCOPE),
+        urlencode(state),
+    )
+}
+
+/// Percent-encodes everything outside the unreserved set. Small enough to not
+/// warrant a dependency, and the inputs here are all known-simple.
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Accepts connections until one is Microsoft's redirect carrying a matching
+/// `state`, then returns its authorization code.
+///
+/// Loops rather than taking the first connection because browsers open
+/// speculative and favicon requests that would otherwise be mistaken for the
+/// callback.
+async fn wait_for_code(listener: &TcpListener, expected_state: &str) -> Result<String> {
+    loop {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .map_err(|err| Error::auth(format!("sign-in listener failed: {err}")))?;
+
+        let mut buffer = vec![0u8; 8192];
+        let read = socket.read(&mut buffer).await.unwrap_or(0);
+        if read == 0 {
+            continue;
+        }
+
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        let Some(target) = request_target(&request) else {
+            continue;
+        };
+        if !target.starts_with("/callback") {
+            let _ = respond(&mut socket, 404, "Not found").await;
+            continue;
+        }
+
+        let params = query_params(target);
+        let result = match (
+            params.get("code"),
+            params.get("state"),
+            params.get("error_description").or(params.get("error")),
+        ) {
+            (_, _, Some(error)) => Err(Error::auth(error.clone())),
+            (Some(code), Some(state), _) if state == expected_state => Ok(code.clone()),
+            // A mismatched state means this redirect didn't originate from
+            // the request we made, so the code must not be trusted.
+            (Some(_), _, _) => Err(Error::auth("sign-in state mismatch — please try again")),
+            _ => Err(Error::auth("Microsoft didn't return an authorization code")),
+        };
+
+        let page = match &result {
+            Ok(_) => success_page(),
+            Err(err) => error_page(&err.to_string()),
+        };
+        let _ = respond(&mut socket, 200, &page).await;
+
+        return result;
+    }
+}
+
+/// Pulls the path+query out of the request line (`GET /callback?... HTTP/1.1`).
+fn request_target(request: &str) -> Option<&str> {
+    request.lines().next()?.split_whitespace().nth(1)
+}
+
+fn query_params(target: &str) -> std::collections::HashMap<String, String> {
+    let Some((_, query)) = target.split_once('?') else {
+        return std::collections::HashMap::new();
+    };
+
+    query
+        .split('&')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((key.to_string(), urldecode(value)))
+        })
+        .collect()
+}
+
+fn urldecode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+async fn respond(socket: &mut tokio::net::TcpStream, status: u16, body: &str) -> Result<()> {
+    let reason = if status == 200 { "OK" } else { "Not Found" };
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(response.as_bytes()).await?;
+    socket.flush().await?;
+    Ok(())
+}
+
+/// Styled to match the app, since this page is the last thing the user sees
+/// before switching back to it.
+fn success_page() -> String {
+    landing_page(
+        "#3cffb0",
+        "Signed in",
+        "You can close this tab and go back to Nexo.",
+    )
+}
+
+fn error_page(message: &str) -> String {
+    landing_page("#ff4d6a", "Sign-in failed", message)
+}
+
+fn landing_page(accent: &str, heading: &str, detail: &str) -> String {
+    let detail = detail
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">\
+         <title>Nexo</title></head>\
+         <body style=\"margin:0;display:flex;align-items:center;justify-content:center;\
+         height:100vh;background:#0d0d14;color:#e8e8f2;\
+         font-family:system-ui,-apple-system,Segoe UI,sans-serif\">\
+         <div style=\"text-align:center;padding:2rem\">\
+         <div style=\"font-size:2rem;font-weight:600;color:{accent}\">{heading}</div>\
+         <p style=\"color:#9a9ab4;margin-top:.75rem\">{detail}</p></div></body></html>"
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct MsaToken {
     access_token: String,
     #[serde(default)]
     refresh_token: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenError {
-    error: String,
-    error_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -388,4 +519,77 @@ struct McToken {
 struct McProfile {
     id: String,
     name: String,
+    #[serde(default)]
+    skins: Vec<ProfileSkin>,
+}
+
+impl McProfile {
+    /// An account can carry several skins; exactly one is `ACTIVE`.
+    fn active_skin(&self) -> Option<ProfileSkin> {
+        self.skins
+            .iter()
+            .find(|s| s.state.eq_ignore_ascii_case("ACTIVE"))
+            .or_else(|| self.skins.first())
+            .cloned()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProfileSkin {
+    url: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    variant: String,
+}
+
+impl ProfileSkin {
+    fn model(&self) -> SkinModel {
+        if self.variant.eq_ignore_ascii_case("SLIM") {
+            SkinModel::Slim
+        } else {
+            SkinModel::Classic
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_callback_query() {
+        let params = query_params("/callback?code=abc123&state=xyz");
+        assert_eq!(params.get("code").unwrap(), "abc123");
+        assert_eq!(params.get("state").unwrap(), "xyz");
+    }
+
+    #[test]
+    fn decodes_percent_escapes_in_callback() {
+        let params = query_params("/callback?error_description=Bad+thing%20happened");
+        assert_eq!(params.get("error_description").unwrap(), "Bad thing happened");
+    }
+
+    #[test]
+    fn extracts_request_target() {
+        assert_eq!(
+            request_target("GET /callback?code=1 HTTP/1.1\r\nHost: x\r\n"),
+            Some("/callback?code=1")
+        );
+    }
+
+    #[test]
+    fn authorize_url_encodes_redirect_and_scope() {
+        let url = authorize_url("state-1");
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A25585%2Fcallback"));
+        assert!(url.contains("scope=XboxLive.signin%20offline_access"));
+        assert!(url.contains("response_type=code"));
+    }
+
+    #[test]
+    fn error_page_escapes_injected_markup() {
+        let page = error_page("<script>alert(1)</script>");
+        assert!(!page.contains("<script>"));
+        assert!(page.contains("&lt;script&gt;"));
+    }
 }

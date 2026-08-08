@@ -20,6 +20,7 @@ uuid.workspace = true
 sha1.workspace = true
 hex.workspace = true
 zip.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 reqwest.workspace = true
