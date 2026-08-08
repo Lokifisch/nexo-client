@@ -25,3 +25,5 @@ tracing-subscriber.workspace = true
 
 # Opens the Microsoft sign-in page in the user's default browser.
 open = "5"
+glam = "0.33.3"
+bytemuck = { version = "1.25.2", features = ["derive"] }

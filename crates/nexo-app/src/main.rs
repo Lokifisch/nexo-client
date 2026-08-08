@@ -9,9 +9,11 @@
 //! ~1,000-file install runs underneath it.
 
 mod screens;
+mod skin3d;
 mod theme;
 
 use iced::widget::image;
+use std::sync::Arc;
 use iced::{Element, Fill, Task};
 use nexo_core::minecraft::Progress;
 use nexo_core::skin;
@@ -32,7 +34,6 @@ const WINDOW_ICON: &[u8] = include_bytes!("../../../assets/icons/256.png");
 /// Upscale factors for the two skin renders. Skins are tiny pixel art (an
 /// 8×8 face, a 16×32 body), so these are integer multipliers applied with
 /// nearest-neighbour sampling.
-const BODY_SCALE: u32 = 11;
 const FACE_SCALE: u32 = 4;
 
 fn main() -> iced::Result {
@@ -128,10 +129,18 @@ pub struct App {
     /// port anyway.
     signing_in: bool,
 
-    /// Rendered skin of the active account, or the placeholder when signed
-    /// out. Held as ready-to-draw handles so `view` never does image work.
-    body: Option<image::Handle>,
+    /// Small 2D avatar for the account control. The 3D viewer uses the raw
+    /// textures below instead.
     face: Option<image::Handle>,
+
+    /// Textures for the 3D model: the skin, and the cape when one is
+    /// equipped. `Arc` because every frame's primitive clones them.
+    skin_texture: Option<Arc<skin::Rgba>>,
+    cape_texture: Option<Arc<skin::Rgba>>,
+    skin_model: nexo_core::SkinModel,
+    /// Bumped whenever the textures change, so the renderer knows to re-upload
+    /// them instead of doing it every frame.
+    skin_key: u64,
 
     /// Instances currently running, so Play can become Stop. Mirrors the
     /// core registry rather than querying it during `view`, which must stay
@@ -182,8 +191,10 @@ pub enum Message {
     RemoveAccount(String),
     AccountActionDone(Result<(), String>),
     SkinLoaded {
-        body: image::Handle,
         face: image::Handle,
+        skin: Arc<skin::Rgba>,
+        cape: Option<Arc<skin::Rgba>>,
+        model: nexo_core::SkinModel,
     },
 }
 
@@ -200,8 +211,11 @@ impl App {
             new_name: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
             signing_in: false,
-            body: None,
             face: None,
+            skin_texture: None,
+            cape_texture: None,
+            skin_model: nexo_core::SkinModel::Classic,
+            skin_key: 0,
             running: std::collections::HashSet::new(),
             nexo_release: None,
         };
@@ -576,9 +590,18 @@ impl App {
                 Task::none()
             }
 
-            Message::SkinLoaded { body, face } => {
-                self.body = Some(body);
+            Message::SkinLoaded {
+                face,
+                skin,
+                cape,
+                model,
+            } => {
                 self.face = Some(face);
+                self.skin_texture = Some(skin);
+                self.cape_texture = cape;
+                self.skin_model = model;
+                // Distinct from the last set, so the renderer re-uploads.
+                self.skin_key = self.skin_key.wrapping_add(1);
                 Task::none()
             }
         }
@@ -660,37 +683,60 @@ fn load_versions(core: Nexo) -> Task<Message> {
     )
 }
 
-/// Fetches and renders the account's skin, falling back to the placeholder
-/// for a signed-out state, an account with no skin, or a failed download —
-/// none of which is worth surfacing as an error.
+/// Fetches the account's skin and cape, falling back to the placeholder for
+/// a signed-out state, an account with no skin, or a failed download — none
+/// of which is worth surfacing as an error.
 fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
     Task::perform(
         async move {
-            let account = account?;
-            let url = account.skin_url.clone()?;
+            let Some(account) = account else {
+                return placeholder_skin();
+            };
 
-            match skin::fetch(core.http(), &url, account.skin_model).await {
-                Ok(skin) => Some((
-                    to_handle(skin.body(BODY_SCALE)),
-                    to_handle(skin.face(FACE_SCALE)),
-                )),
+            let Some(url) = account.skin_url.clone() else {
+                return placeholder_skin();
+            };
+
+            let decoded = match skin::fetch(core.http(), &url, account.skin_model).await {
+                Ok(decoded) => decoded,
                 Err(err) => {
                     tracing::warn!(%err, "could not load skin, using the placeholder");
-                    None
+                    return placeholder_skin();
                 }
+            };
+
+            // A cape is genuinely optional, and a failure to fetch one should
+            // not cost the user their skin.
+            let cape = match &account.cape_url {
+                Some(cape_url) => match skin::fetch_texture(core.http(), cape_url).await {
+                    Ok(cape) => Some(Arc::new(cape)),
+                    Err(err) => {
+                        tracing::warn!(%err, "could not load cape");
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            Message::SkinLoaded {
+                face: to_handle(decoded.face(FACE_SCALE)),
+                skin: Arc::new(decoded.texture().clone()),
+                cape,
+                model: account.skin_model,
             }
         },
-        |rendered| match rendered {
-            Some((body, face)) => Message::SkinLoaded { body, face },
-            None => placeholder_skin(),
-        },
+        |message| message,
     )
 }
 
+/// Signed-out stand-in. A real 64x64 texture rather than a special case, so
+/// the 3D renderer always has exactly one path.
 fn placeholder_skin() -> Message {
     Message::SkinLoaded {
-        body: to_handle(skin::placeholder_body(BODY_SCALE)),
         face: to_handle(skin::placeholder_face(FACE_SCALE)),
+        skin: Arc::new(skin::placeholder_texture()),
+        cape: None,
+        model: nexo_core::SkinModel::Classic,
     }
 }
 

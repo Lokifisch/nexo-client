@@ -136,6 +136,12 @@ impl Skin {
         })
     }
 
+    /// The raw texture, for callers that map it onto their own geometry
+    /// rather than using the 2D renders here.
+    pub fn texture(&self) -> &Rgba {
+        &self.texture
+    }
+
     /// Width of one arm: slim skins use 3px arms instead of 4.
     fn arm_width(&self) -> u32 {
         match self.model {
@@ -256,6 +262,22 @@ pub async fn fetch(http: &reqwest::Client, url: &str, model: SkinModel) -> Resul
     Skin::decode(&bytes, model)
 }
 
+/// Downloads any PNG and decodes it to RGBA, without the 64×64 shape check
+/// [`Skin::decode`] applies. Capes are 64×32 and have their own layout, so
+/// they can't go through the skin path.
+pub async fn fetch_texture(http: &reqwest::Client, url: &str) -> Result<Rgba> {
+    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        .map_err(|err| Error::invalid(format!("could not read texture: {err}")))?
+        .to_rgba8();
+    let (width, height) = decoded.dimensions();
+    Ok(Rgba {
+        width,
+        height,
+        pixels: decoded.into_raw(),
+    })
+}
+
 /// Stand-in shown before sign-in.
 ///
 /// A brand-styled silhouette rather than Minecraft's Steve, because that
@@ -285,6 +307,26 @@ pub fn placeholder_body(scale: u32) -> Rgba {
     }
 
     canvas.scaled(scale)
+}
+
+/// A full 64×64 skin texture in the brand gradient, for the signed-out state
+/// of the 3D viewer.
+///
+/// Returning a real skin-shaped texture rather than a special case means the
+/// renderer has exactly one path: it always has a skin to map onto the model.
+/// The gradient runs down the texture, so it reads as a vertical ramp on the
+/// standing figure.
+pub fn placeholder_texture() -> Rgba {
+    let mut texture = Rgba::new(64, 64);
+    for y in 0..64 {
+        // Sampled across the head-to-feet span rather than the texture's own
+        // height, so the ramp doesn't restart on each unwrapped part.
+        let colour = gradient(y, 64);
+        for x in 0..64 {
+            texture.set(x, y, colour);
+        }
+    }
+    texture
 }
 
 /// Avatar counterpart to [`placeholder_body`], so a signed-out state looks

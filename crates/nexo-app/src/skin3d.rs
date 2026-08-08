@@ -1,0 +1,1068 @@
+//! A 3D player model, drawn with wgpu through iced's shader widget.
+//!
+//! iced has no 3D of its own, so this owns a small render pipeline: the
+//! player's cuboids are built as geometry, textured with the account's skin,
+//! and drawn with a depth buffer into the widget's bounds.
+//!
+//! Three passes, back to front:
+//!
+//! 1. an outer hull in brand violet,
+//! 2. a slightly smaller hull in black,
+//! 3. the textured model itself.
+//!
+//! The hulls are the model re-drawn with its faces pushed outwards and
+//! *front* faces culled, so only the far side shows — the classic
+//! inverted-hull outline. Two of them at different widths give the stylized
+//! border with a black inner stroke. Each cuboid expands about its own centre
+//! rather than the model's, or limbs would splay outwards as the outline grew.
+
+use iced::widget::shader;
+use iced::wgpu;
+use iced::{mouse, Rectangle};
+use nexo_core::skin::Rgba;
+use nexo_core::SkinModel;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Where the model rests when nothing is interacting with it: turned to its
+/// right and tipped forward, so it reads as looking down and to the viewer's
+/// bottom-left rather than staring straight out.
+const REST_YAW: f32 = -0.62;
+const REST_PITCH: f32 = 0.20;
+
+/// How long a dragged pose is left alone before it eases back.
+const HOLD: Duration = Duration::from_secs(5);
+
+/// Fraction of the remaining distance closed per second while easing back.
+/// Exponential rather than linear so it arrives gently instead of stopping
+/// dead.
+const RETURN_RATE: f32 = 2.2;
+
+/// Below this, the pose is close enough to rest to stop animating — without
+/// it, exponential decay never quite arrives and redraws never stop.
+const SETTLED: f32 = 0.001;
+
+const DRAG_SENSITIVITY: f32 = 0.011;
+/// Keeps the model from being tipped past vertical, where it reads as broken.
+const MAX_PITCH: f32 = 0.9;
+
+/// Outline widths, in model units (1 unit = 1 skin pixel).
+const OUTLINE_OUTER: f32 = 0.9;
+const OUTLINE_INNER: f32 = 0.45;
+
+const VIOLET: [f32; 4] = [0.482, 0.235, 1.0, 1.0];
+const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// Interaction state. Lives in the widget tree, so a redraw doesn't reset the
+/// pose the user dragged to.
+#[derive(Debug)]
+pub struct Pose {
+    yaw: f32,
+    pitch: f32,
+    /// Cursor position the current drag was last sampled at.
+    drag_from: Option<iced::Point>,
+    /// When the drag ended, which starts the hold before easing back.
+    released_at: Option<Instant>,
+    last_tick: Option<Instant>,
+}
+
+impl Default for Pose {
+    fn default() -> Self {
+        Self {
+            yaw: REST_YAW,
+            pitch: REST_PITCH,
+            drag_from: None,
+            released_at: None,
+            last_tick: None,
+        }
+    }
+}
+
+impl Pose {
+    fn at_rest(&self) -> bool {
+        (self.yaw - REST_YAW).abs() < SETTLED && (self.pitch - REST_PITCH).abs() < SETTLED
+    }
+
+    /// Eases toward the rest pose, framerate-independently.
+    fn ease_back(&mut self, dt: f32) {
+        let t = 1.0 - (-RETURN_RATE * dt).exp();
+        self.yaw += (REST_YAW - self.yaw) * t;
+        self.pitch += (REST_PITCH - self.pitch) * t;
+        if self.at_rest() {
+            self.yaw = REST_YAW;
+            self.pitch = REST_PITCH;
+            self.released_at = None;
+        }
+    }
+}
+
+/// The widget program. Cheap to construct each `view`; the GPU resources live
+/// in [`ModelPipeline`], which iced keeps between frames.
+#[derive(Debug)]
+pub struct SkinViewer {
+    skin: Arc<Rgba>,
+    cape: Option<Arc<Rgba>>,
+    model: SkinModel,
+    /// Changes when the textures change, so they're only uploaded then rather
+    /// than every frame.
+    key: u64,
+}
+
+impl SkinViewer {
+    pub fn new(skin: Arc<Rgba>, cape: Option<Arc<Rgba>>, model: SkinModel, key: u64) -> Self {
+        Self {
+            skin,
+            cape,
+            model,
+            key,
+        }
+    }
+}
+
+impl<Message> shader::Program<Message> for SkinViewer {
+    type State = Pose;
+    type Primitive = Scene;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &iced::Event,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Option<shader::Action<Message>> {
+        use iced::mouse::{Button, Event as Mouse};
+        use iced::window::Event as Window;
+        use iced::Event as E;
+
+        match event {
+            E::Mouse(Mouse::ButtonPressed(Button::Left)) => {
+                let position = cursor.position_over(bounds)?;
+                state.drag_from = Some(position);
+                state.released_at = None;
+                Some(shader::Action::request_redraw())
+            }
+
+            E::Mouse(Mouse::CursorMoved { .. }) => {
+                let from = state.drag_from?;
+                // Position is read from the cursor rather than the event so a
+                // drag that leaves the widget keeps tracking instead of
+                // sticking.
+                let to = cursor.position()?;
+                state.yaw += (to.x - from.x) * DRAG_SENSITIVITY;
+                state.pitch =
+                    (state.pitch + (to.y - from.y) * DRAG_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
+                state.drag_from = Some(to);
+                Some(shader::Action::request_redraw())
+            }
+
+            E::Mouse(Mouse::ButtonReleased(Button::Left)) => {
+                state.drag_from.take()?;
+                let now = Instant::now();
+                state.released_at = Some(now);
+                // Nothing to draw until the hold expires, so ask to be woken
+                // then instead of animating through it.
+                Some(shader::Action::request_redraw_at(now + HOLD))
+            }
+
+            E::Window(Window::RedrawRequested(now)) => {
+                let previous = state.last_tick.replace(*now);
+
+                if state.drag_from.is_some() {
+                    return None;
+                }
+                let released_at = state.released_at?;
+                if now.duration_since(released_at) < HOLD {
+                    // Still holding the pose; wake when it expires.
+                    return Some(shader::Action::request_redraw_at(released_at + HOLD));
+                }
+
+                let dt = previous
+                    .map(|previous| now.duration_since(previous).as_secs_f32())
+                    // First animated frame has no previous tick to measure.
+                    .unwrap_or(1.0 / 60.0)
+                    .min(0.1);
+
+                state.ease_back(dt);
+                (!state.at_rest()).then(shader::Action::request_redraw)
+            }
+
+            _ => None,
+        }
+    }
+
+    fn draw(&self, state: &Self::State, _cursor: mouse::Cursor, bounds: Rectangle) -> Scene {
+        Scene {
+            mvp: mvp(state.yaw, state.pitch, bounds),
+            geometry: Arc::new(build_model(self.model, self.cape.is_some())),
+            skin: Arc::clone(&self.skin),
+            cape: self.cape.clone(),
+            key: self.key,
+            bounds,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &Self::State,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if state.drag_from.is_some() {
+            mouse::Interaction::Grabbing
+        } else if cursor.is_over(bounds) {
+            mouse::Interaction::Grab
+        } else {
+            mouse::Interaction::default()
+        }
+    }
+}
+
+/// Model-view-projection for the current pose.
+fn mvp(yaw: f32, pitch: f32, bounds: Rectangle) -> [[f32; 4]; 4] {
+    use glam::{Mat4, Vec3};
+
+    let aspect = (bounds.width / bounds.height.max(1.0)).max(0.01);
+    // The `directx` projection is the right one for wgpu: its clip space puts
+    // depth in 0..1, unlike OpenGL's -1..1, and a mismatch here shows up as
+    // everything failing the depth test rather than as an error.
+    let projection =
+        glam::camera::rh::proj::directx::perspective(30f32.to_radians(), aspect, 1.0, 400.0);
+    let view = glam::camera::rh::view::look_at_mat4(
+        Vec3::new(0.0, 0.0, 68.0),
+        Vec3::ZERO,
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    // Pitch is applied after yaw so tipping stays relative to the viewer
+    // rather than to the model's own turned axis.
+    let model = Mat4::from_rotation_x(pitch)
+        * Mat4::from_rotation_y(yaw)
+        // The model is built standing on y=0; recentre it on its waist.
+        * Mat4::from_translation(Vec3::new(0.0, -16.0, 0.0));
+
+    (projection * view * model).to_cols_array_2d()
+}
+
+// --- geometry -------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 3],
+    uv: [f32; 2],
+    /// Direction this vertex moves in for the outline hulls — away from its
+    /// own cuboid's centre.
+    expand: [f32; 3],
+    /// Baked face brightness, standing in for lighting.
+    shade: f32,
+}
+
+#[derive(Debug)]
+pub struct Geometry {
+    vertices: Vec<Vertex>,
+    /// Where the cape's vertices start; everything before is body.
+    cape_start: u32,
+}
+
+/// Per-face brightness. Flat cuboids look completely flat without it.
+const SHADE_TOP: f32 = 1.0;
+const SHADE_FRONT: f32 = 0.94;
+const SHADE_SIDE: f32 = 0.80;
+const SHADE_BACK: f32 = 0.72;
+const SHADE_BOTTOM: f32 = 0.62;
+
+/// Appends one cuboid's six faces.
+///
+/// `uv` is the box's origin in the texture, laid out the way Minecraft does
+/// it: a cross unwrap where the top row is top/bottom and the second row is
+/// right/front/left/back.
+#[allow(clippy::too_many_arguments)]
+fn push_box(
+    out: &mut Vec<Vertex>,
+    centre: [f32; 3],
+    size: [f32; 3],
+    uv: [f32; 2],
+    texture: [f32; 2],
+    inflate: f32,
+    // Cape textures put the visible design where a body box puts its front.
+    flip_faces: bool,
+) {
+    let (w, h, d) = (size[0], size[1], size[2]);
+    let (hx, hy, hz) = (
+        w / 2.0 + inflate,
+        h / 2.0 + inflate,
+        d / 2.0 + inflate,
+    );
+    let (cx, cy, cz) = (centre[0], centre[1], centre[2]);
+    let (tw, th) = (texture[0], texture[1]);
+    let (u, v) = (uv[0], uv[1]);
+
+    // Texel rectangles for each face, in the standard unwrap.
+    let right = [u, v + d, d, h];
+    let front = [u + d, v + d, w, h];
+    let left = [u + d + w, v + d, d, h];
+    let back = [u + d + w + d, v + d, w, h];
+    let top = [u + d, v, w, d];
+    let bottom = [u + d + w, v, w, d];
+
+    let (front_uv, back_uv) = if flip_faces {
+        (back, front)
+    } else {
+        (front, back)
+    };
+
+    // Corners, named by sign on each axis.
+    let p = |sx: f32, sy: f32, sz: f32| [cx + sx * hx, cy + sy * hy, cz + sz * hz];
+    // Outline direction: away from this box's own centre.
+    let e = |sx: f32, sy: f32, sz: f32| {
+        let v = glam::Vec3::new(sx, sy, sz).normalize_or_zero();
+        [v.x, v.y, v.z]
+    };
+
+    let mut face = |corners: [[f32; 3]; 4], signs: [[f32; 3]; 4], rect: [f32; 4], shade: f32| {
+        let [ru, rv, rw, rh] = rect;
+        // Texture coordinates, normalized. Corners are ordered
+        // top-left, bottom-left, bottom-right, top-right.
+        let uvs = [
+            [ru / tw, rv / th],
+            [ru / tw, (rv + rh) / th],
+            [(ru + rw) / tw, (rv + rh) / th],
+            [(ru + rw) / tw, rv / th],
+        ];
+        // Two counter-clockwise triangles, so back-face culling keeps the
+        // outward side.
+        for &i in &[0usize, 1, 2, 0, 2, 3] {
+            out.push(Vertex {
+                position: corners[i],
+                uv: uvs[i],
+                expand: e(signs[i][0], signs[i][1], signs[i][2]),
+                shade,
+            });
+        }
+    };
+
+    // +Z faces the viewer at rest.
+    face(
+        [p(-1., 1., 1.), p(-1., -1., 1.), p(1., -1., 1.), p(1., 1., 1.)],
+        [[-1., 1., 1.], [-1., -1., 1.], [1., -1., 1.], [1., 1., 1.]],
+        front_uv,
+        SHADE_FRONT,
+    );
+    face(
+        [p(1., 1., -1.), p(1., -1., -1.), p(-1., -1., -1.), p(-1., 1., -1.)],
+        [[1., 1., -1.], [1., -1., -1.], [-1., -1., -1.], [-1., 1., -1.]],
+        back_uv,
+        SHADE_BACK,
+    );
+    // The player's right side is -X, which is the viewer's left.
+    face(
+        [p(-1., 1., -1.), p(-1., -1., -1.), p(-1., -1., 1.), p(-1., 1., 1.)],
+        [[-1., 1., -1.], [-1., -1., -1.], [-1., -1., 1.], [-1., 1., 1.]],
+        right,
+        SHADE_SIDE,
+    );
+    face(
+        [p(1., 1., 1.), p(1., -1., 1.), p(1., -1., -1.), p(1., 1., -1.)],
+        [[1., 1., 1.], [1., -1., 1.], [1., -1., -1.], [1., 1., -1.]],
+        left,
+        SHADE_SIDE,
+    );
+    face(
+        [p(-1., 1., -1.), p(-1., 1., 1.), p(1., 1., 1.), p(1., 1., -1.)],
+        [[-1., 1., -1.], [-1., 1., 1.], [1., 1., 1.], [1., 1., -1.]],
+        top,
+        SHADE_TOP,
+    );
+    face(
+        [p(-1., -1., 1.), p(-1., -1., -1.), p(1., -1., -1.), p(1., -1., 1.)],
+        [[-1., -1., 1.], [-1., -1., -1.], [1., -1., -1.], [1., -1., 1.]],
+        bottom,
+        SHADE_BOTTOM,
+    );
+}
+
+/// Builds the player model, standing on y = 0, in skin-pixel units.
+fn build_model(model: SkinModel, with_cape: bool) -> Geometry {
+    let mut v = Vec::new();
+    let skin = [64.0, 64.0];
+
+    // Slim skins have 3px arms, which also moves where they hang.
+    let arm_w = match model {
+        SkinModel::Classic => 4.0,
+        SkinModel::Slim => 3.0,
+    };
+    let arm_x = 4.0 + arm_w / 2.0;
+
+    // Base layers.
+    push_box(&mut v, [0.0, 28.0, 0.0], [8.0, 8.0, 8.0], [0.0, 0.0], skin, 0.0, false);
+    push_box(&mut v, [0.0, 18.0, 0.0], [8.0, 12.0, 4.0], [16.0, 16.0], skin, 0.0, false);
+    push_box(&mut v, [-arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [40.0, 16.0], skin, 0.0, false);
+    push_box(&mut v, [arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [32.0, 48.0], skin, 0.0, false);
+    push_box(&mut v, [-2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 16.0], skin, 0.0, false);
+    push_box(&mut v, [2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [16.0, 48.0], skin, 0.0, false);
+
+    // Overlay layers, slightly inflated so they sit just proud of the base.
+    // Hair and jacket detail live here; skipping them is the usual reason a
+    // rendered skin looks subtly wrong.
+    push_box(&mut v, [0.0, 28.0, 0.0], [8.0, 8.0, 8.0], [32.0, 0.0], skin, 0.5, false);
+    push_box(&mut v, [0.0, 18.0, 0.0], [8.0, 12.0, 4.0], [16.0, 32.0], skin, 0.25, false);
+    push_box(&mut v, [-arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [40.0, 32.0], skin, 0.25, false);
+    push_box(&mut v, [arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [48.0, 48.0], skin, 0.25, false);
+    push_box(&mut v, [-2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 32.0], skin, 0.25, false);
+    push_box(&mut v, [2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 48.0], skin, 0.25, false);
+
+    let cape_start = v.len() as u32;
+
+    if with_cape {
+        // Hangs off the back of the torso, top edge level with the shoulders.
+        // Cape textures are 64x32, and the visible design sits where a body
+        // box would put its *back*, hence the face flip.
+        push_box(
+            &mut v,
+            [0.0, 16.0, -2.6],
+            [10.0, 16.0, 1.0],
+            [0.0, 0.0],
+            [64.0, 32.0],
+            0.0,
+            true,
+        );
+    }
+
+    Geometry {
+        vertices: v,
+        cape_start,
+    }
+}
+
+// --- rendering ------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct Scene {
+    mvp: [[f32; 4]; 4],
+    geometry: Arc<Geometry>,
+    skin: Arc<Rgba>,
+    cape: Option<Arc<Rgba>>,
+    key: u64,
+    bounds: Rectangle,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniforms {
+    mvp: [[f32; 4]; 4],
+    colour: [f32; 4],
+    expand: f32,
+    textured: f32,
+    _padding: [f32; 2],
+}
+
+impl shader::Primitive for Scene {
+    type Pipeline = ModelPipeline;
+
+    fn prepare(
+        &self,
+        pipeline: &mut Self::Pipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _bounds: &Rectangle,
+        viewport: &shader::Viewport,
+    ) {
+        pipeline.upload_geometry(device, queue, &self.geometry);
+        pipeline.upload_textures(device, queue, self.key, &self.skin, self.cape.as_deref());
+        pipeline.resize_depth(device, viewport.physical_size());
+
+        // One uniform block per pass; only the outline width, colour and
+        // whether to sample the texture differ.
+        let passes = [
+            Uniforms {
+                mvp: self.mvp,
+                colour: VIOLET,
+                expand: OUTLINE_OUTER,
+                textured: 0.0,
+                _padding: [0.0; 2],
+            },
+            Uniforms {
+                mvp: self.mvp,
+                colour: BLACK,
+                expand: OUTLINE_INNER,
+                textured: 0.0,
+                _padding: [0.0; 2],
+            },
+            Uniforms {
+                mvp: self.mvp,
+                colour: [1.0; 4],
+                expand: 0.0,
+                textured: 1.0,
+                _padding: [0.0; 2],
+            },
+        ];
+
+        for (index, uniforms) in passes.iter().enumerate() {
+            queue.write_buffer(
+                &pipeline.uniforms[index],
+                0,
+                bytemuck::bytes_of(uniforms),
+            );
+        }
+    }
+
+    fn render(
+        &self,
+        pipeline: &Self::Pipeline,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        clip_bounds: &Rectangle<u32>,
+    ) {
+        let Some(depth) = pipeline.depth.as_ref() else {
+            return;
+        };
+        if pipeline.vertex_count == 0 {
+            return;
+        }
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("nexo.skin3d"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Load, not Clear: the rest of the interface is already
+                    // drawn into this target.
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        pass.set_scissor_rect(
+            clip_bounds.x,
+            clip_bounds.y,
+            clip_bounds.width.max(1),
+            clip_bounds.height.max(1),
+        );
+        pass.set_viewport(
+            self.bounds.x,
+            self.bounds.y,
+            self.bounds.width,
+            self.bounds.height,
+            0.0,
+            1.0,
+        );
+        pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
+
+        let body = 0..self.geometry.cape_start;
+        let cape = self.geometry.cape_start..pipeline.vertex_count;
+
+        // Hulls first, front faces culled so only their far side shows.
+        pass.set_pipeline(&pipeline.outline);
+        pass.set_bind_group(1, &pipeline.skin_binding, &[]);
+        for index in 0..2 {
+            pass.set_bind_group(0, &pipeline.uniform_bindings[index], &[]);
+            pass.draw(0..pipeline.vertex_count, 0..1);
+        }
+
+        // Then the model itself, one draw per texture.
+        pass.set_pipeline(&pipeline.model);
+        pass.set_bind_group(0, &pipeline.uniform_bindings[2], &[]);
+        pass.set_bind_group(1, &pipeline.skin_binding, &[]);
+        pass.draw(body, 0..1);
+
+        if !cape.is_empty()
+            && let Some(cape_binding) = pipeline.cape_binding.as_ref()
+        {
+            pass.set_bind_group(1, cape_binding, &[]);
+            pass.draw(cape, 0..1);
+        }
+    }
+}
+
+/// GPU resources, created once and reused across frames.
+#[derive(Debug)]
+pub struct ModelPipeline {
+    model: wgpu::RenderPipeline,
+    outline: wgpu::RenderPipeline,
+    vertices: wgpu::Buffer,
+    vertex_capacity: u32,
+    vertex_count: u32,
+    uniforms: [wgpu::Buffer; 3],
+    uniform_bindings: [wgpu::BindGroup; 3],
+    texture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    skin_binding: wgpu::BindGroup,
+    cape_binding: Option<wgpu::BindGroup>,
+    /// Which textures are currently uploaded, so they aren't re-sent each
+    /// frame.
+    uploaded_key: Option<u64>,
+    depth: Option<wgpu::TextureView>,
+    depth_size: (u32, u32),
+}
+
+impl shader::Pipeline for ModelPipeline {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nexo.skin3d.shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nexo.skin3d.uniforms"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nexo.skin3d.texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Non-filtering: skins are pixel art and must not be
+                    // smoothed on the way to the screen.
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+            ],
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("nexo.skin3d.layout"),
+            bind_group_layouts: &[&uniform_layout, &texture_layout],
+            push_constant_ranges: &[],
+        });
+
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 20,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+            ],
+        };
+
+        let make_pipeline = |label: &str, cull: wgpu::Face| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(cull),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
+        let model = make_pipeline("nexo.skin3d.model", wgpu::Face::Back);
+        // Front faces culled, so an expanded hull shows only its far side.
+        let outline = make_pipeline("nexo.skin3d.outline", wgpu::Face::Front);
+
+        let uniforms: [wgpu::Buffer; 3] = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nexo.skin3d.uniform"),
+                size: std::mem::size_of::<Uniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+
+        let uniform_bindings = std::array::from_fn(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("nexo.skin3d.uniform.bind"),
+                layout: &uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms[i].as_entire_binding(),
+                }],
+            })
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("nexo.skin3d.sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // A 1x1 placeholder keeps the bind group valid before any skin has
+        // been uploaded.
+        let skin_binding = blank_binding(device, &texture_layout, &sampler);
+
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nexo.skin3d.vertices"),
+            size: 1024,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            model,
+            outline,
+            vertices,
+            vertex_capacity: 0,
+            vertex_count: 0,
+            uniforms,
+            uniform_bindings,
+            texture_layout,
+            sampler,
+            skin_binding,
+            cape_binding: None,
+            uploaded_key: None,
+            depth: None,
+            depth_size: (0, 0),
+        }
+    }
+}
+
+impl ModelPipeline {
+    fn upload_geometry(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        geometry: &Geometry,
+    ) {
+        let needed = geometry.vertices.len() as u32;
+        if needed > self.vertex_capacity {
+            self.vertices = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nexo.skin3d.vertices"),
+                size: (std::mem::size_of::<Vertex>() * geometry.vertices.len()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.vertex_capacity = needed;
+        }
+        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&geometry.vertices));
+        self.vertex_count = needed;
+    }
+
+    fn upload_textures(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: u64,
+        skin: &Rgba,
+        cape: Option<&Rgba>,
+    ) {
+        if self.uploaded_key == Some(key) {
+            return;
+        }
+
+        self.skin_binding = texture_binding(device, queue, &self.texture_layout, &self.sampler, skin);
+        self.cape_binding = cape
+            .map(|cape| texture_binding(device, queue, &self.texture_layout, &self.sampler, cape));
+        self.uploaded_key = Some(key);
+    }
+
+    /// The depth buffer has to match the surface it's paired with, so it's
+    /// rebuilt whenever the window changes size.
+    fn resize_depth(&mut self, device: &wgpu::Device, size: iced::Size<u32>) {
+        let size = (size.width.max(1), size.height.max(1));
+        if self.depth.is_some() && self.depth_size == size {
+            return;
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("nexo.skin3d.depth"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        self.depth = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        self.depth_size = size;
+    }
+}
+
+fn texture_binding(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    image: &Rgba,
+) -> wgpu::BindGroup {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("nexo.skin3d.texture"),
+        size: wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width * 4),
+            rows_per_image: Some(image.height),
+        },
+        wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("nexo.skin3d.texture.bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+fn blank_binding(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("nexo.skin3d.blank"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("nexo.skin3d.blank.bind"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+const SHADER: &str = r#"
+struct Uniforms {
+    mvp: mat4x4<f32>,
+    colour: vec4<f32>,
+    expand: f32,
+    textured: f32,
+    padding: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
+
+struct VertexIn {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) expand: vec3<f32>,
+    @location(3) shade: f32,
+};
+
+struct VertexOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) shade: f32,
+};
+
+@vertex
+fn vs_main(in: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    // Outline passes push each vertex away from its own cuboid's centre.
+    let position = in.position + in.expand * u.expand;
+    out.clip = u.mvp * vec4<f32>(position, 1.0);
+    out.uv = in.uv;
+    out.shade = in.shade;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    if (u.textured < 0.5) {
+        return u.colour;
+    }
+
+    let sampled = textureSample(tex, samp, in.uv);
+    // Overlay layers are mostly transparent; drawing them would otherwise
+    // block the base layer behind via the depth buffer.
+    if (sampled.a < 0.05) {
+        discard;
+    }
+    return vec4<f32>(sampled.rgb * in.shade, sampled.a);
+}
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_has_geometry_for_every_part() {
+        let model = build_model(SkinModel::Classic, false);
+        // Six base parts plus six overlays, six faces each, two triangles a
+        // face, three vertices a triangle.
+        assert_eq!(model.vertices.len(), 12 * 6 * 6);
+        assert_eq!(model.cape_start, model.vertices.len() as u32);
+    }
+
+    #[test]
+    fn cape_is_appended_after_the_body() {
+        let without = build_model(SkinModel::Classic, false);
+        let with = build_model(SkinModel::Classic, true);
+
+        assert_eq!(with.cape_start, without.vertices.len() as u32);
+        assert_eq!(with.vertices.len(), without.vertices.len() + 36);
+    }
+
+    #[test]
+    fn slim_arms_are_narrower_and_hang_closer() {
+        let classic = build_model(SkinModel::Classic, false);
+        let slim = build_model(SkinModel::Slim, false);
+        assert_eq!(classic.vertices.len(), slim.vertices.len());
+
+        let widest = |g: &Geometry| {
+            g.vertices
+                .iter()
+                .map(|v| v.position[0].abs())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(widest(&slim) < widest(&classic));
+    }
+
+    #[test]
+    fn expand_directions_point_away_from_their_own_box() {
+        let model = build_model(SkinModel::Classic, false);
+        // A normalized direction, or zero — never anything longer, which
+        // would make the outline uneven.
+        for vertex in &model.vertices {
+            let length = glam::Vec3::from(vertex.expand).length();
+            assert!(length <= 1.001, "expand direction was not normalized");
+        }
+    }
+
+    #[test]
+    fn pose_eases_back_to_rest_and_stops() {
+        let mut pose = Pose {
+            yaw: REST_YAW + 1.5,
+            pitch: REST_PITCH - 0.5,
+            ..Pose::default()
+        };
+        pose.released_at = Some(Instant::now());
+
+        // A few seconds of 60fps steps should settle it.
+        for _ in 0..600 {
+            pose.ease_back(1.0 / 60.0);
+        }
+
+        assert!(pose.at_rest(), "pose never settled");
+        // Settling clears the timer, so no further redraws are requested.
+        assert!(pose.released_at.is_none());
+    }
+}

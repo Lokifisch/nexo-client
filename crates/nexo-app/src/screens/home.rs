@@ -1,6 +1,6 @@
 use crate::theme;
 use crate::{App, Message, Screen};
-use iced::widget::{button, column, container, image, text, Space};
+use iced::widget::{button, column, container, text, Space};
 use iced::{Element, Fill};
 
 /// Landing screen: the active account's character, front-on, with their name
@@ -14,13 +14,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None => text("Not signed in").size(22).color(theme::MUTED).into(),
     };
 
-    let character: Element<'_, Message> = match &app.body {
-        Some(handle) => image(handle.clone())
-            // The render is pixel art upscaled by an integer factor, so it
-            // must not be resampled again on the way to the screen.
-            .filter_method(image::FilterMethod::Nearest)
-            .into(),
-        None => Space::new().height(352).into(),
+    let character: Element<'_, Message> = match &app.skin_texture {
+        Some(texture) => iced::widget::shader(crate::skin3d::SkinViewer::new(
+            std::sync::Arc::clone(texture),
+            app.cape_texture.clone(),
+            app.skin_model,
+            app.skin_key,
+        ))
+        .width(280)
+        .height(380)
+        .into(),
+        // Textures load a frame or two after boot; reserve the space so the
+        // layout doesn't jump when they arrive.
+        None => Space::new().width(280).height(380).into(),
     };
 
     let mut content = column![name, Space::new().height(4), character]
