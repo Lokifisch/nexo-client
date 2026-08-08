@@ -207,10 +207,10 @@ impl App {
 
                 // Only re-fetch the skin when the active account actually
                 // changed; reload() runs after nearly every action.
-                if changed {
-                    if let Some(core) = self.core.clone() {
-                        return load_skin(core, self.active_account().cloned());
-                    }
+                if changed
+                    && let Some(core) = self.core.clone()
+                {
+                    return load_skin(core, self.active_account().cloned());
                 }
                 Task::none()
             }
@@ -510,9 +510,7 @@ fn load_versions(core: Nexo) -> Task<Message> {
 fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
     Task::perform(
         async move {
-            let Some(account) = account else {
-                return None;
-            };
+            let account = account?;
             let url = account.skin_url.clone()?;
 
             match skin::fetch(core.http(), &url, account.skin_model).await {

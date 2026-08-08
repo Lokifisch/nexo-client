@@ -309,16 +309,21 @@ mod tests {
     /// existing store becomes unreadable.
     #[test]
     fn digest_construction_is_pinned() {
-        let mut hasher = Sha256::new();
-        hasher.update(DOMAIN.as_bytes());
-        hasher.update([b'\n']);
-        hasher.update(b"cpu.name=Test CPU");
-        let expected: [u8; 32] = hasher.finalize().into();
+        // Written out longhand: domain, then a newline byte before *each*
+        // part — including the first. Getting that leading newline wrong is
+        // the easiest way to silently diverge from the Java side.
+        let mut expected = Sha256::new();
+        expected.update(b"nexomod-hwkey-v1");
+        expected.update([b'\n']);
+        expected.update(b"cpu.name=Test CPU");
+        expected.update([b'\n']);
+        expected.update(b"gpu=0x1 0x2");
+        let expected: [u8; 32] = expected.finalize().into();
 
         // Same inputs assembled the way `derive` does.
         let mut actual = Sha256::new();
-        actual.update("nexomod-hwkey-v1".as_bytes());
-        for part in ["cpu.name=Test CPU"] {
+        actual.update(DOMAIN.as_bytes());
+        for part in ["cpu.name=Test CPU", "gpu=0x1 0x2"] {
             actual.update([b'\n']);
             actual.update(part.as_bytes());
         }
