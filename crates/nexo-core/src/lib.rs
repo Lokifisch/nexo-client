@@ -18,6 +18,7 @@ pub mod modrinth;
 pub mod nexo_mod;
 pub mod paths;
 pub mod running;
+pub mod shared_store;
 pub mod skin;
 pub mod util;
 

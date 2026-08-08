@@ -79,7 +79,16 @@ impl Paths {
         self.root.join("java")
     }
 
+    /// The encrypted store shared with Nexo Mod. Both halves of the project
+    /// read and write this one file, which is what lets an account added in
+    /// the launcher appear in the in-game switcher.
     pub fn accounts_file(&self) -> PathBuf {
+        self.root.join("accounts.dat")
+    }
+
+    /// The launcher's original plaintext store. Only read, and only to
+    /// migrate it into [`Self::accounts_file`] once.
+    pub fn legacy_accounts_file(&self) -> PathBuf {
         self.root.join("accounts.json")
     }
 

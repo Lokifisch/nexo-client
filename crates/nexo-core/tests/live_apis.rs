@@ -151,3 +151,81 @@ async fn modrinth_search_and_versions_parse() {
         version.version_number, file.filename, file.size
     );
 }
+
+/// Writes a store for the Java interop check. Not a test of its own — it
+/// produces the fixture that `AccountStore.java` is then run against, which
+/// is the only way to prove the two implementations agree on the format.
+///
+/// ```sh
+/// NEXO_INTEROP_ROOT=/tmp/nexo-interop \
+///   cargo test -p nexo-core --test live_apis interop -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "fixture generator for the Java interop check"]
+async fn interop_fixture() {
+    use nexo_core::auth::{Account, SkinModel};
+    use nexo_core::shared_store::{Contents, SharedStore};
+
+    let root = std::env::var("NEXO_INTEROP_ROOT").expect("NEXO_INTEROP_ROOT must be set");
+    let path = std::path::Path::new(&root).join("nexo").join("accounts.dat");
+
+    let contents = Contents {
+        accounts: vec![
+            Account {
+                uuid: "069a79f444e94726a5befca90e38aaf5".into(),
+                username: "AlphaPlayer".into(),
+                access_token: "mc-token-alpha".into(),
+                refresh_token: "msa-refresh-alpha".into(),
+                expires_at: 1_900_000_000,
+                skin_url: Some("https://example.invalid/alpha.png".into()),
+                skin_model: SkinModel::Slim,
+                cape_url: Some("https://example.invalid/cape.png".into()),
+            },
+            Account {
+                uuid: "853c80ef3c3749fdaa49938b674adae6".into(),
+                username: "BetaPlayer".into(),
+                access_token: "mc-token-beta".into(),
+                refresh_token: "msa-refresh-beta".into(),
+                expires_at: 1_900_000_001,
+                skin_url: None,
+                skin_model: SkinModel::Classic,
+                cape_url: None,
+            },
+        ],
+        active: Some("853c80ef3c3749fdaa49938b674adae6".into()),
+        ..Contents::default()
+    };
+
+    SharedStore::new(&path).save(&contents).await.unwrap();
+    println!("WROTE {}", path.display());
+}
+
+/// Reads back a store the Java side wrote, completing the round trip.
+#[tokio::test]
+#[ignore = "second half of the Java interop check"]
+async fn interop_read_back() {
+    use nexo_core::shared_store::SharedStore;
+
+    let root = std::env::var("NEXO_INTEROP_ROOT").expect("NEXO_INTEROP_ROOT must be set");
+    let path = std::path::Path::new(&root).join("nexo").join("accounts.dat");
+
+    let contents = SharedStore::new(&path).load().await.unwrap();
+    for account in &contents.accounts {
+        println!("  {} uuid={}", account.username, account.uuid);
+    }
+    println!("ACTIVE={:?}", contents.active);
+
+    // The account Java added must be visible here, with its dashes stripped
+    // back to the form the rest of the crate keys on.
+    assert!(
+        contents
+            .accounts
+            .iter()
+            .any(|a| a.username == "GammaFromGame"
+                && a.uuid == "11111111222233334444555555555555"),
+        "the account written by Java was not readable from Rust"
+    );
+    // And the ones Rust wrote earlier must have survived Java's rewrite.
+    assert!(contents.accounts.iter().any(|a| a.username == "AlphaPlayer"));
+    assert_eq!(contents.accounts.len(), 3);
+}

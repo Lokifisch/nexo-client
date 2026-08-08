@@ -1,66 +1,83 @@
 //! Persistent multi-account storage.
 //!
-//! Tokens are secrets: the file is written with owner-only permissions on
-//! Unix. That is deliberately weaker than `Mod/`'s AES-256-GCM at-rest
-//! encryption — matching that is worth doing before any public release, and
-//! is tracked as such. File permissions at least keep other local users out.
+//! Backed by [`crate::shared_store`], the encrypted file Nexo Mod reads and
+//! writes as well — so signing in here shows up in the in-game account
+//! switcher, and an account added in game shows up here.
+//!
+//! Every mutation is read-modify-write rather than a wholesale snapshot. The
+//! launcher usually stays open while the game runs, so both processes can be
+//! writing; re-reading first means a change made by the other side is merged
+//! instead of clobbered.
 
 use crate::auth::{Account, Auth};
-use crate::error::{Error, IoContext, Result};
-use serde::{Deserialize, Serialize};
+use crate::error::{Error, Result};
+use crate::shared_store::{Contents, SharedStore};
 use std::path::PathBuf;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct AccountsFile {
-    #[serde(default)]
-    accounts: Vec<Account>,
-    /// UUID of the account launches use by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    active: Option<String>,
-}
 
 #[derive(Debug, Clone)]
 pub struct AccountStore {
-    path: PathBuf,
+    shared: SharedStore,
+    /// The launcher's old plaintext file, migrated once then left alone.
+    legacy: PathBuf,
 }
 
 impl AccountStore {
     pub fn new(paths: &crate::paths::Paths) -> Self {
         Self {
-            path: paths.accounts_file(),
+            shared: SharedStore::new(paths.accounts_file()),
+            legacy: paths.legacy_accounts_file(),
         }
     }
 
-    async fn read(&self) -> Result<AccountsFile> {
-        if !self.path.exists() {
-            return Ok(AccountsFile::default());
+    /// Loads the shared store, importing the old plaintext one the first time
+    /// if the shared store doesn't exist yet.
+    ///
+    /// The legacy file is deliberately left in place rather than deleted: it
+    /// costs nothing, and losing accounts to a migration bug would be far
+    /// worse than a stale file sitting there.
+    async fn read(&self) -> Result<Contents> {
+        if !self.shared.exists()
+            && let Some(migrated) = self.migrate().await?
+        {
+            return Ok(migrated);
         }
-        let raw = tokio::fs::read(&self.path).await.ctx(&self.path)?;
-        // A corrupt accounts file shouldn't brick the app — worst case the
-        // user signs in again.
-        Ok(serde_json::from_slice(&raw).unwrap_or_default())
+        self.shared.load().await
     }
 
-    async fn write(&self, file: &AccountsFile) -> Result<()> {
-        let json = serde_json::to_vec_pretty(file)?;
-        tokio::fs::write(&self.path, &json).await.ctx(&self.path)?;
-        self.restrict_permissions().await
-    }
+    async fn migrate(&self) -> Result<Option<Contents>> {
+        if !self.legacy.exists() {
+            return Ok(None);
+        }
 
-    #[cfg(unix)]
-    async fn restrict_permissions(&self) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        tokio::fs::set_permissions(&self.path, perms)
-            .await
-            .ctx(&self.path)
-    }
+        let Ok(raw) = tokio::fs::read(&self.legacy).await else {
+            return Ok(None);
+        };
 
-    #[cfg(not(unix))]
-    async fn restrict_permissions(&self) -> Result<()> {
-        // Windows inherits the user-profile ACL, which is already
-        // owner-scoped for %APPDATA%.
-        Ok(())
+        #[derive(serde::Deserialize)]
+        struct LegacyFile {
+            #[serde(default)]
+            accounts: Vec<Account>,
+            #[serde(default)]
+            active: Option<String>,
+        }
+
+        let Ok(legacy) = serde_json::from_slice::<LegacyFile>(&raw) else {
+            tracing::warn!("the old accounts file is unreadable; starting fresh");
+            return Ok(None);
+        };
+
+        let contents = Contents {
+            accounts: legacy.accounts,
+            active: legacy.active,
+            ..Contents::default()
+        };
+
+        tracing::info!(
+            accounts = contents.accounts.len(),
+            "migrating accounts into the store shared with Nexo Mod"
+        );
+        self.shared.save(&contents).await?;
+        Ok(Some(contents))
     }
 
     pub async fn list(&self) -> Result<Vec<Account>> {
@@ -68,11 +85,11 @@ impl AccountStore {
     }
 
     pub async fn active(&self) -> Result<Option<Account>> {
-        let file = self.read().await?;
-        let Some(active) = file.active else {
-            return Ok(file.accounts.into_iter().next());
+        let contents = self.read().await?;
+        let Some(active) = contents.active.clone() else {
+            return Ok(contents.accounts.into_iter().next());
         };
-        Ok(file
+        Ok(contents
             .accounts
             .into_iter()
             .find(|a| a.uuid == active))
@@ -81,29 +98,29 @@ impl AccountStore {
     /// Adds or replaces an account, making it active. Re-signing into an
     /// account already present updates its tokens rather than duplicating it.
     pub async fn upsert(&self, account: Account) -> Result<()> {
-        let mut file = self.read().await?;
-        file.accounts.retain(|a| a.uuid != account.uuid);
-        file.active = Some(account.uuid.clone());
-        file.accounts.push(account);
-        self.write(&file).await
+        let mut contents = self.read().await?;
+        contents.accounts.retain(|a| a.uuid != account.uuid);
+        contents.active = Some(account.uuid.clone());
+        contents.accounts.push(account);
+        self.shared.save(&contents).await
     }
 
     pub async fn set_active(&self, uuid: &str) -> Result<()> {
-        let mut file = self.read().await?;
-        if !file.accounts.iter().any(|a| a.uuid == uuid) {
+        let mut contents = self.read().await?;
+        if !contents.accounts.iter().any(|a| a.uuid == uuid) {
             return Err(Error::invalid("that account is not signed in"));
         }
-        file.active = Some(uuid.to_string());
-        self.write(&file).await
+        contents.active = Some(uuid.to_string());
+        self.shared.save(&contents).await
     }
 
     pub async fn remove(&self, uuid: &str) -> Result<()> {
-        let mut file = self.read().await?;
-        file.accounts.retain(|a| a.uuid != uuid);
-        if file.active.as_deref() == Some(uuid) {
-            file.active = file.accounts.first().map(|a| a.uuid.clone());
+        let mut contents = self.read().await?;
+        contents.accounts.retain(|a| a.uuid != uuid);
+        if contents.active.as_deref() == Some(uuid) {
+            contents.active = contents.accounts.first().map(|a| a.uuid.clone());
         }
-        self.write(&file).await
+        self.shared.save(&contents).await
     }
 
     /// Returns the active account with a guaranteed-valid token, refreshing
