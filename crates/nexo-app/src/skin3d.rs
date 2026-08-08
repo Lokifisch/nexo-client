@@ -1588,8 +1588,10 @@ mod tests {
 
     #[test]
     fn revealing_a_pose_it_already_holds_does_nothing() {
-        let mut pose = Pose::default();
-        pose.yaw = BACK_YAW;
+        let mut pose = Pose {
+            yaw: BACK_YAW,
+            ..Pose::default()
+        };
 
         assert!(
             !pose.reveal(BACK_YAW),
@@ -1607,8 +1609,10 @@ mod tests {
 
         // And a target just the other side of the wrap point moves a little,
         // not almost all the way round.
-        let mut pose = Pose::default();
-        pose.yaw = BACK_YAW - 0.3;
+        let mut pose = Pose {
+            yaw: BACK_YAW - 0.3,
+            ..Pose::default()
+        };
         assert!(pose.reveal(BACK_YAW));
         assert!(
             (pose.yaw - (BACK_YAW - 0.3)).abs() < 0.001,
