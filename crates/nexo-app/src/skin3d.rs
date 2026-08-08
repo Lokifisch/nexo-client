@@ -6,17 +6,21 @@
 //!
 //! Signed in, this is a single textured pass.
 //!
-//! Signed out, the figure becomes a hollow rainbow badge instead: the model
-//! is drawn into the depth buffer with colour writes disabled, then a single
-//! inverted hull is drawn behind it. A hull is the model re-drawn with its
-//! faces pushed outwards and *front* faces culled, so only its far side
-//! shows; because that far side sits behind the model, the depth test keeps
-//! it only where the model does not cover it, leaving a ring. The model must
-//! be drawn first or the hull fills in solid.
+//! Signed out, the figure becomes a hollow rainbow badge: the outline of its
+//! *silhouette*, like a cast shadow, with nothing inside.
 //!
-//! Deliberately one hull, not two. A second, narrower hull produced a black
-//! inner stroke, but on thin parts — arms especially — the two expanded
-//! shells intersect each other and the pair z-fights into a mess.
+//! This is done as a two-pass screen-space effect rather than with geometry.
+//! The model is rendered into an offscreen coverage mask, then a fullscreen
+//! pass walks that mask: a pixel outside the figure that has any covered
+//! pixel within the outline radius is part of the ring, and everything else
+//! is discarded.
+//!
+//! The obvious approach — an inverted hull, the model re-drawn expanded with
+//! front faces culled — was tried first and cannot produce this. It outlines
+//! every cuboid separately, so arms get their own rings inside the body's,
+//! and where a limb overlaps the torso the two expanded shells z-fight. A
+//! silhouette has no internal edges by definition, and only a mask over the
+//! union of all parts gives that.
 //!
 //! Each cuboid expands about its own centre rather than the model's, or
 //! limbs would splay outwards as the outline grew.
@@ -51,8 +55,13 @@ const DRAG_SENSITIVITY: f32 = 0.011;
 /// Keeps the model from being tipped past vertical, where it reads as broken.
 const MAX_PITCH: f32 = 0.9;
 
-/// Outline width, in model units (1 unit = 1 skin pixel).
-const OUTLINE_WIDTH: f32 = 0.9;
+/// Outline thickness, in physical pixels. Screen-space now, not model
+/// units — the ring is produced by dilating a mask, not by expanding
+/// geometry.
+const OUTLINE_PIXELS: f32 = 4.0;
+
+/// Single channel is all the coverage mask needs.
+const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 /// Interaction state. Lives in the widget tree, so a redraw doesn't reset the
 /// pose the user dragged to.
@@ -515,17 +524,16 @@ impl shader::Primitive for Scene {
         // One uniform block per pass; only the outline width, colour and
         // whether to sample the texture differ.
         let passes = [
-            // The hull. `colour` goes unused: it derives its own from
-            // position and time.
+            // Used by both the textured pass and the coverage pass; the
+            // vertex stage is shared, so the geometry must match exactly.
             Uniforms {
                 mvp: self.mvp,
                 colour: [1.0; 4],
-                expand: OUTLINE_WIDTH,
-                textured: 0.0,
-                rainbow: 1.0,
-                time: self.time,
+                expand: 0.0,
+                textured: 1.0,
+                rainbow: 0.0,
+                time: 0.0,
             },
-            // The model.
             Uniforms {
                 mvp: self.mvp,
                 colour: [1.0; 4],
@@ -543,6 +551,20 @@ impl shader::Primitive for Scene {
                 bytemuck::bytes_of(uniforms),
             );
         }
+
+        queue.write_buffer(
+            &pipeline.outline_uniform,
+            0,
+            bytemuck::bytes_of(&OutlineUniforms {
+                radius: OUTLINE_PIXELS,
+                time: self.time,
+                _padding: [0.0; 2],
+            }),
+        );
+
+        if self.outlined {
+            pipeline.resize_mask(device, viewport.physical_size());
+        }
     }
 
     fn render(
@@ -556,6 +578,110 @@ impl shader::Primitive for Scene {
             return;
         };
         if pipeline.vertex_count == 0 {
+            return;
+        }
+
+        let body = 0..self.geometry.cape_start;
+        let cape = self.geometry.cape_start..pipeline.vertex_count;
+
+        // Draws the figure's geometry, whatever the current pass is.
+        let draw_figure = |pass: &mut wgpu::RenderPass<'_>| {
+            pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
+            pass.set_bind_group(0, &pipeline.uniform_bindings[0], &[]);
+            pass.set_bind_group(1, &pipeline.skin_binding, &[]);
+            pass.draw(body.clone(), 0..1);
+
+            if !cape.is_empty()
+                && let Some(cape_binding) = pipeline.cape_binding.as_ref()
+            {
+                pass.set_bind_group(1, cape_binding, &[]);
+                pass.draw(cape.clone(), 0..1);
+            }
+        };
+
+        if self.outlined {
+            let (Some(mask), Some(mask_binding)) =
+                (pipeline.mask.as_ref(), pipeline.mask_binding.as_ref())
+            else {
+                return;
+            };
+
+            // Pass one: coverage into the mask. Cleared to zero, so anything
+            // left over from a previous frame cannot leak into the ring.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("nexo.skin3d.mask"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: mask,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                // Same viewport as the final pass, so mask pixels and screen
+                // pixels are the same pixels.
+                pass.set_viewport(
+                    self.bounds.x,
+                    self.bounds.y,
+                    self.bounds.width,
+                    self.bounds.height,
+                    0.0,
+                    1.0,
+                );
+                pass.set_pipeline(&pipeline.mask_pipeline);
+                draw_figure(&mut pass);
+            }
+
+            // Pass two: dilate the mask into the ring, straight onto the UI.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("nexo.skin3d.outline"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            pass.set_scissor_rect(
+                clip_bounds.x,
+                clip_bounds.y,
+                clip_bounds.width.max(1),
+                clip_bounds.height.max(1),
+            );
+            pass.set_viewport(
+                self.bounds.x,
+                self.bounds.y,
+                self.bounds.width,
+                self.bounds.height,
+                0.0,
+                1.0,
+            );
+            pass.set_pipeline(&pipeline.outline_pipeline);
+            pass.set_bind_group(0, &pipeline.outline_uniform_binding, &[]);
+            pass.set_bind_group(1, mask_binding, &[]);
+            // Three vertices: one oversized triangle covering the viewport.
+            pass.draw(0..3, 0..1);
             return;
         }
 
@@ -598,36 +724,8 @@ impl shader::Primitive for Scene {
             0.0,
             1.0,
         );
-        pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
-
-        let body = 0..self.geometry.cape_start;
-        let cape = self.geometry.cape_start..pipeline.vertex_count;
-
-        // The model always goes first, so it owns the depth buffer. Signed
-        // out it contributes depth only, which is what turns the hulls behind
-        // it into rings rather than a filled silhouette.
-        pass.set_pipeline(if self.outlined {
-            &pipeline.depth_only
-        } else {
-            &pipeline.model
-        });
-        pass.set_bind_group(0, &pipeline.uniform_bindings[1], &[]);
-        pass.set_bind_group(1, &pipeline.skin_binding, &[]);
-        pass.draw(body, 0..1);
-
-        if !cape.is_empty()
-            && let Some(cape_binding) = pipeline.cape_binding.as_ref()
-        {
-            pass.set_bind_group(1, cape_binding, &[]);
-            pass.draw(cape, 0..1);
-        }
-
-        if self.outlined {
-            pass.set_pipeline(&pipeline.outline);
-            pass.set_bind_group(0, &pipeline.uniform_bindings[0], &[]);
-            pass.set_bind_group(1, &pipeline.skin_binding, &[]);
-            pass.draw(0..pipeline.vertex_count, 0..1);
-        }
+        pass.set_pipeline(&pipeline.model);
+        draw_figure(&mut pass);
     }
 }
 
@@ -635,8 +733,15 @@ impl shader::Primitive for Scene {
 #[derive(Debug)]
 pub struct ModelPipeline {
     model: wgpu::RenderPipeline,
-    outline: wgpu::RenderPipeline,
-    depth_only: wgpu::RenderPipeline,
+    /// Renders the figure's coverage into [`Self::mask`].
+    mask_pipeline: wgpu::RenderPipeline,
+    /// Fullscreen pass that turns the mask into a ring.
+    outline_pipeline: wgpu::RenderPipeline,
+    mask: Option<wgpu::TextureView>,
+    mask_binding: Option<wgpu::BindGroup>,
+    mask_layout: wgpu::BindGroupLayout,
+    outline_uniform: wgpu::Buffer,
+    outline_uniform_binding: wgpu::BindGroup,
     vertices: wgpu::Buffer,
     vertex_capacity: u32,
     vertex_count: u32,
@@ -770,13 +875,116 @@ impl shader::Pipeline for ModelPipeline {
         };
 
         let model = make_pipeline("nexo.skin3d.model", wgpu::Face::Back, wgpu::ColorWrites::ALL);
-        // Front faces culled, so an expanded hull shows only its far side.
-        let outline =
-            make_pipeline("nexo.skin3d.outline", wgpu::Face::Front, wgpu::ColorWrites::ALL);
-        // Depth only. Used signed-out to punch the figure's shape out of the
-        // hulls behind it without drawing the skin itself.
-        let depth_only =
-            make_pipeline("nexo.skin3d.depth", wgpu::Face::Back, wgpu::ColorWrites::empty());
+
+        // Coverage pass. Single-channel target, and the same vertex stage as
+        // the model so the mask lines up with it exactly.
+        let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("nexo.skin3d.mask"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: std::slice::from_ref(&vertex_layout),
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_mask"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: MASK_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nexo.skin3d.outline.shader"),
+            source: wgpu::ShaderSource::Wgsl(OUTLINE_SHADER.into()),
+        });
+
+        // Read with textureLoad rather than a sampler: the mask is queried at
+        // exact pixels, so there is nothing to filter.
+        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nexo.skin3d.mask.layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+
+        let outline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("nexo.skin3d.outline.layout"),
+            bind_group_layouts: &[&uniform_layout, &mask_layout],
+            push_constant_ranges: &[],
+        });
+
+        let outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("nexo.skin3d.outline"),
+            layout: Some(&outline_layout),
+            vertex: wgpu::VertexState {
+                module: &outline_shader,
+                entry_point: Some("vs_outline"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_shader,
+                entry_point: Some("fs_outline"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            // No depth: it reads the mask instead.
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let outline_uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nexo.skin3d.outline.uniform"),
+            size: std::mem::size_of::<OutlineUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let outline_uniform_binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nexo.skin3d.outline.uniform.bind"),
+            layout: &uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: outline_uniform.as_entire_binding(),
+            }],
+        });
 
         let uniforms: [wgpu::Buffer; 2] = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -818,8 +1026,13 @@ impl shader::Pipeline for ModelPipeline {
 
         Self {
             model,
-            outline,
-            depth_only,
+            mask_pipeline,
+            outline_pipeline,
+            mask: None,
+            mask_binding: None,
+            mask_layout,
+            outline_uniform,
+            outline_uniform_binding,
             vertices,
             vertex_capacity: 0,
             vertex_count: 0,
@@ -900,6 +1113,44 @@ impl ModelPipeline {
 
         self.depth = Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
         self.depth_size = size;
+        // The mask is addressed in the same pixel coordinates as the surface,
+        // so it has to be rebuilt alongside the depth buffer.
+        self.mask = None;
+    }
+
+    /// Coverage mask, matching the surface pixel for pixel so the fullscreen
+    /// pass can read it at `frag_coord` without any remapping.
+    fn resize_mask(&mut self, device: &wgpu::Device, size: iced::Size<u32>) {
+        let size = (size.width.max(1), size.height.max(1));
+        if self.mask.is_some() && self.depth_size == size {
+            return;
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("nexo.skin3d.mask"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: MASK_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.mask_binding = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nexo.skin3d.mask.bind"),
+            layout: &self.mask_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        }));
+        self.mask = Some(view);
     }
 }
 
@@ -1061,6 +1312,19 @@ fn vs_main(in: VertexIn) -> VertexOut {
     return out;
 }
 
+// Coverage only: writes 1 wherever the figure is solid. Shares the vertex
+// stage, so the mask lines up exactly with where the model would have drawn.
+@fragment
+fn fs_mask(in: VertexOut) -> @location(0) vec4<f32> {
+    let sampled = textureSample(tex, samp, in.uv);
+    // Same cutout as the model pass, or transparent overlay boxes would make
+    // the silhouette a set of solid slabs.
+    if (sampled.a < 0.05) {
+        discard;
+    }
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (u.textured < 0.5) {
@@ -1082,6 +1346,84 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(sampled.rgb * in.shade, sampled.a);
 }
 "#;
+
+/// Screen-space outline pass. Reads the coverage mask and paints the ring
+/// around it.
+const OUTLINE_SHADER: &str = r#"
+struct Outline {
+    // Radius in physical pixels.
+    radius: f32,
+    time: f32,
+    padding: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> o: Outline;
+@group(1) @binding(0) var mask: texture_2d<f32>;
+
+// Full hue cycles per second.
+const DRIFT: f32 = 0.35;
+// Hue change per pixel, so the band sweeps across the figure rather than
+// flashing as one flat colour.
+const SPREAD: f32 = 0.0016;
+// Samples around the ring. Enough that a circle of this radius has no gaps,
+// few enough to stay cheap at every pixel of the border.
+const STEPS: i32 = 24;
+
+fn hue_to_rgb(h: f32) -> vec3<f32> {
+    let r = abs(h * 6.0 - 3.0) - 1.0;
+    let g = 2.0 - abs(h * 6.0 - 2.0);
+    let b = 2.0 - abs(h * 6.0 - 4.0);
+    return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+@vertex
+fn vs_outline(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    // One oversized triangle covering the viewport — cheaper than a quad and
+    // avoids a seam down the diagonal.
+    let i = i32(index);
+    let x = f32((i << 1u) & 2) * 2.0 - 1.0;
+    let y = f32(i & 1) * 4.0 - 1.0;
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fs_outline(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let here = vec2<i32>(frag.xy);
+
+    // Inside the figure: this is the "invisible skin" — the silhouette's
+    // interior is left untouched.
+    if (textureLoad(mask, here, 0).r > 0.5) {
+        discard;
+    }
+
+    // Outside: part of the ring if anything solid lies within the radius.
+    // Because the mask is the union of every cuboid, there are no internal
+    // edges to outline — exactly what a cast shadow looks like.
+    var found = false;
+    for (var step = 0; step < STEPS; step = step + 1) {
+        let angle = f32(step) * (6.2831853 / f32(STEPS));
+        let offset = vec2<f32>(cos(angle), sin(angle)) * o.radius;
+        if (textureLoad(mask, here + vec2<i32>(offset), 0).r > 0.5) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        discard;
+    }
+
+    let hue = fract((frag.x + frag.y) * SPREAD + o.time * DRIFT);
+    return vec4<f32>(hue_to_rgb(hue), 1.0);
+}
+"#;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct OutlineUniforms {
+    radius: f32,
+    time: f32,
+    _padding: [f32; 2],
+}
 
 #[cfg(test)]
 mod tests {
