@@ -8,6 +8,7 @@
 pub mod accounts;
 pub mod auth;
 pub mod error;
+pub mod hwkey;
 pub mod instance;
 pub mod java;
 pub mod minecraft;
