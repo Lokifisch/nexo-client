@@ -1,0 +1,26 @@
+[package]
+name = "nexo-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Instance management, auth, and content APIs for the Nexo client"
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+directories.workspace = true
+uuid.workspace = true
+sha1.workspace = true
+hex.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+uuid = { workspace = true, features = ["v4"] }
