@@ -23,11 +23,40 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None,
     );
 
+    // Two columns: the character on the left, everything that changes it on
+    // the right — so the effect of a change is visible next to the control
+    // that made it.
+    let preview: Element<'_, Message> = match &app.skin_texture {
+        Some(texture) => container(
+            iced::widget::shader(crate::skin3d::SkinViewer::new(
+                std::sync::Arc::clone(texture),
+                app.cape_texture.clone(),
+                app.skin_model,
+                app.skin_key,
+                // No border here: this is a real skin, and the ring exists to
+                // mark the signed-out placeholder.
+                false,
+            ))
+            .width(240)
+            .height(340),
+        )
+        .padding(16)
+        .style(theme::card)
+        .into(),
+        None => Space::new().width(272).height(372).into(),
+    };
+
+    let controls = column![
+        skin_card(app, account.skin_model),
+        capes_card(app),
+    ]
+    .spacing(16)
+    .width(Fill);
+
     scrollable(
         column![
             heading,
-            skin_card(app, account.skin_model),
-            capes_card(app),
+            row![preview, controls].spacing(20),
         ]
         .spacing(16)
         .width(Fill),
@@ -56,7 +85,7 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
     container(
         column![
             text("Skin").size(17).color(theme::TEXT),
-            text("Upload a 64×64 PNG. Slim gives the narrower three-pixel arms.")
+            text("Drag the model to turn it. Upload a 64×64 PNG; slim gives the narrower three-pixel arms.")
                 .size(12)
                 .color(theme::MUTED),
             Space::new().height(4),
