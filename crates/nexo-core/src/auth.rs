@@ -63,6 +63,11 @@ pub struct Account {
     /// drawn, so it has to survive alongside the URL.
     #[serde(default)]
     pub skin_model: SkinModel,
+    /// Active cape texture, when the account has one equipped. Most accounts
+    /// have none, and an equipped cape can be unequipped, so this is
+    /// genuinely optional rather than merely sometimes-unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cape_url: Option<String>,
 }
 
 impl Account {
@@ -168,7 +173,10 @@ impl Auth {
         let xsts = self.xsts(&xbl.token).await?;
         let mc_token = self.minecraft_token(&user_hash, &xsts.token).await?;
         let profile = self.profile(&mc_token.access_token).await?;
+        // Both read the profile by reference, so they must be taken before
+        // the fields below are moved out of it.
         let skin = profile.active_skin();
+        let cape_url = profile.active_cape().map(|c| c.url);
 
         Ok(Account {
             uuid: profile.id,
@@ -178,6 +186,7 @@ impl Auth {
             expires_at: crate::instance::now() + mc_token.expires_in,
             skin_url: skin.as_ref().map(|s| s.url.clone()),
             skin_model: skin.map(|s| s.model()).unwrap_or_default(),
+            cape_url,
         })
     }
 
@@ -521,6 +530,8 @@ struct McProfile {
     name: String,
     #[serde(default)]
     skins: Vec<ProfileSkin>,
+    #[serde(default)]
+    capes: Vec<ProfileCape>,
 }
 
 impl McProfile {
@@ -532,6 +543,23 @@ impl McProfile {
             .or_else(|| self.skins.first())
             .cloned()
     }
+
+    /// Owned capes are all listed; only an equipped one is `ACTIVE`. Unlike
+    /// skins there's deliberately no fallback to the first entry — showing an
+    /// unequipped cape would misrepresent what the player looks like in game.
+    fn active_cape(&self) -> Option<ProfileCape> {
+        self.capes
+            .iter()
+            .find(|c| c.state.eq_ignore_ascii_case("ACTIVE"))
+            .cloned()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProfileCape {
+    url: String,
+    #[serde(default)]
+    state: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
