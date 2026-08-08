@@ -544,7 +544,9 @@ impl App {
 
             Message::NexoModDone(Ok(())) => {
                 self.status = Status::Idle;
-                self.browsing = false;
+                // Deliberately stays in the browser. Installing one thing is
+                // rarely the whole job, and closing it forced a re-open and a
+                // fresh search for every single mod.
                 self.core.clone().map(reload).unwrap_or_else(Task::none)
             }
             Message::NexoModDone(Err(err)) => {

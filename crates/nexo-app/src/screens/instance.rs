@@ -378,16 +378,24 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
                         column![
                             text(&hit.title).size(14).color(theme::TEXT),
                             text(&hit.description).size(11).color(theme::MUTED),
-                            text(format!(
-                                "{} downloads{}",
-                                compact(hit.downloads),
-                                hit.author
-                                    .as_deref()
-                                    .map(|a| format!(" · by {a}"))
-                                    .unwrap_or_default()
-                            ))
-                            .size(10)
-                            .color(theme::MUTED),
+                            row![
+                                // Downloads are the quickest signal of whether
+                                // a project is the well-known one, so they get
+                                // their own emphasis rather than being buried
+                                // in a grey byline.
+                                text(format!("↓ {}", compact(hit.downloads)))
+                                    .size(11)
+                                    .color(theme::MINT),
+                                text(
+                                    hit.author
+                                        .as_deref()
+                                        .map(|a| format!("by {a}"))
+                                        .unwrap_or_default()
+                                )
+                                .size(11)
+                                .color(theme::MUTED),
+                            ]
+                            .spacing(10),
                         ]
                         .spacing(3)
                         .width(Fill),
