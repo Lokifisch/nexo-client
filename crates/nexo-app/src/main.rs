@@ -226,7 +226,7 @@ pub enum Message {
 
     // Skins and capes
     LoadCapes,
-    CapesLoaded(Vec<nexo_core::cosmetics::Cape>),
+    CapesLoaded(Result<Vec<nexo_core::cosmetics::Cape>, String>),
     CapePreviewLoaded { cape: String, handle: image::Handle },
     SetSkinModel(nexo_core::SkinModel),
     UploadSkin,
@@ -830,12 +830,35 @@ impl App {
                 };
 
                 Task::perform(
-                    async move { core.cosmetics.capes(&account).await.unwrap_or_default() },
+                    async move {
+                        // A stale token reads no capes and looks identical to
+                        // owning none, so renew before asking. `account` is
+                        // only used to prove somebody is signed in.
+                        let _ = &account;
+                        let valid = core
+                            .accounts
+                            .active_valid(&core.auth)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.cosmetics
+                            .capes(&valid)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
                     Message::CapesLoaded,
                 )
             }
 
-            Message::CapesLoaded(capes) => {
+            Message::CapesLoaded(Err(err)) => {
+                // Deliberately keeps whatever list is already shown. Blanking
+                // it claimed the account owns no capes, which is a different
+                // and wrong statement — and the change of shape reset the 3D
+                // viewer's pose along with it.
+                self.status = Status::Error(format!("Could not read capes: {err}"));
+                Task::none()
+            }
+
+            Message::CapesLoaded(Ok(capes)) => {
                 // Fetch previews for any cape not already cached, one task
                 // each so a slow texture doesn't hold up the others.
                 let mut fetches = Vec::new();

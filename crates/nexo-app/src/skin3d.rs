@@ -50,6 +50,10 @@ const ARRIVED: f32 = 0.02;
 /// How long a dragged pose is left alone before it eases back.
 const HOLD: Duration = Duration::from_secs(5);
 
+/// How long the model stays turned round after a cape change before easing
+/// back to the front. Long enough to actually look at the cape.
+const REVEAL_HOLD: Duration = Duration::from_secs(30);
+
 /// Fraction of the remaining distance closed per second while easing back.
 /// Exponential rather than linear so it arrives gently instead of stopping
 /// dead.
@@ -85,10 +89,11 @@ pub struct Pose {
     /// Time base for the drifting rainbow. Set on the first frame rather than
     /// at construction, so the animation starts when the widget appears.
     started: Option<Instant>,
-    /// Where the model settles. Normally the front pose, but a cape change
-    /// moves it round the back and leaves it there — on a cape screen, the
-    /// cape is the thing worth looking at.
+    /// Where the model settles. Normally the front pose; a cape change points
+    /// it at the back for a while so the change can be seen.
     rest_yaw: f32,
+    /// When to give the back view up and face front again.
+    revert_at: Option<Instant>,
     /// Last reveal request acted on, so one request moves the model once.
     reveal_seen: u64,
 }
@@ -103,6 +108,7 @@ impl Default for Pose {
             last_tick: None,
             started: None,
             rest_yaw: REST_YAW,
+            revert_at: None,
             reveal_seen: 0,
         }
     }
@@ -130,8 +136,11 @@ impl Pose {
     ///
     /// Returns whether anything needs animating, so an unchanged pose doesn't
     /// start a redraw loop that has nothing to draw.
-    fn reveal(&mut self, target_yaw: f32) -> bool {
+    fn reveal(&mut self, target_yaw: f32, now: Instant) -> bool {
         self.rest_yaw = target_yaw;
+        // Restarted on every request, so switching capes repeatedly keeps the
+        // back in view rather than reverting mid-browse.
+        self.revert_at = Some(now + REVEAL_HOLD);
 
         // Compare on the shortest angle between the two, so a model sitting
         // at the target plus a full turn still counts as already there.
@@ -146,6 +155,14 @@ impl Pose {
         // Nothing is being held, so easing starts immediately.
         self.released_at = None;
         true
+    }
+
+    /// Gives up the revealed pose once its time is up.
+    fn expire_reveal(&mut self, now: Instant) {
+        if self.revert_at.is_some_and(|at| now >= at) {
+            self.revert_at = None;
+            self.rest_yaw = REST_YAW;
+        }
     }
 }
 
@@ -260,13 +277,15 @@ impl<Message> shader::Program<Message> for SkinViewer {
                     // The very first frame carries the initial counter and
                     // must not spin the model on load.
                     if self.reveal_back != 0 {
-                        state.reveal(BACK_YAW);
+                        state.reveal(BACK_YAW, *now);
                     }
                 }
 
                 if state.drag_from.is_some() {
                     return animating.then(shader::Action::request_redraw);
                 }
+
+                state.expire_reveal(*now);
 
                 // Hold a dragged pose before easing away from it. A reveal
                 // clears this, so switching a cape doesn't wait five seconds.
@@ -281,7 +300,14 @@ impl<Message> shader::Program<Message> for SkinViewer {
                 }
 
                 if state.at_rest() {
-                    return animating.then(shader::Action::request_redraw);
+                    // Settled. Sleep until the revealed pose is due to be
+                    // given up, rather than spinning on frames that would
+                    // change nothing.
+                    return match (animating, state.revert_at) {
+                        (true, _) => Some(shader::Action::request_redraw()),
+                        (false, Some(at)) => Some(shader::Action::request_redraw_at(at)),
+                        (false, None) => None,
+                    };
                 }
 
                 let dt = previous
@@ -1576,7 +1602,7 @@ mod tests {
     #[test]
     fn reveal_moves_to_the_back_and_settles_there() {
         let mut pose = Pose::default();
-        assert!(pose.reveal(BACK_YAW), "a turn from the front needs animating");
+        assert!(pose.reveal(BACK_YAW, Instant::now()), "a turn from the front needs animating");
 
         for _ in 0..600 {
             pose.ease_back(1.0 / 60.0);
@@ -1594,7 +1620,7 @@ mod tests {
         };
 
         assert!(
-            !pose.reveal(BACK_YAW),
+            !pose.reveal(BACK_YAW, Instant::now()),
             "already facing away, so there is nothing to animate"
         );
         assert_eq!(pose.yaw, BACK_YAW);
@@ -1607,7 +1633,7 @@ mod tests {
             yaw: BACK_YAW + std::f32::consts::TAU,
             ..Pose::default()
         };
-        assert!(!pose.reveal(BACK_YAW));
+        assert!(!pose.reveal(BACK_YAW, Instant::now()));
 
         // And a target just the other side of the wrap point moves a little,
         // not almost all the way round.
@@ -1615,7 +1641,7 @@ mod tests {
             yaw: BACK_YAW - 0.3,
             ..Pose::default()
         };
-        assert!(pose.reveal(BACK_YAW));
+        assert!(pose.reveal(BACK_YAW, Instant::now()));
         assert!(
             (pose.yaw - (BACK_YAW - 0.3)).abs() < 0.001,
             "should not have unwound a whole turn to get there"
@@ -1629,6 +1655,36 @@ mod tests {
         assert!((shortest_angle(TAU + 0.5) - 0.5).abs() < 1e-5);
         assert!((shortest_angle(-TAU - 0.5) + 0.5).abs() < 1e-5);
         assert!(shortest_angle(PI + 0.1) < 0.0, "just past half a turn goes negative");
+    }
+
+    #[test]
+    fn a_revealed_pose_is_given_up_once_its_time_is_up() {
+        let mut pose = Pose::default();
+        let now = Instant::now();
+        pose.reveal(BACK_YAW, now);
+
+        // Still within the hold: the back is where it belongs.
+        pose.expire_reveal(now + Duration::from_secs(5));
+        assert_eq!(pose.rest_yaw, BACK_YAW);
+        assert!(pose.revert_at.is_some());
+
+        // Past it: the front is the resting pose again.
+        pose.expire_reveal(now + REVEAL_HOLD + Duration::from_secs(1));
+        assert_eq!(pose.rest_yaw, REST_YAW);
+        assert!(pose.revert_at.is_none());
+    }
+
+    #[test]
+    fn a_second_reveal_restarts_the_hold() {
+        let mut pose = Pose::default();
+        let now = Instant::now();
+        pose.reveal(BACK_YAW, now);
+        let first = pose.revert_at.unwrap();
+
+        // Switching capes again should keep the back in view rather than
+        // letting the original deadline turn it away mid-browse.
+        pose.reveal(BACK_YAW, now + Duration::from_secs(20));
+        assert!(pose.revert_at.unwrap() > first);
     }
 
     #[test]

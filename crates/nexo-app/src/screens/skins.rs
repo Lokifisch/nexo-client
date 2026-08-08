@@ -147,20 +147,10 @@ fn capes_card(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center)]
     .spacing(12);
 
-    if app.capes.is_empty() {
-        return container(
-            body.push(
-                text("No capes on this account.")
-                    .size(12)
-                    .color(theme::MUTED),
-            ),
-        )
-        .padding(18)
-        .width(Fill)
-        .style(theme::card)
-        .into();
-    }
-
+    // Deliberately no early return with a different shape here. Swapping the
+    // card's structure reassigns widget state further up the tree, which reset
+    // the 3D viewer's pose — the model snapped to the front mid-animation.
+    // The grid is simply empty instead.
     let none_worn = !app.capes.iter().any(|c| c.is_active());
 
     // "No cape" is a tile like any other, so taking one off is the same
@@ -201,15 +191,24 @@ fn capes_card(app: &App) -> Element<'_, Message> {
     }
 
     let mut grid = column![].spacing(10);
-    let mut row_items: Vec<Element<'_, Message>> = Vec::new();
+    let mut current: Vec<Element<'_, Message>> = Vec::with_capacity(COLUMNS);
     for tile in tiles {
-        row_items.push(tile);
-        if row_items.len() == COLUMNS {
-            grid = grid.push(row(std::mem::take(&mut row_items)).spacing(10));
+        current.push(tile);
+        if current.len() == COLUMNS {
+            grid = grid.push(row(std::mem::take(&mut current)).spacing(10));
         }
     }
 
-    container(body.push(grid))
+    let note: Element<'_, Message> = if app.capes.is_empty() {
+        text("No capes on this account yet.")
+            .size(12)
+            .color(theme::MUTED)
+            .into()
+    } else {
+        Space::new().height(0).into()
+    };
+
+    container(body.push(note).push(grid))
         .padding(18)
         .width(Fill)
         .style(theme::card)
