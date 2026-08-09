@@ -43,9 +43,6 @@ const REST_PITCH: f32 = 0.20;
 /// from the front pose, keeping the same slight lean.
 const BACK_YAW: f32 = REST_YAW + std::f32::consts::PI;
 
-/// Close enough to a pose to treat it as already there, in radians. Stops a
-/// reveal re-triggering a move the model has effectively already made.
-const ARRIVED: f32 = 0.02;
 
 /// How long a dragged pose is left alone before it eases back.
 const HOLD: Duration = Duration::from_secs(5);
@@ -53,6 +50,10 @@ const HOLD: Duration = Duration::from_secs(5);
 /// How long the model stays turned round after a cape change before easing
 /// back to the front. Long enough to actually look at the cape.
 const REVEAL_HOLD: Duration = Duration::from_secs(30);
+
+/// How long the turn itself takes, each way. Fixed, so the movement looks the
+/// same every time regardless of where the model happened to be.
+const TURN: Duration = Duration::from_millis(1000);
 
 /// Fraction of the remaining distance closed per second while easing back.
 /// Exponential rather than linear so it arrives gently instead of stopping
@@ -89,13 +90,6 @@ pub struct Pose {
     /// Time base for the drifting rainbow. Set on the first frame rather than
     /// at construction, so the animation starts when the widget appears.
     started: Option<Instant>,
-    /// Where the model settles. Normally the front pose; a cape change points
-    /// it at the back for a while so the change can be seen.
-    rest_yaw: f32,
-    /// When to give the back view up and face front again.
-    revert_at: Option<Instant>,
-    /// Last reveal request acted on, so one request moves the model once.
-    reveal_seen: u64,
 }
 
 impl Default for Pose {
@@ -107,63 +101,90 @@ impl Default for Pose {
             released_at: None,
             last_tick: None,
             started: None,
-            rest_yaw: REST_YAW,
-            revert_at: None,
-            reveal_seen: 0,
         }
     }
 }
 
 impl Pose {
     fn at_rest(&self) -> bool {
-        (self.yaw - self.rest_yaw).abs() < SETTLED && (self.pitch - REST_PITCH).abs() < SETTLED
+        (self.yaw - REST_YAW).abs() < SETTLED && (self.pitch - REST_PITCH).abs() < SETTLED
     }
 
     /// Eases toward the rest pose, framerate-independently.
     fn ease_back(&mut self, dt: f32) {
         let t = 1.0 - (-RETURN_RATE * dt).exp();
-        self.yaw += (self.rest_yaw - self.yaw) * t;
+        self.yaw += (REST_YAW - self.yaw) * t;
         self.pitch += (REST_PITCH - self.pitch) * t;
         if self.at_rest() {
-            self.yaw = self.rest_yaw;
+            self.yaw = REST_YAW;
             self.pitch = REST_PITCH;
             self.released_at = None;
         }
     }
 
-    /// Points the model at whichever side a reveal asked for, if it isn't
-    /// effectively there already.
-    ///
-    /// Returns whether anything needs animating, so an unchanged pose doesn't
-    /// start a redraw loop that has nothing to draw.
-    fn reveal(&mut self, target_yaw: f32, now: Instant) -> bool {
-        self.rest_yaw = target_yaw;
-        // Restarted on every request, so switching capes repeatedly keeps the
-        // back in view rather than reverting mid-browse.
-        self.revert_at = Some(now + REVEAL_HOLD);
+}
 
-        // Compare on the shortest angle between the two, so a model sitting
-        // at the target plus a full turn still counts as already there.
-        let delta = shortest_angle(target_yaw - self.yaw);
-        if delta.abs() < ARRIVED {
-            self.yaw = target_yaw;
-            return false;
-        }
+/// The yaw a cape reveal dictates, or `None` once it has run its course and
+/// ordinary resting behaviour takes over again.
+///
+/// Deliberately a pure function of elapsed time rather than an angle
+/// accumulated in widget state. Widget state can be reset by tree churn —
+/// changing the shape of a sibling is enough — and when that happened
+/// mid-animation the model snapped to the front and re-animated. Derived from
+/// a timestamp there is nothing to lose: a reset recomputes the same angle.
+fn reveal_yaw(reveal_at: Option<Instant>, now: Instant) -> Option<f32> {
+    let at = reveal_at?;
+    // `now` comes from the frame clock and can very slightly precede a
+    // timestamp taken on a button press.
+    let elapsed = now.saturating_duration_since(at);
 
-        // Rotate the short way round rather than unwinding several turns.
-        self.yaw = target_yaw - delta;
-        // Nothing is being held, so easing starts immediately.
-        self.released_at = None;
-        true
+    if elapsed < TURN {
+        return Some(lerp_angle(REST_YAW, BACK_YAW, ease(fraction(elapsed, TURN))));
+    }
+    if elapsed < REVEAL_HOLD {
+        return Some(BACK_YAW);
     }
 
-    /// Gives up the revealed pose once its time is up.
-    fn expire_reveal(&mut self, now: Instant) {
-        if self.revert_at.is_some_and(|at| now >= at) {
-            self.revert_at = None;
-            self.rest_yaw = REST_YAW;
-        }
+    let returning = elapsed - REVEAL_HOLD;
+    if returning < TURN {
+        return Some(lerp_angle(BACK_YAW, REST_YAW, ease(fraction(returning, TURN))));
     }
+    None
+}
+
+/// When the next frame is due while a reveal is in flight, or `None` once it
+/// has finished. Nothing changes during the hold, so this returns the moment
+/// the return journey starts rather than every frame in between.
+fn reveal_next_frame(reveal_at: Option<Instant>, now: Instant) -> Option<Instant> {
+    let at = reveal_at?;
+    let elapsed = now.saturating_duration_since(at);
+
+    if elapsed < TURN {
+        return Some(now);
+    }
+    if elapsed < REVEAL_HOLD {
+        return Some(at + REVEAL_HOLD);
+    }
+    if elapsed < REVEAL_HOLD + TURN {
+        return Some(now);
+    }
+    None
+}
+
+fn fraction(elapsed: Duration, total: Duration) -> f32 {
+    elapsed.as_secs_f32() / total.as_secs_f32().max(f32::EPSILON)
+}
+
+/// Smoothstep, so the turn starts and ends gently rather than jerking into
+/// motion at full speed.
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Interpolates the short way round, so a turn never takes the long route.
+fn lerp_angle(from: f32, to: f32, t: f32) -> f32 {
+    from + shortest_angle(to - from) * t
 }
 
 /// Wraps an angle to (-pi, pi].
@@ -192,10 +213,9 @@ pub struct SkinViewer {
     /// placeholder figure, and once a real skin is shown it would just
     /// obscure it — and animating it costs a redraw every frame.
     outlined: bool,
-    /// Bumped to ask the model to turn round and show its back. Carried as a
-    /// counter rather than a flag so repeating the same request moves it
-    /// again, while a redraw on its own does not.
-    reveal_back: u64,
+    /// When a cape was last switched. The turn is derived from this, so it
+    /// cannot be knocked out of step by widget state being reset.
+    reveal_at: Option<Instant>,
 }
 
 impl SkinViewer {
@@ -205,7 +225,7 @@ impl SkinViewer {
         model: SkinModel,
         key: u64,
         outlined: bool,
-        reveal_back: u64,
+        reveal_at: Option<Instant>,
     ) -> Self {
         Self {
             skin,
@@ -213,7 +233,7 @@ impl SkinViewer {
             model,
             key,
             outlined,
-            reveal_back,
+            reveal_at,
         }
     }
 }
@@ -271,24 +291,23 @@ impl<Message> shader::Program<Message> for SkinViewer {
                 // every time regardless of what the pose is doing.
                 let animating = self.outlined;
 
-                // A new reveal request retargets the resting pose.
-                if state.reveal_seen != self.reveal_back {
-                    state.reveal_seen = self.reveal_back;
-                    // The very first frame carries the initial counter and
-                    // must not spin the model on load.
-                    if self.reveal_back != 0 {
-                        state.reveal(BACK_YAW, *now);
-                    }
-                }
-
                 if state.drag_from.is_some() {
                     return animating.then(shader::Action::request_redraw);
                 }
 
-                state.expire_reveal(*now);
+                // A reveal in flight owns the yaw outright, so there is no
+                // accumulated angle to be knocked out of step.
+                if let Some(next) = reveal_next_frame(self.reveal_at, *now) {
+                    return Some(if animating || next <= *now {
+                        shader::Action::request_redraw()
+                    } else {
+                        // Nothing changes during the hold; sleep until the
+                        // return journey is due.
+                        shader::Action::request_redraw_at(next)
+                    });
+                }
 
-                // Hold a dragged pose before easing away from it. A reveal
-                // clears this, so switching a cape doesn't wait five seconds.
+                // Hold a dragged pose before easing away from it.
                 if let Some(released_at) = state.released_at
                     && now.duration_since(released_at) < HOLD
                 {
@@ -300,14 +319,7 @@ impl<Message> shader::Program<Message> for SkinViewer {
                 }
 
                 if state.at_rest() {
-                    // Settled. Sleep until the revealed pose is due to be
-                    // given up, rather than spinning on frames that would
-                    // change nothing.
-                    return match (animating, state.revert_at) {
-                        (true, _) => Some(shader::Action::request_redraw()),
-                        (false, Some(at)) => Some(shader::Action::request_redraw_at(at)),
-                        (false, None) => None,
-                    };
+                    return animating.then(shader::Action::request_redraw);
                 }
 
                 let dt = previous
@@ -325,8 +337,15 @@ impl<Message> shader::Program<Message> for SkinViewer {
     }
 
     fn draw(&self, state: &Self::State, _cursor: mouse::Cursor, bounds: Rectangle) -> Scene {
+        // A reveal overrides the resting pose while it runs; dragging
+        // overrides the reveal, since the user's hand wins.
+        let yaw = match (state.drag_from, reveal_yaw(self.reveal_at, Instant::now())) {
+            (None, Some(revealed)) => revealed,
+            _ => state.yaw,
+        };
+
         Scene {
-            mvp: mvp(state.yaw, state.pitch, bounds),
+            mvp: mvp(yaw, state.pitch, bounds),
             geometry: Arc::new(build_model(self.model, self.cape.is_some())),
             skin: Arc::clone(&self.skin),
             cape: self.cape.clone(),
@@ -1600,52 +1619,91 @@ mod tests {
     }
 
     #[test]
-    fn reveal_moves_to_the_back_and_settles_there() {
-        let mut pose = Pose::default();
-        assert!(pose.reveal(BACK_YAW, Instant::now()), "a turn from the front needs animating");
+    fn a_reveal_turns_to_the_back_then_returns_to_the_front() {
+        let at = Instant::now();
 
-        for _ in 0..600 {
-            pose.ease_back(1.0 / 60.0);
+        // Starts at the front and ends the outward turn facing away.
+        let start = reveal_yaw(Some(at), at).unwrap();
+        assert!((start - REST_YAW).abs() < 0.01, "should begin at the front");
+        let turned = reveal_yaw(Some(at), at + TURN).unwrap();
+        assert!((turned - BACK_YAW).abs() < 0.01, "should end facing away");
+
+        // Held there for the whole thirty seconds.
+        for seconds in [2, 10, 29] {
+            let held = reveal_yaw(Some(at), at + Duration::from_secs(seconds)).unwrap();
+            assert!(
+                (held - BACK_YAW).abs() < 0.01,
+                "should still be facing away at {seconds}s"
+            );
         }
-        assert!(pose.at_rest());
-        // The back is now where it settles, not the front it started from.
-        assert!((pose.yaw - BACK_YAW).abs() < SETTLED);
+
+        // Then turns back, and afterwards stops dictating the pose at all.
+        let returning = reveal_yaw(Some(at), at + REVEAL_HOLD + TURN / 2).unwrap();
+        assert!(
+            (returning - BACK_YAW).abs() > 0.01 && (returning - REST_YAW).abs() > 0.01,
+            "should be mid-turn, not snapped to either end"
+        );
+        assert_eq!(
+            reveal_yaw(Some(at), at + REVEAL_HOLD + TURN * 2),
+            None,
+            "once finished, ordinary resting behaviour takes over"
+        );
+    }
+
+    /// The property the whole rewrite exists for: the angle depends only on
+    /// the timestamp, so losing widget state cannot make the model jump.
+    #[test]
+    fn the_turn_depends_only_on_elapsed_time() {
+        let at = Instant::now();
+        let sample = at + Duration::from_millis(400);
+
+        let first = reveal_yaw(Some(at), sample);
+        let again = reveal_yaw(Some(at), sample);
+        assert_eq!(first, again);
+        assert!(first.is_some());
     }
 
     #[test]
-    fn revealing_a_pose_it_already_holds_does_nothing() {
-        let mut pose = Pose {
-            yaw: BACK_YAW,
-            ..Pose::default()
-        };
-
-        assert!(
-            !pose.reveal(BACK_YAW, Instant::now()),
-            "already facing away, so there is nothing to animate"
-        );
-        assert_eq!(pose.yaw, BACK_YAW);
+    fn no_reveal_leaves_the_pose_alone() {
+        assert_eq!(reveal_yaw(None, Instant::now()), None);
+        assert_eq!(reveal_next_frame(None, Instant::now()), None);
     }
 
     #[test]
-    fn reveal_takes_the_short_way_round() {
-        // A full extra turn past the target still counts as being there.
-        let mut pose = Pose {
-            yaw: BACK_YAW + std::f32::consts::TAU,
-            ..Pose::default()
-        };
-        assert!(!pose.reveal(BACK_YAW, Instant::now()));
+    fn the_hold_sleeps_instead_of_drawing_frames() {
+        let at = Instant::now();
 
-        // And a target just the other side of the wrap point moves a little,
-        // not almost all the way round.
-        let mut pose = Pose {
-            yaw: BACK_YAW - 0.3,
-            ..Pose::default()
-        };
-        assert!(pose.reveal(BACK_YAW, Instant::now()));
-        assert!(
-            (pose.yaw - (BACK_YAW - 0.3)).abs() < 0.001,
-            "should not have unwound a whole turn to get there"
+        // Mid-turn: every frame is wanted.
+        assert_eq!(
+            reveal_next_frame(Some(at), at + TURN / 2),
+            Some(at + TURN / 2)
         );
+        // Holding: nothing changes until the return is due.
+        assert_eq!(
+            reveal_next_frame(Some(at), at + Duration::from_secs(5)),
+            Some(at + REVEAL_HOLD)
+        );
+        // Finished: no further frames needed.
+        assert_eq!(reveal_next_frame(Some(at), at + REVEAL_HOLD + TURN * 2), None);
+    }
+
+    #[test]
+    fn easing_is_smooth_at_both_ends() {
+        assert_eq!(ease(0.0), 0.0);
+        assert_eq!(ease(1.0), 1.0);
+        // Clamped, so a late frame can't overshoot past the target.
+        assert_eq!(ease(1.5), 1.0);
+        assert_eq!(ease(-0.5), 0.0);
+        assert!((ease(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn angles_interpolate_the_short_way_round() {
+        use std::f32::consts::TAU;
+        // Half a turn away in the "long" direction should still travel the
+        // short way, so a turn never unwinds most of a circle.
+        let midpoint = lerp_angle(0.1, 0.1 + TAU - 0.4, 0.5);
+        assert!((midpoint - (0.1 - 0.2)).abs() < 1e-4, "got {midpoint}");
     }
 
     #[test]
@@ -1655,36 +1713,6 @@ mod tests {
         assert!((shortest_angle(TAU + 0.5) - 0.5).abs() < 1e-5);
         assert!((shortest_angle(-TAU - 0.5) + 0.5).abs() < 1e-5);
         assert!(shortest_angle(PI + 0.1) < 0.0, "just past half a turn goes negative");
-    }
-
-    #[test]
-    fn a_revealed_pose_is_given_up_once_its_time_is_up() {
-        let mut pose = Pose::default();
-        let now = Instant::now();
-        pose.reveal(BACK_YAW, now);
-
-        // Still within the hold: the back is where it belongs.
-        pose.expire_reveal(now + Duration::from_secs(5));
-        assert_eq!(pose.rest_yaw, BACK_YAW);
-        assert!(pose.revert_at.is_some());
-
-        // Past it: the front is the resting pose again.
-        pose.expire_reveal(now + REVEAL_HOLD + Duration::from_secs(1));
-        assert_eq!(pose.rest_yaw, REST_YAW);
-        assert!(pose.revert_at.is_none());
-    }
-
-    #[test]
-    fn a_second_reveal_restarts_the_hold() {
-        let mut pose = Pose::default();
-        let now = Instant::now();
-        pose.reveal(BACK_YAW, now);
-        let first = pose.revert_at.unwrap();
-
-        // Switching capes again should keep the back in view rather than
-        // letting the original deadline turn it away mid-browse.
-        pose.reveal(BACK_YAW, now + Duration::from_secs(20));
-        assert!(pose.revert_at.unwrap() > first);
     }
 
     #[test]

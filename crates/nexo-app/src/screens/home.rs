@@ -24,7 +24,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             account.is_none(),
             // Home never turns the model round; that belongs to the cape
             // screen, where the back is the thing being changed.
-            0,
+            None,
         ))
         .width(280)
         .height(380)

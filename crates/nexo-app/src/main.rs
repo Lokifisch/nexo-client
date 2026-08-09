@@ -170,9 +170,9 @@ pub struct App {
     // Skin and cape management.
     capes: Vec<nexo_core::cosmetics::Cape>,
     cape_previews: std::collections::HashMap<String, image::Handle>,
-    /// Bumped whenever a cape is put on or taken off, which asks the 3D model
-    /// to turn round so the change is actually visible.
-    cape_reveal: u64,
+    /// When a cape was last put on or taken off. The 3D model derives its
+    /// turn from this, so the animation can't be knocked out of step.
+    cape_reveal: Option<std::time::Instant>,
 }
 
 #[derive(Clone)]
@@ -282,7 +282,7 @@ impl App {
             icons: std::collections::HashMap::new(),
             capes: Vec::new(),
             cape_previews: std::collections::HashMap::new(),
-            cape_reveal: 0,
+            cape_reveal: None,
         };
 
         let task = Task::batch([
@@ -974,9 +974,9 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Changing cape".into());
-                // Bumped on press, not on completion, so the model starts
+                // Stamped on press, not on completion, so the model starts
                 // turning while the request is still in flight.
-                self.cape_reveal += 1;
+                self.cape_reveal = Some(std::time::Instant::now());
 
                 Task::perform(
                     async move {
@@ -996,7 +996,7 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Removing cape".into());
-                self.cape_reveal += 1;
+                self.cape_reveal = Some(std::time::Instant::now());
 
                 Task::perform(
                     async move {
