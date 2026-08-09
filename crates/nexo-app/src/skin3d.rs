@@ -124,6 +124,44 @@ impl Pose {
 
 }
 
+/// A request to show the model's back, as two instants: when the outward
+/// turn began, and when to start turning away again.
+///
+/// Two fields rather than one, because switching capes repeatedly must extend
+/// the stay without restarting the turn. With a single timestamp the elapsed
+/// time reset to zero on every switch, and frame one of a fresh turn is the
+/// front — which is exactly what made the model snap round before animating
+/// back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reveal {
+    started: Instant,
+    until: Instant,
+}
+
+impl Reveal {
+    /// Starts a reveal, or extends one already in progress.
+    pub fn trigger(previous: Option<Reveal>, now: Instant) -> Reveal {
+        match previous {
+            // Still on screen: keep the original turn so the model stays put,
+            // and just push the deadline out.
+            Some(active) if now < active.finished_at() => Reveal {
+                started: active.started,
+                until: now + REVEAL_HOLD,
+            },
+            // Finished, or never ran: a fresh turn from the front.
+            _ => Reveal {
+                started: now,
+                until: now + REVEAL_HOLD,
+            },
+        }
+    }
+
+    /// When the whole sequence, return journey included, is over.
+    fn finished_at(&self) -> Instant {
+        self.until + TURN
+    }
+}
+
 /// The yaw a cape reveal dictates, or `None` once it has run its course and
 /// ordinary resting behaviour takes over again.
 ///
@@ -132,20 +170,20 @@ impl Pose {
 /// changing the shape of a sibling is enough — and when that happened
 /// mid-animation the model snapped to the front and re-animated. Derived from
 /// a timestamp there is nothing to lose: a reset recomputes the same angle.
-fn reveal_yaw(reveal_at: Option<Instant>, now: Instant) -> Option<f32> {
-    let at = reveal_at?;
+fn reveal_yaw(reveal: Option<Reveal>, now: Instant) -> Option<f32> {
+    let reveal = reveal?;
     // `now` comes from the frame clock and can very slightly precede a
     // timestamp taken on a button press.
-    let elapsed = now.saturating_duration_since(at);
+    let turning = now.saturating_duration_since(reveal.started);
 
-    if elapsed < TURN {
-        return Some(lerp_angle(REST_YAW, BACK_YAW, ease(fraction(elapsed, TURN))));
+    if turning < TURN {
+        return Some(lerp_angle(REST_YAW, BACK_YAW, ease(fraction(turning, TURN))));
     }
-    if elapsed < REVEAL_HOLD {
+    if now < reveal.until {
         return Some(BACK_YAW);
     }
 
-    let returning = elapsed - REVEAL_HOLD;
+    let returning = now.saturating_duration_since(reveal.until);
     if returning < TURN {
         return Some(lerp_angle(BACK_YAW, REST_YAW, ease(fraction(returning, TURN))));
     }
@@ -155,17 +193,16 @@ fn reveal_yaw(reveal_at: Option<Instant>, now: Instant) -> Option<f32> {
 /// When the next frame is due while a reveal is in flight, or `None` once it
 /// has finished. Nothing changes during the hold, so this returns the moment
 /// the return journey starts rather than every frame in between.
-fn reveal_next_frame(reveal_at: Option<Instant>, now: Instant) -> Option<Instant> {
-    let at = reveal_at?;
-    let elapsed = now.saturating_duration_since(at);
+fn reveal_next_frame(reveal: Option<Reveal>, now: Instant) -> Option<Instant> {
+    let reveal = reveal?;
 
-    if elapsed < TURN {
+    if now.saturating_duration_since(reveal.started) < TURN {
         return Some(now);
     }
-    if elapsed < REVEAL_HOLD {
-        return Some(at + REVEAL_HOLD);
+    if now < reveal.until {
+        return Some(reveal.until);
     }
-    if elapsed < REVEAL_HOLD + TURN {
+    if now < reveal.finished_at() {
         return Some(now);
     }
     None
@@ -213,9 +250,9 @@ pub struct SkinViewer {
     /// placeholder figure, and once a real skin is shown it would just
     /// obscure it — and animating it costs a redraw every frame.
     outlined: bool,
-    /// When a cape was last switched. The turn is derived from this, so it
-    /// cannot be knocked out of step by widget state being reset.
-    reveal_at: Option<Instant>,
+    /// The cape reveal in progress, if any. The turn is derived from it, so
+    /// it cannot be knocked out of step by widget state being reset.
+    reveal: Option<Reveal>,
 }
 
 impl SkinViewer {
@@ -225,7 +262,7 @@ impl SkinViewer {
         model: SkinModel,
         key: u64,
         outlined: bool,
-        reveal_at: Option<Instant>,
+        reveal: Option<Reveal>,
     ) -> Self {
         Self {
             skin,
@@ -233,7 +270,7 @@ impl SkinViewer {
             model,
             key,
             outlined,
-            reveal_at,
+            reveal,
         }
     }
 }
@@ -297,7 +334,7 @@ impl<Message> shader::Program<Message> for SkinViewer {
 
                 // A reveal in flight owns the yaw outright, so there is no
                 // accumulated angle to be knocked out of step.
-                if let Some(next) = reveal_next_frame(self.reveal_at, *now) {
+                if let Some(next) = reveal_next_frame(self.reveal, *now) {
                     return Some(if animating || next <= *now {
                         shader::Action::request_redraw()
                     } else {
@@ -339,7 +376,7 @@ impl<Message> shader::Program<Message> for SkinViewer {
     fn draw(&self, state: &Self::State, _cursor: mouse::Cursor, bounds: Rectangle) -> Scene {
         // A reveal overrides the resting pose while it runs; dragging
         // overrides the reveal, since the user's hand wins.
-        let yaw = match (state.drag_from, reveal_yaw(self.reveal_at, Instant::now())) {
+        let yaw = match (state.drag_from, reveal_yaw(self.reveal, Instant::now())) {
             (None, Some(revealed)) => revealed,
             _ => state.yaw,
         };
@@ -1623,14 +1660,14 @@ mod tests {
         let at = Instant::now();
 
         // Starts at the front and ends the outward turn facing away.
-        let start = reveal_yaw(Some(at), at).unwrap();
+        let start = reveal_yaw(Some(Reveal::trigger(None, at)), at).unwrap();
         assert!((start - REST_YAW).abs() < 0.01, "should begin at the front");
-        let turned = reveal_yaw(Some(at), at + TURN).unwrap();
+        let turned = reveal_yaw(Some(Reveal::trigger(None, at)), at + TURN).unwrap();
         assert!((turned - BACK_YAW).abs() < 0.01, "should end facing away");
 
         // Held there for the whole thirty seconds.
         for seconds in [2, 10, 29] {
-            let held = reveal_yaw(Some(at), at + Duration::from_secs(seconds)).unwrap();
+            let held = reveal_yaw(Some(Reveal::trigger(None, at)), at + Duration::from_secs(seconds)).unwrap();
             assert!(
                 (held - BACK_YAW).abs() < 0.01,
                 "should still be facing away at {seconds}s"
@@ -1638,16 +1675,80 @@ mod tests {
         }
 
         // Then turns back, and afterwards stops dictating the pose at all.
-        let returning = reveal_yaw(Some(at), at + REVEAL_HOLD + TURN / 2).unwrap();
+        let returning = reveal_yaw(Some(Reveal::trigger(None, at)), at + REVEAL_HOLD + TURN / 2).unwrap();
         assert!(
             (returning - BACK_YAW).abs() > 0.01 && (returning - REST_YAW).abs() > 0.01,
             "should be mid-turn, not snapped to either end"
         );
         assert_eq!(
-            reveal_yaw(Some(at), at + REVEAL_HOLD + TURN * 2),
+            reveal_yaw(Some(Reveal::trigger(None, at)), at + REVEAL_HOLD + TURN * 2),
             None,
             "once finished, ordinary resting behaviour takes over"
         );
+    }
+
+    /// The reported bug, exactly: turn to the back, then switch capes again
+    /// while facing away. It must not snap to the front and re-animate.
+    #[test]
+    fn switching_again_while_facing_away_does_not_snap_to_the_front() {
+        let first = Instant::now();
+        let reveal = Reveal::trigger(None, first);
+
+        // Turn completes; the model is facing away.
+        let settled = first + TURN + Duration::from_secs(3);
+        assert!((reveal_yaw(Some(reveal), settled).unwrap() - BACK_YAW).abs() < 0.01);
+
+        // Switch again. The very next frame must still be the back, not the
+        // front — that jump is the whole bug.
+        let again = Reveal::trigger(Some(reveal), settled);
+        let next_frame = reveal_yaw(Some(again), settled).unwrap();
+        assert!(
+            (next_frame - BACK_YAW).abs() < 0.01,
+            "snapped to {next_frame} instead of staying at the back {BACK_YAW}"
+        );
+
+        // And it stays put rather than re-running the outward turn.
+        for offset in [1, 2, 5] {
+            let yaw = reveal_yaw(Some(again), settled + Duration::from_secs(offset)).unwrap();
+            assert!(
+                (yaw - BACK_YAW).abs() < 0.01,
+                "moved to {yaw} at +{offset}s"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_again_only_extends_the_stay() {
+        let start = Instant::now();
+        let reveal = Reveal::trigger(None, start);
+
+        // Twenty seconds in, switch again: the original deadline would have
+        // turned the model away ten seconds later.
+        let later = start + Duration::from_secs(20);
+        let extended = Reveal::trigger(Some(reveal), later);
+
+        assert!((reveal_yaw(Some(extended), start + Duration::from_secs(35)).unwrap()
+            - BACK_YAW)
+            .abs()
+            < 0.01, "should still be facing away past the original deadline");
+
+        // And it does eventually return, measured from the newer switch.
+        assert_eq!(
+            reveal_yaw(Some(extended), later + REVEAL_HOLD + TURN * 2),
+            None
+        );
+    }
+
+    #[test]
+    fn a_finished_reveal_starts_over_from_the_front() {
+        let start = Instant::now();
+        let reveal = Reveal::trigger(None, start);
+        let after = start + REVEAL_HOLD + TURN * 3;
+        assert_eq!(reveal_yaw(Some(reveal), after), None, "sequence is over");
+
+        // Triggering again now should genuinely turn from the front.
+        let fresh = Reveal::trigger(Some(reveal), after);
+        assert!((reveal_yaw(Some(fresh), after).unwrap() - REST_YAW).abs() < 0.01);
     }
 
     /// The property the whole rewrite exists for: the angle depends only on
@@ -1657,8 +1758,8 @@ mod tests {
         let at = Instant::now();
         let sample = at + Duration::from_millis(400);
 
-        let first = reveal_yaw(Some(at), sample);
-        let again = reveal_yaw(Some(at), sample);
+        let first = reveal_yaw(Some(Reveal::trigger(None, at)), sample);
+        let again = reveal_yaw(Some(Reveal::trigger(None, at)), sample);
         assert_eq!(first, again);
         assert!(first.is_some());
     }
@@ -1675,16 +1776,16 @@ mod tests {
 
         // Mid-turn: every frame is wanted.
         assert_eq!(
-            reveal_next_frame(Some(at), at + TURN / 2),
+            reveal_next_frame(Some(Reveal::trigger(None, at)), at + TURN / 2),
             Some(at + TURN / 2)
         );
         // Holding: nothing changes until the return is due.
         assert_eq!(
-            reveal_next_frame(Some(at), at + Duration::from_secs(5)),
+            reveal_next_frame(Some(Reveal::trigger(None, at)), at + Duration::from_secs(5)),
             Some(at + REVEAL_HOLD)
         );
         // Finished: no further frames needed.
-        assert_eq!(reveal_next_frame(Some(at), at + REVEAL_HOLD + TURN * 2), None);
+        assert_eq!(reveal_next_frame(Some(Reveal::trigger(None, at)), at + REVEAL_HOLD + TURN * 2), None);
     }
 
     #[test]

@@ -170,9 +170,9 @@ pub struct App {
     // Skin and cape management.
     capes: Vec<nexo_core::cosmetics::Cape>,
     cape_previews: std::collections::HashMap<String, image::Handle>,
-    /// When a cape was last put on or taken off. The 3D model derives its
-    /// turn from this, so the animation can't be knocked out of step.
-    cape_reveal: Option<std::time::Instant>,
+    /// The cape reveal in progress, if any. The 3D model derives its turn
+    /// from this, so the animation can't be knocked out of step.
+    cape_reveal: Option<skin3d::Reveal>,
 }
 
 #[derive(Clone)]
@@ -975,8 +975,13 @@ impl App {
                 };
                 self.status = Status::Busy("Changing cape".into());
                 // Stamped on press, not on completion, so the model starts
-                // turning while the request is still in flight.
-                self.cape_reveal = Some(std::time::Instant::now());
+                // turning while the request is still in flight. Extends a
+                // reveal already on screen rather than restarting it, or
+                // switching capes would snap the model to the front first.
+                self.cape_reveal = Some(skin3d::Reveal::trigger(
+                    self.cape_reveal,
+                    std::time::Instant::now(),
+                ));
 
                 Task::perform(
                     async move {
@@ -996,7 +1001,10 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Removing cape".into());
-                self.cape_reveal = Some(std::time::Instant::now());
+                self.cape_reveal = Some(skin3d::Reveal::trigger(
+                    self.cape_reveal,
+                    std::time::Instant::now(),
+                ));
 
                 Task::perform(
                     async move {
