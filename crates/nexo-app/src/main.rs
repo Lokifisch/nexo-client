@@ -173,6 +173,15 @@ pub struct App {
     /// The cape reveal in progress, if any. The 3D model derives its turn
     /// from this, so the animation can't be knocked out of step.
     cape_reveal: Option<skin3d::Reveal>,
+
+    // Saved skins.
+    saved_skins: Vec<nexo_core::skin_library::SavedSkin>,
+    /// Face previews for the library, keyed by saved-skin id.
+    skin_previews: std::collections::HashMap<String, image::Handle>,
+    /// Which tile the cursor is over, so its delete button can appear.
+    hovered_skin: Option<String>,
+    /// Awaiting a yes/no on deleting this one.
+    confirm_delete: Option<String>,
 }
 
 #[derive(Clone)]
@@ -235,6 +244,16 @@ pub enum Message {
     HideCape,
     CosmeticsDone(Result<(), String>),
 
+    // Saved skins
+    LoadSavedSkins,
+    SavedSkinsLoaded(Vec<nexo_core::skin_library::SavedSkin>),
+    SkinPreviewLoaded { skin: String, handle: image::Handle },
+    HoverSkin(Option<String>),
+    WearSavedSkin(String),
+    AskDeleteSkin(String),
+    CancelDeleteSkin,
+    ConfirmDeleteSkin(String),
+
     // Accounts
     StartSignIn,
     SignInFinished(Result<Account, String>),
@@ -283,6 +302,10 @@ impl App {
             capes: Vec::new(),
             cape_previews: std::collections::HashMap::new(),
             cape_reveal: None,
+            saved_skins: Vec::new(),
+            skin_previews: std::collections::HashMap::new(),
+            hovered_skin: None,
+            confirm_delete: None,
         };
 
         let task = Task::batch([
@@ -371,8 +394,12 @@ impl App {
             Message::Navigate(screen) => {
                 let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
                 self.screen = screen;
-                if opening_skins && self.capes.is_empty() {
-                    return Task::done(Message::LoadCapes);
+                if opening_skins {
+                    let mut tasks = vec![Task::done(Message::LoadSavedSkins)];
+                    if self.capes.is_empty() {
+                        tasks.push(Task::done(Message::LoadCapes));
+                    }
+                    return Task::batch(tasks);
                 }
                 Task::none()
             }
@@ -818,6 +845,106 @@ impl App {
                         core.instances.save(&target).await.map_err(|e| e.to_string())
                     },
                     Message::NexoModDone,
+                )
+            }
+
+            Message::LoadSavedSkins => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { core.skins.list().await.unwrap_or_default() },
+                    Message::SavedSkinsLoaded,
+                )
+            }
+
+            Message::SavedSkinsLoaded(skins) => {
+                let mut fetches = Vec::new();
+                for saved in &skins {
+                    if self.skin_previews.contains_key(&saved.id) {
+                        continue;
+                    }
+                    let Some(core) = self.core.clone() else { continue };
+                    let (id, model) = (saved.id.clone(), saved.model);
+
+                    fetches.push(Task::perform(
+                        async move {
+                            let bytes = core.skins.read(&id).await.ok()?;
+                            let decoded = skin::Skin::decode(&bytes, model).ok()?;
+                            Some((id, decoded.face(FACE_SCALE)))
+                        },
+                        |loaded| match loaded {
+                            Some((skin, face)) => Message::SkinPreviewLoaded {
+                                skin,
+                                handle: to_handle(face),
+                            },
+                            None => Message::Noop,
+                        },
+                    ));
+                }
+
+                self.saved_skins = skins;
+                Task::batch(fetches)
+            }
+
+            Message::SkinPreviewLoaded { skin, handle } => {
+                self.skin_previews.insert(skin, handle);
+                Task::none()
+            }
+
+            Message::HoverSkin(id) => {
+                self.hovered_skin = id;
+                Task::none()
+            }
+
+            Message::AskDeleteSkin(id) => {
+                self.confirm_delete = Some(id);
+                Task::none()
+            }
+
+            Message::CancelDeleteSkin => {
+                self.confirm_delete = None;
+                Task::none()
+            }
+
+            Message::ConfirmDeleteSkin(id) => {
+                self.confirm_delete = None;
+                self.skin_previews.remove(&id);
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        let _ = core.skins.remove(&id).await;
+                    },
+                    |()| Message::LoadSavedSkins,
+                )
+            }
+
+            Message::WearSavedSkin(id) => {
+                let (Some(core), Some(account)) =
+                    (self.core.clone(), self.active_account().cloned())
+                else {
+                    return Task::none();
+                };
+                let model = self
+                    .saved_skins
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.model)
+                    .unwrap_or_default();
+                self.status = Status::Busy("Changing skin".into());
+
+                Task::perform(
+                    async move {
+                        // Uploaded from the stored file rather than by URL:
+                        // these are local copies with nowhere to link to.
+                        core.cosmetics
+                            .upload_skin(&account, &core.skins.png_path(&id), model)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::CosmeticsDone,
                 )
             }
 
@@ -1302,10 +1429,19 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
                 return placeholder_skin();
             };
 
-            let mut decoded = match skin::fetch(core.http(), &url, account.skin_model).await {
-                Ok(decoded) => decoded,
+            // Fetched undecoded so the exact PNG can be kept and re-uploaded
+            // later, rather than a re-encoding of its pixels.
+            let raw = match skin::fetch_png(core.http(), &url).await {
+                Ok(raw) => raw,
                 Err(err) => {
                     tracing::warn!(%err, "could not load skin, using the placeholder");
+                    return placeholder_skin();
+                }
+            };
+            let mut decoded = match skin::Skin::decode(&raw, account.skin_model) {
+                Ok(decoded) => decoded,
+                Err(err) => {
+                    tracing::warn!(%err, "skin texture is not usable, using the placeholder");
                     return placeholder_skin();
                 }
             };
@@ -1328,6 +1464,13 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
             // with classic geometry samples arm columns that slim skins leave
             // empty, so the arms come out full of holes.
             let model = decoded.use_detected_model();
+
+            // Keep a copy of whatever is being worn. Mojang only stores the
+            // current one, so without this a skin is gone the moment it is
+            // replaced.
+            if let Err(err) = core.skins.save(&raw, model).await {
+                tracing::warn!(%err, "could not add this skin to the library");
+            }
 
             Message::SkinLoaded {
                 face: to_handle(decoded.face(FACE_SCALE)),

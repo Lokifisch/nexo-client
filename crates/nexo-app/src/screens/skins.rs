@@ -1,6 +1,6 @@
 use crate::theme;
 use crate::{App, Message};
-use iced::widget::{button, column, container, image, row, scrollable, text, Space};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, text, Space};
 use iced::{Element, Fill};
 use nexo_core::SkinModel;
 
@@ -62,7 +62,7 @@ fn signed_in(app: &App) -> Element<'_, Message> {
         // `app.skin_model` rather than `account.skin_model`: the toggle
         // updates the former, and highlighting from the latter meant the
         // model changed while the buttons stayed put.
-        column![skin_card(app, app.skin_model), capes_card(app)]
+        column![skin_card(app, app.skin_model), library_card(app), capes_card(app)]
             .spacing(16)
             .width(Fill),
     )
@@ -125,6 +125,128 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
 
 /// Capes as a grid of thumbnails. A list of full-width rows wasted most of
 /// the width on a 10x16 image, and capes are picked by looking at them.
+/// Every skin the account has worn, so an old one can be put back on.
+fn library_card(app: &App) -> Element<'_, Message> {
+    const COLUMNS: usize = 4;
+
+    let body = column![
+        text("Your skins").size(17).color(theme::TEXT),
+        text("Kept automatically whenever a skin is worn. Click one to put it back on.")
+            .size(12)
+            .color(theme::MUTED),
+    ]
+    .spacing(3);
+
+    let mut tiles: Vec<Element<'_, Message>> = Vec::new();
+    for saved in &app.saved_skins {
+        let preview: Element<'_, Message> = match app.skin_previews.get(&saved.id) {
+            Some(handle) => image(handle.clone())
+                .filter_method(image::FilterMethod::Nearest)
+                .width(56)
+                .height(56)
+                .into(),
+            None => Space::new().width(56).height(56).into(),
+        };
+
+        // Confirmation replaces the tile's own contents rather than appearing
+        // elsewhere, so the thing being deleted is the thing you are looking
+        // at.
+        if app.confirm_delete.as_deref() == Some(saved.id.as_str()) {
+            tiles.push(
+                container(
+                    column![
+                        text("Delete?").size(12).color(theme::TEXT),
+                        row![
+                            button(text("Yes").size(11))
+                                .padding([4, 10])
+                                .style(theme::danger_button)
+                                .on_press(Message::ConfirmDeleteSkin(saved.id.clone())),
+                            button(text("No").size(11))
+                                .padding([4, 10])
+                                .style(theme::ghost_button)
+                                .on_press(Message::CancelDeleteSkin),
+                        ]
+                        .spacing(6),
+                    ]
+                    .spacing(6)
+                    .align_x(iced::Center),
+                )
+                .padding(8)
+                .width(Fill)
+                .style(theme::card)
+                .into(),
+            );
+            continue;
+        }
+
+        let hovered = app.hovered_skin.as_deref() == Some(saved.id.as_str());
+
+        // The bin only appears on hover, so a grid of skins isn't a grid of
+        // delete buttons. Space is reserved for it either way, or tiles would
+        // change height as the cursor moves across them.
+        let bin: Element<'_, Message> = if hovered {
+            button(text("🗑").size(12))
+                .padding([2, 6])
+                .style(theme::danger_button)
+                .on_press(Message::AskDeleteSkin(saved.id.clone()))
+                .into()
+        } else {
+            Space::new().height(22).into()
+        };
+
+        let tile = button(
+            column![preview, bin]
+                .spacing(4)
+                .align_x(iced::Center),
+        )
+        .padding(8)
+        .width(Fill)
+        .style(if hovered { theme::selected_tile } else { theme::tile })
+        .on_press_maybe(
+            (!app.is_busy()).then(|| Message::WearSavedSkin(saved.id.clone())),
+        );
+
+        tiles.push(
+            mouse_area(tile)
+                .on_enter(Message::HoverSkin(Some(saved.id.clone())))
+                .on_exit(Message::HoverSkin(None))
+                .into(),
+        );
+    }
+
+    let note: Element<'_, Message> = if app.saved_skins.is_empty() {
+        text("Nothing saved yet — the skin you're wearing is added automatically.")
+            .size(12)
+            .color(theme::MUTED)
+            .into()
+    } else {
+        Space::new().height(0).into()
+    };
+
+    // Pad the last row so its tiles keep the width of the rest.
+    let remainder = tiles.len() % COLUMNS;
+    if remainder != 0 {
+        for _ in 0..(COLUMNS - remainder) {
+            tiles.push(Space::new().width(Fill).into());
+        }
+    }
+
+    let mut grid = column![].spacing(10);
+    let mut current: Vec<Element<'_, Message>> = Vec::with_capacity(COLUMNS);
+    for tile in tiles {
+        current.push(tile);
+        if current.len() == COLUMNS {
+            grid = grid.push(row(std::mem::take(&mut current)).spacing(10));
+        }
+    }
+
+    container(body.push(note).push(grid).spacing(12))
+        .padding(18)
+        .width(Fill)
+        .style(theme::card)
+        .into()
+}
+
 fn capes_card(app: &App) -> Element<'_, Message> {
     /// Tiles per row. Four fits the controls column without the tiles
     /// becoming too small to recognise a cape by.

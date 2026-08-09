@@ -291,8 +291,17 @@ impl Skin {
 
 /// Downloads a skin texture and decodes it.
 pub async fn fetch(http: &reqwest::Client, url: &str, model: SkinModel) -> Result<Skin> {
+    Skin::decode(&fetch_png(http, url).await?, model)
+}
+
+/// Downloads a skin texture without decoding it.
+///
+/// The undecoded PNG is what gets kept in the skin library and re-uploaded
+/// later, so it has to survive the round trip byte for byte rather than being
+/// re-encoded from pixels.
+pub async fn fetch_png(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
-    Skin::decode(&bytes, model)
+    Ok(bytes.to_vec())
 }
 
 /// Crops a cape texture down to the panel that actually hangs off the

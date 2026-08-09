@@ -20,6 +20,7 @@ pub mod paths;
 pub mod running;
 pub mod shared_store;
 pub mod skin;
+pub mod skin_library;
 pub mod util;
 
 pub use accounts::AccountStore;
@@ -42,6 +43,7 @@ pub struct Nexo {
     pub nexo_mod: nexo_mod::NexoMod,
     pub content: content::Content,
     pub cosmetics: cosmetics::Cosmetics,
+    pub skins: skin_library::SkinLibrary,
     /// Games this launcher started. Shared, so every clone of `Nexo` sees the
     /// same set — the UI holds one clone and each async task another.
     pub running: running::RunningGames,
@@ -75,6 +77,7 @@ impl Nexo {
             nexo_mod: nexo_mod::NexoMod::new(http.clone(), paths.clone()),
             content: content::Content::new(http.clone(), paths.clone()),
             cosmetics: cosmetics::Cosmetics::new(http.clone()),
+            skins: skin_library::SkinLibrary::new(&paths),
             running: running::RunningGames::new(),
             paths,
             http,
