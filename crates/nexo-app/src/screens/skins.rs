@@ -1,6 +1,6 @@
 use crate::theme;
 use crate::{App, Message};
-use iced::widget::{button, column, container, image, mouse_area, row, scrollable, text, Space};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text, Space};
 use iced::{Element, Fill};
 use nexo_core::SkinModel;
 
@@ -142,10 +142,10 @@ fn library_card(app: &App) -> Element<'_, Message> {
         let preview: Element<'_, Message> = match app.skin_previews.get(&saved.id) {
             Some(handle) => image(handle.clone())
                 .filter_method(image::FilterMethod::Nearest)
-                .width(56)
-                .height(56)
+                .width(48)
+                .height(96)
                 .into(),
-            None => Space::new().width(56).height(56).into(),
+            None => Space::new().width(48).height(96).into(),
         };
 
         // Confirmation replaces the tile's own contents rather than appearing
@@ -168,11 +168,13 @@ fn library_card(app: &App) -> Element<'_, Message> {
                         ]
                         .spacing(6),
                     ]
-                    .spacing(6)
+                    .spacing(8)
                     .align_x(iced::Center),
                 )
                 .padding(8)
+                .height(120)
                 .width(Fill)
+                .center_y(Fill)
                 .style(theme::card)
                 .into(),
             );
@@ -181,33 +183,40 @@ fn library_card(app: &App) -> Element<'_, Message> {
 
         let hovered = app.hovered_skin.as_deref() == Some(saved.id.as_str());
 
-        // The bin only appears on hover, so a grid of skins isn't a grid of
-        // delete buttons. Space is reserved for it either way, or tiles would
-        // change height as the cursor moves across them.
-        let bin: Element<'_, Message> = if hovered {
-            button(text("🗑").size(12))
-                .padding([2, 6])
-                .style(theme::danger_button)
-                .on_press(Message::AskDeleteSkin(saved.id.clone()))
-                .into()
+        let tile = button(container(preview).width(Fill).center_x(Fill))
+            .padding(8)
+            .width(Fill)
+            .height(120)
+            .style(if hovered { theme::selected_tile } else { theme::tile })
+            .on_press_maybe(
+                (!app.is_busy()).then(|| Message::WearSavedSkin(saved.id.clone())),
+            );
+
+        // The bin is stacked over the tile rather than laid out inside it, so
+        // the tile keeps one shape whether or not the cursor is on it —
+        // previously it grew a row and the grid jumped as the cursor moved.
+        let overlaid: Element<'_, Message> = if hovered {
+            stack![
+                tile,
+                container(
+                    button(text("🗑").size(12))
+                        .padding([2, 6])
+                        .style(theme::danger_button)
+                        .on_press(Message::AskDeleteSkin(saved.id.clone()))
+                )
+                .width(Fill)
+                .height(Fill)
+                .align_right(Fill)
+                .align_bottom(Fill)
+                .padding(6),
+            ]
+            .into()
         } else {
-            Space::new().height(22).into()
+            tile.into()
         };
 
-        let tile = button(
-            column![preview, bin]
-                .spacing(4)
-                .align_x(iced::Center),
-        )
-        .padding(8)
-        .width(Fill)
-        .style(if hovered { theme::selected_tile } else { theme::tile })
-        .on_press_maybe(
-            (!app.is_busy()).then(|| Message::WearSavedSkin(saved.id.clone())),
-        );
-
         tiles.push(
-            mouse_area(tile)
+            mouse_area(overlaid)
                 .on_enter(Message::HoverSkin(Some(saved.id.clone())))
                 .on_exit(Message::HoverSkin(None))
                 .into(),

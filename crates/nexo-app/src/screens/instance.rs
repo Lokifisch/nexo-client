@@ -44,7 +44,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             column![
                 nexo_mod_card(app, instance),
                 installed_card(app, instance),
-                details_card(instance),
+                details_card(app, instance),
                 danger_card(instance, running),
             ]
             .spacing(14)
@@ -453,7 +453,7 @@ fn compact(n: u64) -> String {
     }
 }
 
-fn details_card(instance: &Instance) -> Element<'_, Message> {
+fn details_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let field = |label: &'static str, value: String| {
         row![
             text(label).size(12).color(theme::MUTED).width(140),
@@ -484,6 +484,20 @@ fn details_card(instance: &Instance) -> Element<'_, Message> {
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "Detected automatically".to_string()),
             ),
+            Space::new().height(6),
+            row![
+                button(text("Open folder").size(13))
+                    .padding([8, 16])
+                    .style(theme::ghost_button)
+                    .on_press(Message::OpenFolder(instance.id.clone())),
+                button(text("Export .mrpack").size(13))
+                    .padding([8, 16])
+                    .style(theme::ghost_button)
+                    .on_press_maybe(
+                        (!app.is_busy()).then(|| Message::ExportPack(instance.id.clone()))
+                    ),
+            ]
+            .spacing(10),
         ]
         .spacing(8),
     )

@@ -37,6 +37,10 @@ const WINDOW_ICON: &[u8] = include_bytes!("../../../assets/icons/256.png");
 /// nearest-neighbour sampling.
 const FACE_SCALE: u32 = 4;
 
+/// Upscale for the saved-skin tiles. A body render is 16x32 texture pixels,
+/// so this puts it at a size a skin is recognisable from.
+const LIBRARY_SCALE: u32 = 3;
+
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -255,6 +259,7 @@ pub enum Message {
     ConfirmDeleteSkin(String),
 
     // Modpacks
+    OpenFolder(String),
     ImportPack,
     ExportPack(String),
     PackImported(Result<String, String>),
@@ -853,6 +858,21 @@ impl App {
                 )
             }
 
+            Message::OpenFolder(id) => {
+                if let Some(core) = &self.core {
+                    let folder = core.paths.instance(&id);
+                    // The folder only exists once something has been written
+                    // into it, and opening a missing path fails silently in
+                    // most file managers.
+                    if let Err(err) = std::fs::create_dir_all(&folder) {
+                        self.status = Status::Error(format!("Couldn't open the folder: {err}"));
+                    } else if let Err(err) = open::that_detached(&folder) {
+                        self.status = Status::Error(format!("Couldn't open the folder: {err}"));
+                    }
+                }
+                Task::none()
+            }
+
             Message::ImportPack => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
@@ -960,8 +980,14 @@ impl App {
                     fetches.push(Task::perform(
                         async move {
                             let bytes = core.skins.read(&id).await.ok()?;
-                            let decoded = skin::Skin::decode(&bytes, model).ok()?;
-                            Some((id, decoded.face(FACE_SCALE)))
+                            let mut decoded = skin::Skin::decode(&bytes, model).ok()?;
+                            // The stored model can be wrong; the texture
+                            // can't be, and slim arms drawn as classic come
+                            // out full of holes.
+                            decoded.use_detected_model();
+                            // A whole figure rather than a head: one static
+                            // render per skin, all from the same angle.
+                            Some((id, decoded.body(LIBRARY_SCALE)))
                         },
                         |loaded| match loaded {
                             Some((skin, face)) => Message::SkinPreviewLoaded {
