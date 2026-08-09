@@ -254,6 +254,11 @@ pub enum Message {
     CancelDeleteSkin,
     ConfirmDeleteSkin(String),
 
+    // Modpacks
+    ImportPack,
+    ExportPack(String),
+    PackImported(Result<String, String>),
+
     // Accounts
     StartSignIn,
     SignInFinished(Result<Account, String>),
@@ -846,6 +851,91 @@ impl App {
                     },
                     Message::NexoModDone,
                 )
+            }
+
+            Message::ImportPack => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Importing modpack".into());
+
+                Task::perform(
+                    async move {
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Import a Modrinth modpack")
+                            .add_filter("Modrinth modpack", &["mrpack"])
+                            .pick_file()
+                            .await
+                        else {
+                            // Cancelled, which is not a failure.
+                            return Ok(String::new());
+                        };
+
+                        let imported = core
+                            .mrpack
+                            .import(handle.path(), &core.instances)
+                            .await
+                            .map_err(|e| e.to_string())?;
+
+                        Ok(if imported.skipped.is_empty() {
+                            format!("Imported {} — {} files", imported.name, imported.files)
+                        } else {
+                            // Named rather than counted: knowing which mod is
+                            // missing is what makes it fixable.
+                            format!(
+                                "Imported {} — {} files, {} unavailable ({})",
+                                imported.name,
+                                imported.files,
+                                imported.skipped.len(),
+                                imported.skipped.join(", ")
+                            )
+                        })
+                    },
+                    Message::PackImported,
+                )
+            }
+
+            Message::ExportPack(id) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Exporting modpack".into());
+
+                Task::perform(
+                    async move {
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Export as a Modrinth modpack")
+                            .set_file_name(format!("{}.mrpack", instance.id))
+                            .add_filter("Modrinth modpack", &["mrpack"])
+                            .save_file()
+                            .await
+                        else {
+                            return Ok(String::new());
+                        };
+
+                        core.mrpack
+                            .export(&instance, handle.path())
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok(format!("Exported {}", instance.name))
+                    },
+                    Message::PackImported,
+                )
+            }
+
+            Message::PackImported(Ok(message)) => {
+                self.status = Status::Idle;
+                if !message.is_empty() {
+                    tracing::info!("{message}");
+                }
+                self.core.clone().map(reload).unwrap_or_else(Task::none)
+            }
+            Message::PackImported(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
             }
 
             Message::LoadSavedSkins => {

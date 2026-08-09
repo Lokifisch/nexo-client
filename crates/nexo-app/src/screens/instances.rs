@@ -55,10 +55,17 @@ fn create_form(app: &App) -> Element<'_, Message> {
         .style(theme::primary_button)
         .on_press_maybe(can_create.then_some(Message::CreateInstance));
 
+    let import = button(text("Import .mrpack").size(13))
+        .padding([10, 16])
+        .style(theme::ghost_button)
+        .on_press_maybe(can_create.then_some(Message::ImportPack));
+
     container(
         column![
-            row![name, version, create].spacing(12).align_y(iced::Center),
-            text("Fabric loader, installed automatically.")
+            row![name, version, create, import]
+                .spacing(12)
+                .align_y(iced::Center),
+            text("Fabric loader, installed automatically. Importing a modpack creates its own instance.")
                 .size(12)
                 .color(theme::MUTED),
         ]

@@ -15,6 +15,7 @@ pub mod instance;
 pub mod java;
 pub mod minecraft;
 pub mod modrinth;
+pub mod mrpack;
 pub mod nexo_mod;
 pub mod paths;
 pub mod running;
@@ -44,6 +45,7 @@ pub struct Nexo {
     pub content: content::Content,
     pub cosmetics: cosmetics::Cosmetics,
     pub skins: skin_library::SkinLibrary,
+    pub mrpack: mrpack::MrPack,
     /// Games this launcher started. Shared, so every clone of `Nexo` sees the
     /// same set — the UI holds one clone and each async task another.
     pub running: running::RunningGames,
@@ -78,6 +80,7 @@ impl Nexo {
             content: content::Content::new(http.clone(), paths.clone()),
             cosmetics: cosmetics::Cosmetics::new(http.clone()),
             skins: skin_library::SkinLibrary::new(&paths),
+            mrpack: mrpack::MrPack::new(http.clone(), paths.clone()),
             running: running::RunningGames::new(),
             paths,
             http,
