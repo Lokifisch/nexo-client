@@ -2,6 +2,7 @@ use crate::theme;
 use crate::{App, Message, Screen};
 use iced::widget::{button, column, container, image, row, scrollable, text, text_input, Space};
 use iced::{Element, Fill};
+use nexo_core::instance::InstalledMod;
 use nexo_core::nexo_mod;
 use nexo_core::Instance;
 
@@ -102,10 +103,7 @@ fn launch_control<'a>(
 /// The injector. Compatibility is decided by the release's own manifest, so
 /// this states what the published build targets rather than assuming.
 fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let installed = instance
-        .mods
-        .iter()
-        .find(|m| m.project_id == nexo_mod::PROJECT_ID);
+    let installed = nexo_mod::installed(instance);
 
     let mut body = column![
         row![
@@ -124,78 +122,12 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
 
     // Bound with an explicit type: the arms produce different widget types,
     // so inference can't pick one for `push`.
-    let section: Element<'a, Message> = match (&app.nexo_release, installed) {
-        // Installed, and we know what's published.
-        (Some(release), Some(current)) => {
-            let up_to_date = current.version_number == release.manifest.mod_version;
-            let status = if up_to_date {
-                text(format!("Installed — {} (latest)", current.version_number))
-                    .size(12)
-                    .color(theme::MINT)
-            } else {
-                text(format!(
-                    "Installed — {} · {} is available",
-                    current.version_number, release.manifest.mod_version
-                ))
-                .size(12)
-                .color(theme::TEXT)
-            };
-
-            let mut actions = row![].spacing(10);
-            if !up_to_date && release.manifest.supports(instance) {
-                actions = actions.push(
-                    button(text("Update").size(13))
-                        .padding([8, 16])
-                        .style(theme::primary_button)
-                        .on_press(Message::InstallNexoMod(instance.id.clone())),
-                );
-            }
-            actions = actions.push(
-                button(text("Remove").size(13))
-                    .padding([8, 16])
-                    .style(theme::danger_button)
-                    .on_press(Message::RemoveNexoMod(instance.id.clone())),
-            );
-
-            column![status, actions].spacing(10).into()
-        }
-
-        // Not installed, and a release is known.
-        (Some(release), None) => match release.manifest.incompatibility(instance) {
-            // Refuses rather than adapting: installing never changes an
-            // instance's loader or Minecraft version.
-            Some(reason) => column![
-                text(reason).size(12).color(theme::MUTED),
-                text("Create an instance on that version to use Nexo Mod.")
-                    .size(11)
-                    .color(theme::MUTED),
-            ]
-            .spacing(4)
-            .into(),
-
-            None => column![
-                text(format!(
-                    "Compatible — version {} targets {} {}",
-                    release.manifest.mod_version,
-                    release.manifest.loader,
-                    release.manifest.minecraft_version
-                ))
-                .size(12)
-                .color(theme::MINT),
-                button(text("Install Nexo Mod").size(14))
-                    .padding([10, 20])
-                    .style(theme::primary_button)
-                    .on_press_maybe(
-                        (!app.is_busy()).then(|| Message::InstallNexoMod(instance.id.clone()))
-                    ),
-            ]
-            .spacing(10)
-            .into(),
-        },
+    let section: Element<'a, Message> = match &app.nexo_release {
+        Some(release) => release_section(app, instance, release, installed),
 
         // Release lookup hasn't landed (or failed) — offer a retry rather
         // than a dead card.
-        (None, installed) => {
+        None => {
             let line = match installed {
                 Some(current) => format!("Installed — {}", current.version_number),
                 None => "Checking for the latest release…".to_string(),
@@ -217,6 +149,192 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
         .padding(18)
         .width(Fill)
         .style(theme::card)
+        .into()
+}
+
+/// The part of the injector card that needs a resolved release: what's
+/// installed, which edition to install, and the one button that acts on it.
+fn release_section<'a>(
+    app: &'a App,
+    instance: &'a Instance,
+    release: &'a nexo_mod::Release,
+    installed: Option<&'a InstalledMod>,
+) -> Element<'a, Message> {
+    // Refuses rather than adapting: installing never changes an instance's
+    // loader or Minecraft version. Shown instead of the picker, since there
+    // is nothing to pick between if nothing can be installed.
+    if installed.is_none()
+        && let Some(reason) = release.manifest.incompatibility(instance)
+    {
+        return column![
+            text(reason).size(12).color(theme::MUTED),
+            text("Create an instance on that version to use Nexo Mod.")
+                .size(11)
+                .color(theme::MUTED),
+        ]
+        .spacing(4)
+        .into();
+    }
+
+    let installed_edition = nexo_mod::installed_edition(instance);
+    // What every control below acts on: the user's pick, else what's already
+    // installed, else what the release itself prefers. Filtered against what
+    // the release actually publishes, so a stale pick can't point at nothing.
+    let selected = app
+        .nexo_edition
+        .or(installed_edition)
+        .filter(|edition| release.edition(*edition).is_some())
+        .unwrap_or_else(|| release.default_edition());
+
+    let up_to_date = installed.is_some_and(|m| m.version_number == release.manifest.mod_version);
+
+    let status: Element<'a, Message> = match installed {
+        Some(current) => {
+            let edition = installed_edition.unwrap_or_default();
+            if up_to_date {
+                text(format!(
+                    "Installed — {edition} {} (latest)",
+                    current.version_number
+                ))
+                .size(12)
+                .color(theme::MINT)
+                .into()
+            } else {
+                text(format!(
+                    "Installed — {edition} {} · {} is available",
+                    current.version_number, release.manifest.mod_version
+                ))
+                .size(12)
+                .color(theme::TEXT)
+                .into()
+            }
+        }
+        None => text(format!(
+            "Compatible — version {} targets {} {}",
+            release.manifest.mod_version,
+            release.manifest.loader,
+            release.manifest.minecraft_version
+        ))
+        .size(12)
+        .color(theme::MINT)
+        .into(),
+    };
+
+    let mut section = column![status].spacing(12);
+
+    // Installed into an instance the published release no longer fits. Every
+    // button below is gone in that case, so say why rather than leaving a
+    // card that looks broken.
+    if let Some(reason) = release.manifest.incompatibility(instance) {
+        section = section.push(text(reason).size(11).color(theme::MUTED));
+    }
+
+    // Only worth a picker when the release actually publishes more than one
+    // build. Pre-0.5.0 releases have a single jar and get no chooser.
+    if release.offers_a_choice() {
+        let mut tiles = row![].spacing(10);
+        for build in release.editions() {
+            tiles = tiles.push(edition_tile(build, selected, installed_edition));
+        }
+
+        section = section.push(
+            column![
+                // Frames the choice as what it is. Which features sit in
+                // which jar is the manifest's business — this line is about
+                // the consequence, and holds no matter what a release ships.
+                text("Pick an edition. This decides what the mod is allowed to do on a server, not how much of it you get.")
+                    .size(11)
+                    .color(theme::MUTED),
+                tiles,
+            ]
+            .spacing(8),
+        );
+    }
+
+    // The two jars declare `breaks` on each other, so this is never an "also
+    // install" — say so before the button is pressed.
+    if let Some(current) = installed_edition
+        && current != selected
+    {
+        section = section.push(
+            text(format!(
+                "Installing {selected} removes the {current} jar — Minecraft won't start with both."
+            ))
+            .size(11)
+            .color(theme::MUTED),
+        );
+    }
+
+    let action = match installed_edition {
+        // Same edition already there: only an update is left to offer.
+        Some(current) if current == selected => (!up_to_date).then(|| "Update".to_string()),
+        Some(_) => Some(format!("Switch to {selected}")),
+        None if release.offers_a_choice() => Some(format!("Install {selected}")),
+        None => Some("Install Nexo Mod".to_string()),
+    };
+
+    let mut actions = row![].spacing(10);
+    if let Some(label) = action
+        && release.manifest.supports(instance)
+    {
+        actions = actions.push(
+            button(text(label).size(14))
+                .padding([10, 20])
+                .style(theme::primary_button)
+                .on_press_maybe((!app.is_busy()).then(|| Message::InstallNexoMod {
+                    instance: instance.id.clone(),
+                    edition: selected,
+                })),
+        );
+    }
+    if installed.is_some() {
+        actions = actions.push(
+            button(text("Remove").size(13))
+                .padding([8, 16])
+                .style(theme::danger_button)
+                .on_press(Message::RemoveNexoMod(instance.id.clone())),
+        );
+    }
+
+    section.push(actions).into()
+}
+
+/// One edition in the picker. The label and the prose come from the release
+/// manifest; only the rules line is the launcher's own, because that is the
+/// part that has to stay true across releases.
+fn edition_tile<'a>(
+    build: &'a nexo_mod::ReleaseEdition,
+    selected: nexo_mod::Edition,
+    installed: Option<nexo_mod::Edition>,
+) -> Element<'a, Message> {
+    let is_selected = build.edition == selected;
+
+    let mut inner = column![
+        text(build.name.as_str()).size(14).color(theme::TEXT),
+        text(build.edition.rules_note())
+            .size(11)
+            .color(if is_selected { theme::TEXT } else { theme::MUTED }),
+    ]
+    .spacing(4);
+
+    // Straight from the manifest rather than a copy kept here, which would
+    // start lying the first time a release changes what's in a jar.
+    if let Some(description) = &build.description {
+        inner = inner.push(text(description.as_str()).size(11).color(theme::MUTED));
+    }
+    if installed == Some(build.edition) {
+        inner = inner.push(text("Currently installed").size(10).color(theme::MINT));
+    }
+
+    button(inner.width(Fill))
+        .padding(12)
+        .width(Fill)
+        .style(if is_selected {
+            theme::selected_tile
+        } else {
+            theme::tile
+        })
+        .on_press(Message::SelectNexoEdition(build.edition))
         .into()
 }
 

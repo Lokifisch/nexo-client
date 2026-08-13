@@ -156,6 +156,12 @@ pub struct App {
     /// Latest published Nexo Mod release, once looked up. `None` while
     /// unknown; the error is surfaced through `status` instead.
     nexo_release: Option<nexo_core::nexo_mod::Release>,
+    /// Edition picked in the injector card, if the user picked one. `None`
+    /// falls back to whatever the instance already has, then to the release's
+    /// own default, so the card is never in a state with nothing selected.
+    /// Cleared when another instance is opened — it's a choice about that
+    /// instance, not a global preference.
+    nexo_edition: Option<nexo_core::nexo_mod::Edition>,
 
     // Content, on the instance details screen.
     /// Filters the *installed* list. Modrinth has its own separate query.
@@ -216,7 +222,13 @@ pub enum Message {
     // Nexo Mod injector
     FetchNexoRelease,
     NexoReleaseLoaded(Result<nexo_core::nexo_mod::Release, String>),
-    InstallNexoMod(String),
+    SelectNexoEdition(nexo_core::nexo_mod::Edition),
+    /// Installs one edition. Carries it rather than reading the selection at
+    /// handling time, so the button does exactly what its label says.
+    InstallNexoMod {
+        instance: String,
+        edition: nexo_core::nexo_mod::Edition,
+    },
     RemoveNexoMod(String),
     NexoModDone(Result<(), String>),
 
@@ -302,6 +314,7 @@ impl App {
             skin_key: 0,
             running: std::collections::HashSet::new(),
             nexo_release: None,
+            nexo_edition: None,
             content_query: String::new(),
             content_kind: ProjectKind::Mod,
             browsing: false,
@@ -534,6 +547,9 @@ impl App {
                 // published the first time one is opened.
                 self.browsing = false;
                 self.content_query.clear();
+                // The edition picker starts from this instance's own state,
+                // not from what was chosen on the last one.
+                self.nexo_edition = None;
                 if self.nexo_release.is_none() {
                     return Task::batch([icons, Task::done(Message::FetchNexoRelease)]);
                 }
@@ -581,19 +597,29 @@ impl App {
                 Task::none()
             }
 
-            Message::InstallNexoMod(id) => {
+            Message::SelectNexoEdition(edition) => {
+                self.nexo_edition = Some(edition);
+                Task::none()
+            }
+
+            Message::InstallNexoMod {
+                instance: id,
+                edition,
+            } => {
                 let (Some(core), Some(release)) = (self.core.clone(), self.nexo_release.clone())
                 else {
                     return Task::none();
                 };
-                self.status = Status::Busy("Installing Nexo Mod".into());
+                self.status = Status::Busy(format!("Installing Nexo Mod ({edition})"));
 
                 Task::perform(
                     async move {
                         let mut instance =
                             core.instances.get(&id).await.map_err(|e| e.to_string())?;
+                        // Installs one edition and takes the other out on the
+                        // way — they can't share a mods/ folder.
                         core.nexo_mod
-                            .install(&mut instance, &release)
+                            .install(&mut instance, &release, edition)
                             .await
                             .map_err(|e| e.to_string())?;
                         // Persist the content list, or the install is

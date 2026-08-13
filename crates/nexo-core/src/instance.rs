@@ -125,6 +125,16 @@ pub struct InstalledMod {
     /// convention every Fabric-aware launcher uses.
     #[serde(default)]
     pub enabled: bool,
+    /// Which Nexo Mod edition this jar is, for [`ModSource::NexoMod`] entries.
+    /// `None` on everything else, and on entries written before the editions
+    /// existed — [`crate::nexo_mod::installed_edition`] falls back to the file
+    /// name for those.
+    #[serde(
+        default,
+        deserialize_with = "crate::nexo_mod::deserialize_edition",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub edition: Option<crate::nexo_mod::Edition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

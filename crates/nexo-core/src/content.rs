@@ -155,6 +155,7 @@ impl Content {
             file_name: file.filename.clone(),
             source: ModSource::Modrinth,
             enabled: true,
+            edition: None,
         });
 
         Ok(())
@@ -207,6 +208,7 @@ impl Content {
             file_name,
             source: ModSource::Local,
             enabled: true,
+            edition: None,
         });
 
         Ok(())

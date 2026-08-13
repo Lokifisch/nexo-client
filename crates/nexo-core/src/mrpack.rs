@@ -155,6 +155,7 @@ impl MrPack {
                         file_name: file_name(&file.path),
                         source: ModSource::Modrinth,
                         enabled: true,
+                        edition: None,
                     });
                 }
                 Err(err) => {

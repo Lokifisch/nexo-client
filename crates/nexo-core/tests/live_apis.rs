@@ -14,6 +14,7 @@
 use nexo_core::instance::{Instance, Loader};
 use nexo_core::minecraft::{fabric, Installer};
 use nexo_core::modrinth::{Modrinth, SearchQuery};
+use nexo_core::nexo_mod::{Edition, NexoMod};
 use nexo_core::paths::Paths;
 
 fn temp_paths() -> Paths {
@@ -228,4 +229,52 @@ async fn interop_read_back() {
     // And the ones Rust wrote earlier must have survived Java's rewrite.
     assert!(contents.accounts.iter().any(|a| a.username == "AlphaPlayer"));
     assert_eq!(contents.accounts.len(), 3);
+}
+
+/// The edition table in a release's `manifest.json` is the same species of
+/// assumption as the upstream APIs above: it is JSON published by something
+/// outside this binary, and a release that omits or misspells an edition key
+/// would surface as "install did nothing" in the UI rather than as a failure
+/// here.
+///
+/// It also pins the property the whole split rests on. Both jars ship in one
+/// release, so resolution must come from the declared file name — "the first
+/// .jar asset" is a coin flip between an edition a server allows and one it
+/// bans.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn nexo_release_resolves_both_editions_by_declared_file_name() {
+    // The app's client, not a bare one: GitHub answers 403 to a request with
+    // no User-Agent, so a bare client would fail here for a reason the real
+    // launcher never hits.
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("Lokifisch/nexo-client/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap();
+    let nexo = NexoMod::new(http, temp_paths());
+    let release = nexo.latest_including_prereleases().await.unwrap();
+
+    assert!(
+        release.offers_a_choice(),
+        "{} publishes only one edition; the picker would have nothing to offer",
+        release.version()
+    );
+
+    for edition in Edition::ALL {
+        let build = release
+            .edition(edition)
+            .unwrap_or_else(|| panic!("{edition} is not published in {}", release.version()));
+
+        assert!(
+            build.jar_name.ends_with(".jar") && !build.jar_name.ends_with("-sources.jar"),
+            "{edition} resolved to {}, which is not an installable jar",
+            build.jar_name
+        );
+    }
+
+    // The distinguishing property: the two editions are different artifacts.
+    let tactical = release.edition(Edition::Tactical).unwrap();
+    let legit = release.edition(Edition::Legit).unwrap();
+    assert_ne!(tactical.jar_name, legit.jar_name);
+    assert_ne!(tactical.mod_id, legit.mod_id);
 }
