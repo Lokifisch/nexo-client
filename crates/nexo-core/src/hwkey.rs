@@ -63,7 +63,29 @@ impl HardwareKey {
 /// `None` is not an error to paper over: callers must fail safe — don't
 /// persist secrets, and never delete or truncate a store that couldn't be
 /// verified.
+///
+/// **Computed once per process.** [`crate::shared_store`] calls this on every
+/// read *and* every write of the account store, and collecting the identifiers
+/// means running external probes: on Windows that is a PowerShell process
+/// issuing three `Get-CimInstance` queries, several hundred milliseconds each
+/// time. Uncached, ordinary use of the launcher spawned it over and over —
+/// which flashed a console window every time and made the UI stutter.
+/// Hardware does not change underneath a running process, so caching costs
+/// nothing in correctness.
 pub fn derive() -> Option<HardwareKey> {
+    static CACHED: std::sync::OnceLock<Option<HardwareKey>> = std::sync::OnceLock::new();
+    CACHED.get_or_init(derive_uncached).clone()
+}
+
+/// How many times the identifiers have actually been collected. Exists so the
+/// cache is a tested property rather than an unenforced comment — dropping the
+/// `OnceLock` sends this above 1 and fails
+/// `identifiers_are_only_collected_once`.
+static DERIVATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The actual derivation, run at most once per process.
+fn derive_uncached() -> Option<HardwareKey> {
+    DERIVATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let parts = collect();
     if parts.is_empty() {
         tracing::error!(
@@ -288,7 +310,9 @@ fn collect_macos(parts: &mut Vec<String>) {
 /// Runs a probe, returning its stdout lines. Any failure yields no lines, so
 /// an unavailable tool is consistently absent rather than an error.
 fn run_command(program: &str, args: &[&str]) -> Vec<String> {
-    let Ok(output) = std::process::Command::new(program).args(args).output() else {
+    let Ok(output) =
+        crate::util::no_window(std::process::Command::new(program).args(args)).output()
+    else {
         tracing::warn!(program, "hardware probe unavailable");
         return Vec::new();
     };
@@ -303,6 +327,26 @@ fn run_command(program: &str, args: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Collecting the identifiers means running external probes — on Windows a
+    /// PowerShell process issuing three CIM queries. `shared_store` calls
+    /// `derive` on every account read *and* write, so without the cache simply
+    /// using the launcher spawned it repeatedly: a console window flashing each
+    /// time and hundreds of milliseconds of stutter per read.
+    ///
+    /// "At most once" rather than "exactly once" because tests share a process
+    /// and another one may have primed the cache first.
+    #[test]
+    fn identifiers_are_only_collected_once() {
+        for _ in 0..5 {
+            let _ = derive();
+        }
+        let runs = DERIVATIONS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            runs <= 1,
+            "derive() probed the hardware {runs} times; it must be cached"
+        );
+    }
 
     /// Pins the digest construction itself, independent of any machine.
     /// If this changes, the Java side must change identically or every

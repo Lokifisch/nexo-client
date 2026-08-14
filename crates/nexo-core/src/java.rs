@@ -50,8 +50,9 @@ pub async fn find_suitable() -> Option<JavaInstall> {
 /// anything that isn't a working JVM, so callers can throw candidate paths
 /// at this freely.
 pub async fn probe(java: &Path) -> Option<JavaInstall> {
-    let output = tokio::process::Command::new(java)
-        .arg("-version")
+    // Discovery probes every candidate path, so on Windows this is the spawn
+    // that ran most often — and each one flashed its own console window.
+    let output = crate::util::no_window_async(tokio::process::Command::new(java).arg("-version"))
         .output()
         .await
         .ok()?;
