@@ -1,3 +1,10 @@
+nexo-client (0.3.2-1) unstable; urgency=medium
+
+  * Signing in always offers the Microsoft account picker, so adding a
+    second account no longer means signing out at microsoft.com first.
+
+ -- Lokifisch <lokifisch@lokifisch.dev>  Fri, 14 Aug 2026 21:05:00 +0200
+
 nexo-client (0.3.1-1) unstable; urgency=medium
 
   * The 3D character renders correctly on displays scaled above 100%; it

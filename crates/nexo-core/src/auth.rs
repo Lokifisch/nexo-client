@@ -46,6 +46,23 @@ const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profil
 /// would have to sign in again on every launch.
 const SCOPE: &str = "XboxLive.signin offline_access";
 
+/// Always show the account picker, even when the browser already has a live
+/// Microsoft session.
+///
+/// Without this, Microsoft silently signs the browser's current account in
+/// again, so adding a *second* account meant leaving Nexo, signing out at
+/// microsoft.com, coming back, and signing in — every time. Since Nexo keeps
+/// several accounts and exists partly to switch between them, picking one is
+/// the normal case here, not the exception.
+///
+/// Deliberately not `login`, which would force a full re-authentication and
+/// make people retype a password they have already given.
+///
+/// Must stay in step with `Mod/`'s `MicrosoftAuth.java`: both halves sign into
+/// the same account store, and an inconsistency would be the kind of thing
+/// nobody notices until they hit it in-game.
+const PROMPT: &str = "select_account";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     /// Minecraft profile UUID, dashless as the game expects it.
@@ -328,7 +345,7 @@ impl Auth {
 
 fn authorize_url(state: &str) -> String {
     format!(
-        "{AUTHORIZE_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}",
+        "{AUTHORIZE_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&state={}&prompt={PROMPT}",
         urlencode(CLIENT_ID),
         urlencode(REDIRECT_URI),
         urlencode(SCOPE),
@@ -631,6 +648,13 @@ mod tests {
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A25585%2Fcallback"));
         assert!(url.contains("scope=XboxLive.signin%20offline_access"));
         assert!(url.contains("response_type=code"));
+    }
+
+    /// Without this, a live browser session is reused silently and the only
+    /// way to add a second account is to go and sign out at microsoft.com.
+    #[test]
+    fn authorize_url_always_offers_the_account_picker() {
+        assert!(authorize_url("state-1").contains("prompt=select_account"));
     }
 
     #[test]
