@@ -1,3 +1,11 @@
+nexo-client (0.3.1-1) unstable; urgency=medium
+
+  * The 3D character renders correctly on displays scaled above 100%; it
+    was shifted off its widget, or missing entirely, on Windows.
+  * Slightly smaller buttons.
+
+ -- Lokifisch <lokifisch@lokifisch.dev>  Fri, 14 Aug 2026 17:10:00 +0200
+
 nexo-client (0.3.0-1) unstable; urgency=medium
 
   * Java is installed automatically when the machine has none new enough,
