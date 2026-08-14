@@ -27,4 +27,19 @@ tracing-subscriber.workspace = true
 open = "5"
 glam = "0.33.3"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+# `xdg-portal` is a Linux-only feature of rfd: the deps it pulls sit behind a
+# Linux `[target]` table upstream, so it is inert on Windows and the Win32
+# backend is used there. `common-controls-v6` gives the Windows dialogs the
+# modern visual style.
+rfd = { version = "0.15", default-features = false, features = [
+    "xdg-portal",
+    "tokio",
+    "common-controls-v6",
+] }
+
+# Not `[target.'cfg(windows)'.build-dependencies]`: build-dependency target
+# tables are evaluated against the *host*, so that spelling would drop this
+# when cross-compiling from Linux — exactly the case that needs it. The build
+# script checks the target itself instead.
+[build-dependencies]
+winresource = "0.1"

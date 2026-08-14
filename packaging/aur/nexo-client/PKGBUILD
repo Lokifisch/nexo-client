@@ -48,6 +48,11 @@ build() {
 	cd "$pkgname-$pkgver"
 	export RUSTUP_TOOLCHAIN=stable
 	export CARGO_TARGET_DIR=target
+	# Turns off the built-in self-updater: pacman owns /usr/bin/nexo, and a
+	# binary replaced underneath it would desync the package's file list and
+	# be silently reverted by the next -Syu. self_update.rs also refuses any
+	# install under /usr on its own; this states the intent at the source.
+	export NEXO_SELF_UPDATE=off
 	cargo build --frozen --release
 }
 

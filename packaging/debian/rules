@@ -5,6 +5,11 @@
 export CARGO_HOME = $(CURDIR)/debian/cargo
 export CARGO_NET_OFFLINE = true
 
+# dpkg owns /usr/bin/nexo, so the built-in self-updater is compiled out — a
+# binary swapped underneath the package would desync its file list and be
+# reverted by the next upgrade. See crates/nexo-core/src/self_update.rs.
+export NEXO_SELF_UPDATE = off
+
 %:
 	dh $@
 

@@ -8,3 +8,6 @@
 
 # Debian packaging staging (packaging/debian is copied to ./debian to build)
 /debian
+
+# Inno Setup output
+/dist

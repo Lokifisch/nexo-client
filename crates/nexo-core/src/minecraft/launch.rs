@@ -74,6 +74,23 @@ impl Launcher {
             command.arg(substitute(&token, &vars));
         }
 
+        // Release builds are GUI-subsystem and so have no console of their
+        // own. Windows reacts by allocating a *fresh* one for any
+        // console-subsystem child — and `java.exe` is one — which appears as
+        // an empty black window sitting behind Minecraft for the whole
+        // session. This suppresses it.
+        //
+        // Deliberately not `javaw.exe`, which would also hide the window: it
+        // detaches the standard streams, and the in-app log console still to
+        // come needs them.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            /// `CREATE_NO_WINDOW`, from the Win32 process creation flags.
+            const NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(NO_WINDOW);
+        }
+
         Ok(command)
     }
 

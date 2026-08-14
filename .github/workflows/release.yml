@@ -1,0 +1,150 @@
+name: Release
+
+# Tag-driven. `git tag v0.1.0-alpha && git push --tags` is the whole release
+# procedure; nothing is built or published from a branch push.
+on:
+  push:
+    tags: ["v*"]
+  # Lets the whole pipeline be exercised without publishing anything.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The tag is the version users see and the version the self-updater compares
+  # against. If it disagrees with Cargo.toml, `nexo-core::self_update` would
+  # compare the tag to a binary reporting something else and either offer an
+  # update that installs the same build or hide one that is genuinely newer.
+  # Cheaper to fail here than to publish it.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Not a tag build; Cargo.toml says $crate."
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $tag, but Cargo.toml says $crate"
+            exit 1
+          fi
+          echo "Tag and Cargo.toml agree on $crate."
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            # Must match `asset_name()` in crates/nexo-core/src/self_update.rs.
+            # The updater computes this name before it knows what the newest
+            # release is called, so it cannot carry a version.
+            asset: nexo-linux-x86_64
+            binary: nexo
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: nexo-windows-x86_64.exe
+            binary: nexo.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # winit and wgpu dlopen the graphics stack, but the *build* still needs
+      # the development headers present.
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Offline unit tests only; `live_apis` is #[ignore]d because it depends
+      # on Mojang, Fabric, Modrinth and GitHub all being reachable, and a
+      # release must not fail because someone else's API had a bad minute.
+      - name: Test
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Name the binary for release
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "out/${{ matrix.asset }}"
+
+      # Windows only: the raw .exe is what the self-updater downloads, and the
+      # installer is for first-time installs. Both ship. Inno Setup is present
+      # on the windows-latest image; the install is a no-op fallback.
+      - name: Build the installer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            choco install innosetup -y --no-progress
+          }
+          & iscc packaging\windows\nexo.iss
+          Copy-Item dist\*.exe out\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staging
+          merge-multiple: true
+
+      # Assembled here rather than per-platform: the updater looks its own
+      # build up by name in one file, so the digests for every platform have
+      # to land in the same SHA256SUMS.
+      - name: Checksum every asset
+        working-directory: staging
+        run: |
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # `self_update::check` skips any release missing one of these, so a
+      # partial upload would silently make the whole release invisible to the
+      # updater rather than fail loudly. Fail loudly.
+      - name: Verify the release is complete
+        working-directory: staging
+        run: |
+          for required in nexo-linux-x86_64 nexo-windows-x86_64.exe SHA256SUMS; do
+            [ -f "$required" ] || { echo "::error::missing $required"; exit 1; }
+          done
+
+      - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: staging/*
+          # Every Nexo release so far is an alpha. This is also why nothing in
+          # the project reads GitHub's /releases/latest, which skips them.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
