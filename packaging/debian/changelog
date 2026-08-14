@@ -1,3 +1,12 @@
+nexo-client (0.2.0-1) unstable; urgency=medium
+
+  * First published release: instances, Microsoft sign-in, and the
+    install/launch pipeline.
+  * Nexo updates itself where the install allows it.
+  * Windows build and installer.
+
+ -- Lokifisch <lokifisch@lokifisch.dev>  Fri, 14 Aug 2026 13:40:00 +0200
+
 nexo-client (0.1.0-1) unstable; urgency=medium
 
   * Initial release.
