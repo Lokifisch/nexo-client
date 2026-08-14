@@ -13,12 +13,12 @@ mod skin3d;
 mod theme;
 
 use iced::widget::image;
-use std::sync::Arc;
 use iced::{Element, Fill, Task};
+use nexo_core::content::ProjectKind;
 use nexo_core::minecraft::Progress;
 use nexo_core::skin;
-use nexo_core::content::ProjectKind;
 use nexo_core::{Account, Instance, Loader, Nexo};
+use std::sync::Arc;
 
 /// Minecraft version new instances default to — the single version `Mod/`
 /// targets for v1.
@@ -48,6 +48,11 @@ fn main() -> iced::Result {
                 .unwrap_or_else(|_| "nexo_app=info,nexo_core=info".into()),
         )
         .init();
+
+    // Windows can't delete a running .exe, so an update there leaves the
+    // previous binary next to the new one for the next start to clear. A
+    // no-op on every other platform.
+    nexo_core::self_update::clear_previous();
 
     iced::application(App::boot, App::update, App::view)
         .title("Nexo")
@@ -160,6 +165,18 @@ pub struct App {
     /// cannot tell "still asking" apart from "asked and it went wrong", and a
     /// failure leaves it reading "Checking for the latest release…" forever.
     nexo_release_error: Option<String>,
+    /// The launcher's *own* update, once a check has found one newer than
+    /// this build. `None` covers both "not asked yet" and "already current";
+    /// `update_checked` is what tells those apart.
+    update: Option<nexo_core::self_update::Update>,
+    /// A check or an install is in flight.
+    update_busy: bool,
+    /// At least one check has finished. Without this the footer can't say
+    /// "latest", and a check that finds nothing looks like a dead button.
+    update_checked: bool,
+    /// The new binary is on disk. The process running this is still the old
+    /// one, so this stays set until restart rather than clearing on success.
+    update_installed: bool,
     /// Edition picked in the injector card, if the user picked one. `None`
     /// falls back to whatever the instance already has, then to the release's
     /// own default, so the card is never in a state with nothing selected.
@@ -223,6 +240,21 @@ pub enum Message {
     GameExited(String),
     LaunchProgress(Progress),
 
+    // Updating the launcher itself
+    /// `announce` separates the check that runs at startup from one the user
+    /// clicked. GitHub allows 60 unauthenticated requests an hour per IP, so a
+    /// failed startup check is an ordinary event and must not throw a banner;
+    /// a check someone asked for has to answer either way.
+    CheckForUpdate {
+        announce: bool,
+    },
+    UpdateChecked {
+        result: Result<Option<nexo_core::self_update::Update>, String>,
+        announce: bool,
+    },
+    InstallUpdate,
+    UpdateInstalled(Result<(), String>),
+
     // Nexo Mod injector
     FetchNexoRelease,
     NexoReleaseLoaded(Result<nexo_core::nexo_mod::Release, String>),
@@ -249,14 +281,23 @@ pub enum Message {
     },
     LoadJarIcons(String),
     ContentResults(Result<Vec<nexo_core::modrinth::SearchHit>, String>),
-    InstallProject { instance: String, project: String },
+    InstallProject {
+        instance: String,
+        project: String,
+    },
     AddFromFile(String),
-    RemoveContent { instance: String, project: String },
+    RemoveContent {
+        instance: String,
+        project: String,
+    },
 
     // Skins and capes
     LoadCapes,
     CapesLoaded(Result<Vec<nexo_core::cosmetics::Cape>, String>),
-    CapePreviewLoaded { cape: String, handle: image::Handle },
+    CapePreviewLoaded {
+        cape: String,
+        handle: image::Handle,
+    },
     SetSkinModel(nexo_core::SkinModel),
     UploadSkin,
     ResetSkin,
@@ -267,7 +308,10 @@ pub enum Message {
     // Saved skins
     LoadSavedSkins,
     SavedSkinsLoaded(Vec<nexo_core::skin_library::SavedSkin>),
-    SkinPreviewLoaded { skin: String, handle: image::Handle },
+    SkinPreviewLoaded {
+        skin: String,
+        handle: image::Handle,
+    },
     HoverSkin(Option<String>),
     WearSavedSkin(String),
     AskDeleteSkin(String),
@@ -319,6 +363,10 @@ impl App {
             running: std::collections::HashSet::new(),
             nexo_release: None,
             nexo_release_error: None,
+            update: None,
+            update_busy: false,
+            update_checked: false,
+            update_installed: false,
             nexo_edition: None,
             content_query: String::new(),
             content_kind: ProjectKind::Mod,
@@ -354,7 +402,12 @@ impl App {
             Message::Booted(Ok(core)) => {
                 self.core = Some(core.clone());
                 self.status = Status::Idle;
-                Task::batch([reload(core.clone()), load_versions(core)])
+                Task::batch([
+                    reload(core.clone()),
+                    load_versions(core),
+                    // Quietly: see `Message::CheckForUpdate`.
+                    Task::done(Message::CheckForUpdate { announce: false }),
+                ])
             }
             Message::Booted(Err(err)) => {
                 self.status = Status::Error(format!("Could not start: {err}"));
@@ -375,9 +428,7 @@ impl App {
 
                 // Only re-fetch the 3D textures when the active account
                 // actually changed; reload() runs after nearly every action.
-                if changed
-                    && let Some(core) = self.core.clone()
-                {
+                if changed && let Some(core) = self.core.clone() {
                     tasks.push(load_skin(core, self.active_account().cloned()));
                 }
 
@@ -389,7 +440,9 @@ impl App {
                     ) else {
                         continue;
                     };
-                    let Some(core) = self.core.clone() else { continue };
+                    let Some(core) = self.core.clone() else {
+                        continue;
+                    };
                     let (uuid, model) = (account.uuid.clone(), account.skin_model);
 
                     tasks.push(Task::perform(
@@ -575,6 +628,74 @@ impl App {
                 if !self.is_busy() {
                     self.status = Status::Idle;
                 }
+                Task::none()
+            }
+
+            Message::CheckForUpdate { announce } => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                self.update_busy = true;
+                if announce {
+                    self.status = Status::Busy("Checking for a Nexo update".into());
+                }
+                Task::perform(
+                    async move { core.self_update.check().await.map_err(|e| e.to_string()) },
+                    move |result| Message::UpdateChecked { result, announce },
+                )
+            }
+            Message::UpdateChecked { result, announce } => {
+                self.update_busy = false;
+                self.update_checked = true;
+                match result {
+                    Ok(update) => {
+                        self.update = update;
+                        if announce {
+                            self.status = Status::Idle;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "could not check for a Nexo update");
+                        // A silent check leaves the footer showing the plain
+                        // version, which is the truth: nothing is known about
+                        // a newer one.
+                        self.update_checked = announce;
+                        if announce {
+                            self.status = Status::Error(err);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::InstallUpdate => {
+                let (Some(core), Some(update)) = (self.core.clone(), self.update.clone()) else {
+                    return Task::none();
+                };
+                self.update_busy = true;
+                self.status = Status::Busy(format!(
+                    "Downloading Nexo {} ({} MB)",
+                    update.version,
+                    update.size_mb()
+                ));
+                Task::perform(
+                    async move {
+                        core.self_update
+                            .apply(&update)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::UpdateInstalled,
+                )
+            }
+            Message::UpdateInstalled(Ok(())) => {
+                self.update_busy = false;
+                self.update_installed = true;
+                self.status = Status::Idle;
+                Task::none()
+            }
+            Message::UpdateInstalled(Err(err)) => {
+                self.update_busy = false;
+                self.status = Status::Error(err);
                 Task::none()
             }
 
@@ -781,7 +902,9 @@ impl App {
                     ) else {
                         continue;
                     };
-                    let Some(core) = self.core.clone() else { continue };
+                    let Some(core) = self.core.clone() else {
+                        continue;
+                    };
                     let project = hit.project_id.clone();
 
                     fetches.push(Task::perform(
@@ -832,7 +955,10 @@ impl App {
                             .install_modrinth(&mut target, &project, kind)
                             .await
                             .map_err(|e| e.to_string())?;
-                        core.instances.save(&target).await.map_err(|e| e.to_string())
+                        core.instances
+                            .save(&target)
+                            .await
+                            .map_err(|e| e.to_string())
                     },
                     Message::NexoModDone,
                 )
@@ -867,7 +993,10 @@ impl App {
                             .install_file(&mut target, handle.path(), Some(kind))
                             .await
                             .map_err(|e| e.to_string())?;
-                        core.instances.save(&target).await.map_err(|e| e.to_string())
+                        core.instances
+                            .save(&target)
+                            .await
+                            .map_err(|e| e.to_string())
                     },
                     Message::NexoModDone,
                 )
@@ -888,7 +1017,10 @@ impl App {
                             .remove(&mut target, &project)
                             .await
                             .map_err(|e| e.to_string())?;
-                        core.instances.save(&target).await.map_err(|e| e.to_string())
+                        core.instances
+                            .save(&target)
+                            .await
+                            .map_err(|e| e.to_string())
                     },
                     Message::NexoModDone,
                 )
@@ -1010,7 +1142,9 @@ impl App {
                     if self.skin_previews.contains_key(&saved.id) {
                         continue;
                     }
-                    let Some(core) = self.core.clone() else { continue };
+                    let Some(core) = self.core.clone() else {
+                        continue;
+                    };
                     let (id, model) = (saved.id.clone(), saved.model);
 
                     fetches.push(Task::perform(
@@ -1145,7 +1279,9 @@ impl App {
                     if self.cape_previews.contains_key(&cape.id) {
                         continue;
                     }
-                    let Some(core) = self.core.clone() else { continue };
+                    let Some(core) = self.core.clone() else {
+                        continue;
+                    };
                     let (id, url) = (cape.id.clone(), cape.url.clone());
 
                     fetches.push(Task::perform(
@@ -1310,11 +1446,7 @@ impl App {
                 // re-reads the profile itself, so it picks up the cape that
                 // just landed server-side.
                 let account = self.active_account().cloned();
-                Task::batch([
-                    reload(core.clone()),
-                    reload_capes,
-                    load_skin(core, account),
-                ])
+                Task::batch([reload(core.clone()), reload_capes, load_skin(core, account)])
             }
             Message::CosmeticsDone(Err(err)) => {
                 self.status = Status::Error(err);
@@ -1434,7 +1566,12 @@ impl App {
                     return Task::none();
                 };
                 Task::perform(
-                    async move { core.accounts.set_active(&uuid).await.map_err(|e| e.to_string()) },
+                    async move {
+                        core.accounts
+                            .set_active(&uuid)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
                     Message::AccountActionDone,
                 )
             }

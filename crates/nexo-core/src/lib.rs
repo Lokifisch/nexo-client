@@ -6,10 +6,11 @@
 //! stays testable without a window.
 
 pub mod accounts;
+pub mod auth;
 pub mod content;
 pub mod cosmetics;
-pub mod auth;
 pub mod error;
+pub mod github;
 pub mod hwkey;
 pub mod instance;
 pub mod java;
@@ -19,6 +20,7 @@ pub mod mrpack;
 pub mod nexo_mod;
 pub mod paths;
 pub mod running;
+pub mod self_update;
 pub mod shared_store;
 pub mod skin;
 pub mod skin_library;
@@ -46,6 +48,8 @@ pub struct Nexo {
     pub cosmetics: cosmetics::Cosmetics,
     pub skins: skin_library::SkinLibrary,
     pub mrpack: mrpack::MrPack,
+    /// Updates the launcher itself, as opposed to anything it installs.
+    pub self_update: self_update::SelfUpdate,
     /// Games this launcher started. Shared, so every clone of `Nexo` sees the
     /// same set — the UI holds one clone and each async task another.
     pub running: running::RunningGames,
@@ -65,10 +69,7 @@ impl Nexo {
         paths.ensure().await?;
 
         let http = reqwest::Client::builder()
-            .user_agent(concat!(
-                "Lokifisch/nexo-client/",
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .user_agent(concat!("Lokifisch/nexo-client/", env!("CARGO_PKG_VERSION"),))
             .build()?;
 
         Ok(Self {
@@ -81,6 +82,7 @@ impl Nexo {
             cosmetics: cosmetics::Cosmetics::new(http.clone()),
             skins: skin_library::SkinLibrary::new(&paths),
             mrpack: mrpack::MrPack::new(http.clone(), paths.clone()),
+            self_update: self_update::SelfUpdate::new(http.clone()),
             running: running::RunningGames::new(),
             paths,
             http,
@@ -121,9 +123,8 @@ impl Nexo {
         // Record what Fabric build actually got installed, so later launches
         // are reproducible instead of silently drifting to a newer loader.
         if instance.loader == Loader::Fabric && instance.loader_version.is_none() {
-            instance.loader_version = Some(
-                minecraft::fabric::latest_stable(&self.http, &instance.game_version).await?,
-            );
+            instance.loader_version =
+                Some(minecraft::fabric::latest_stable(&self.http, &instance.game_version).await?);
         }
         // Nearly every Fabric mod needs Fabric API, and its absence surfaces
         // as a startup crash that names nothing useful — so it is installed
@@ -142,7 +143,10 @@ impl Nexo {
             extra_jvm_args: Vec::new(),
         };
 
-        let child = self.launcher().launch(&instance, &version, &options).await?;
+        let child = self
+            .launcher()
+            .launch(&instance, &version, &options)
+            .await?;
         self.running.register(instance_id, child);
         Ok(())
     }

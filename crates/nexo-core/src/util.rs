@@ -1,7 +1,18 @@
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
+/// What Mojang publishes for every asset and library, so this is the digest
+/// the install pipeline checks against.
 pub fn sha1_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Used where *we* choose the digest rather than inheriting someone else's —
+/// currently the launcher's own release checksums ([`crate::self_update`]).
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
@@ -61,9 +72,14 @@ mod tests {
 
     #[test]
     fn sha1_matches_known_digest() {
+        assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+
+    #[test]
+    fn sha256_matches_known_digest() {
         assert_eq!(
-            sha1_hex(b"abc"),
-            "a9993e364706816aba3e25717850c26c9cd0d89d"
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 }

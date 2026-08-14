@@ -12,10 +12,11 @@
 //! ```
 
 use nexo_core::instance::{Instance, Loader};
-use nexo_core::minecraft::{fabric, Installer};
+use nexo_core::minecraft::{Installer, fabric};
 use nexo_core::modrinth::{Modrinth, SearchQuery};
 use nexo_core::nexo_mod::{Edition, NexoMod};
 use nexo_core::paths::Paths;
+use nexo_core::self_update::{self, SelfUpdate};
 
 fn temp_paths() -> Paths {
     Paths::with_root(std::env::temp_dir().join(format!("nexo-live-{}", uuid::Uuid::new_v4())))
@@ -129,7 +130,12 @@ async fn modrinth_search_and_versions_parse() {
     assert!(!results.hits.is_empty(), "search returned nothing");
     println!(
         "top hits: {:?}",
-        results.hits.iter().take(3).map(|h| &h.title).collect::<Vec<_>>()
+        results
+            .hits
+            .iter()
+            .take(3)
+            .map(|h| &h.title)
+            .collect::<Vec<_>>()
     );
 
     let project = modrinth.project("sodium").await.unwrap();
@@ -146,7 +152,10 @@ async fn modrinth_search_and_versions_parse() {
 
     let file = version.primary_file().unwrap();
     assert!(file.filename.ends_with(".jar"));
-    assert!(file.hashes.sha1.is_some(), "expected a sha1 to verify against");
+    assert!(
+        file.hashes.sha1.is_some(),
+        "expected a sha1 to verify against"
+    );
     println!(
         "sodium {} for {game_version}: {} ({} bytes)",
         version.version_number, file.filename, file.size
@@ -168,7 +177,9 @@ async fn interop_fixture() {
     use nexo_core::shared_store::{Contents, SharedStore};
 
     let root = std::env::var("NEXO_INTEROP_ROOT").expect("NEXO_INTEROP_ROOT must be set");
-    let path = std::path::Path::new(&root).join("nexo").join("accounts.dat");
+    let path = std::path::Path::new(&root)
+        .join("nexo")
+        .join("accounts.dat");
 
     let contents = Contents {
         accounts: vec![
@@ -208,7 +219,9 @@ async fn interop_read_back() {
     use nexo_core::shared_store::SharedStore;
 
     let root = std::env::var("NEXO_INTEROP_ROOT").expect("NEXO_INTEROP_ROOT must be set");
-    let path = std::path::Path::new(&root).join("nexo").join("accounts.dat");
+    let path = std::path::Path::new(&root)
+        .join("nexo")
+        .join("accounts.dat");
 
     let contents = SharedStore::new(&path).load().await.unwrap();
     for account in &contents.accounts {
@@ -222,12 +235,16 @@ async fn interop_read_back() {
         contents
             .accounts
             .iter()
-            .any(|a| a.username == "GammaFromGame"
-                && a.uuid == "11111111222233334444555555555555"),
+            .any(|a| a.username == "GammaFromGame" && a.uuid == "11111111222233334444555555555555"),
         "the account written by Java was not readable from Rust"
     );
     // And the ones Rust wrote earlier must have survived Java's rewrite.
-    assert!(contents.accounts.iter().any(|a| a.username == "AlphaPlayer"));
+    assert!(
+        contents
+            .accounts
+            .iter()
+            .any(|a| a.username == "AlphaPlayer")
+    );
     assert_eq!(contents.accounts.len(), 3);
 }
 
@@ -277,4 +294,42 @@ async fn nexo_release_resolves_both_editions_by_declared_file_name() {
     let legit = release.edition(Edition::Legit).unwrap();
     assert_ne!(tactical.jar_name, legit.jar_name);
     assert_ne!(tactical.mod_id, legit.mod_id);
+}
+
+/// The launcher's own update check against the real repository.
+///
+/// `Lokifisch/nexo-client` has published no release yet, so the assertion that
+/// matters today is that "no releases" resolves to *up to date* rather than to
+/// an error — an empty repo must not put a permanent failure in the sidebar.
+/// Once a release exists this keeps checking the same contract from the other
+/// side: whatever it returns has to be newer than the running build.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn self_update_check_survives_a_repo_with_no_releases() {
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("Lokifisch/nexo-client/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap();
+
+    let found = SelfUpdate::new(http)
+        .check()
+        .await
+        .expect("a repo with no releases is 'up to date', not an error");
+
+    let current = semver::Version::parse(self_update::CURRENT).unwrap();
+    match found {
+        None => {}
+        Some(update) => {
+            assert!(
+                update.version > current,
+                "offered {} while running {current} — the check must never downgrade",
+                update.version
+            );
+            assert!(
+                update.url.contains(&self_update::asset_name().unwrap()),
+                "the download URL doesn't point at this platform's build: {}",
+                update.url
+            );
+        }
+    }
 }

@@ -23,6 +23,9 @@ zip.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 aes-gcm = "0.11.0"
 sha2.workspace = true
+# Release-tag ordering for the self-updater. Getting prerelease precedence
+# wrong here would offer 0.2.0-alpha to someone already running 0.2.0.
+semver = "1"
 
 [dev-dependencies]
 reqwest.workspace = true

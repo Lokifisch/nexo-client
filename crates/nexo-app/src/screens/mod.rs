@@ -6,7 +6,7 @@ pub mod skins;
 
 use crate::theme;
 use crate::{App, Message, Screen, Status};
-use iced::widget::{button, column, container, image, row, rule, text, Space};
+use iced::widget::{Space, button, column, container, image, row, rule, text};
 use iced::{Element, Fill};
 
 /// Left navigation rail.
@@ -35,6 +35,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
             text(format!("{} instance(s)", app.instances.len()))
                 .size(12)
                 .color(theme::MUTED),
+            updater(app),
         ]
         .spacing(6)
         .padding(20),
@@ -43,6 +44,72 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
     .height(Fill)
     .style(theme::sidebar)
     .into()
+}
+
+/// The launcher's own version, and what can be done about it.
+///
+/// This lives in the sidebar footer rather than as a banner on purpose: an
+/// update is worth offering, not worth interrupting anyone over. The version
+/// label doubles as the manual check, so the control is present even when
+/// there's nothing to report.
+fn updater(app: &App) -> Element<'_, Message> {
+    use nexo_core::self_update::CURRENT;
+
+    // Outlives every other state: the binary on disk is already the new one,
+    // and nothing the running process reports about updates is true any more.
+    if app.update_installed {
+        return column![
+            text("Update installed").size(12).color(theme::MINT),
+            text("Restart Nexo to use it").size(11).color(theme::MUTED),
+        ]
+        .spacing(2)
+        .into();
+    }
+
+    if app.update_busy {
+        return text("Checking…").size(12).color(theme::MUTED).into();
+    }
+
+    match &app.update {
+        // An update this install may actually apply.
+        Some(update) if update.install.is_replaceable() => {
+            button(text(format!("Update to {}", update.version)).size(12))
+                .width(Fill)
+                .padding([6, 10])
+                .style(theme::primary_button)
+                .on_press(Message::InstallUpdate)
+                .into()
+        }
+        // One it may not — a packaged install, say. Saying nothing would be
+        // worse than saying "there's a newer one, here's why I can't take it".
+        Some(update) => column![
+            text(format!("Nexo {} is out", update.version))
+                .size(12)
+                .color(theme::TEXT),
+            text(update.install.reason().unwrap_or_default())
+                .size(11)
+                .color(theme::MUTED),
+        ]
+        .spacing(2)
+        .into(),
+        None => button(
+            text(if app.update_checked {
+                format!("v{CURRENT} · latest")
+            } else {
+                format!("v{CURRENT}")
+            })
+            .size(12)
+            .color(theme::MUTED),
+        )
+        .padding(0)
+        .style(theme::bare_button)
+        .on_press_maybe(
+            app.core
+                .is_some()
+                .then_some(Message::CheckForUpdate { announce: true }),
+        )
+        .into(),
+    }
 }
 
 /// Top bar. Its only occupant is the account control on the right: the
