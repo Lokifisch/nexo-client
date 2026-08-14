@@ -15,8 +15,14 @@
 ; which gets it from Cargo.toml via crates/nexo-app/build.rs — so there is one
 ; source of truth and no packaging script to forget to bump.
 
+; Anchored to the script's own directory via SourcePath rather than left
+; relative to whatever directory iscc happened to be invoked from — the two
+; differ in CI, where the compiler runs from the repository root.
+;
+; The default suits a plain `cargo build --release`. A build for an explicit
+; --target lands one directory deeper, so the workflow passes BinDir itself.
 #ifndef BinDir
-  #define BinDir "..\..\target\release"
+  #define BinDir SourcePath + "..\..\target\release"
 #endif
 
 #define Exe BinDir + "\nexo.exe"

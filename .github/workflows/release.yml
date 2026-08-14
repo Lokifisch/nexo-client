@@ -102,7 +102,12 @@ jobs:
           if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
             choco install innosetup -y --no-progress
           }
-          & iscc packaging\windows\nexo.iss
+          # An absolute BinDir: the build used --target, so the binary is a
+          # directory deeper than a plain `cargo build --release` leaves it,
+          # and the script's own default points at the latter.
+          $bin = Resolve-Path "target\${{ matrix.target }}\release"
+          & iscc "/DBinDir=$bin" packaging\windows\nexo.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed with $LASTEXITCODE" }
           Copy-Item dist\*.exe out\
 
       - uses: actions/upload-artifact@v4
