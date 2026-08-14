@@ -22,6 +22,6 @@ pkgbase = nexo-client
 	optdepends = nvidia-utils: Vulkan driver for NVIDIA GPUs
 	optdepends = vulkan-intel: Vulkan driver for Intel GPUs
 	source = nexo-client-0.3.0.tar.gz::https://github.com/Lokifisch/nexo-client/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 858d7f358d61a16985b09773236e7d2f97cb6d869a001c813ee755460ebd4a7e
 
 pkgname = nexo-client
