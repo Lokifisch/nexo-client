@@ -26,4 +26,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
+# Only to hand-build a response for the rate-limit tests. reqwest already
+# depends on it, so this pins no new tree.
+http = "1"
 uuid = { workspace = true, features = ["v4"] }

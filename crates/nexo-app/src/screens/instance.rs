@@ -125,16 +125,29 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
     let section: Element<'a, Message> = match &app.nexo_release {
         Some(release) => release_section(app, instance, release, installed),
 
-        // Release lookup hasn't landed (or failed) — offer a retry rather
+        // Release lookup hasn't landed, or it failed — offer a retry rather
         // than a dead card.
+        //
+        // The failure has to be said out loud. Reporting the pending line
+        // after a failed lookup leaves the card claiming to be working on
+        // something it gave up on, and the user waits on it indefinitely
+        // rather than pressing the retry sitting right underneath.
         None => {
-            let line = match installed {
-                Some(current) => format!("Installed — {}", current.version_number),
-                None => "Checking for the latest release…".to_string(),
+            let (line, tone) = match (&app.nexo_release_error, installed) {
+                (Some(err), _) => (err.clone(), theme::DANGER),
+                (None, Some(current)) => {
+                    (format!("Installed — {}", current.version_number), theme::MUTED)
+                }
+                (None, None) => ("Checking for the latest release…".to_string(), theme::MUTED),
+            };
+            let retry = if app.nexo_release_error.is_some() {
+                "Try again"
+            } else {
+                "Check again"
             };
             column![
-                text(line).size(12).color(theme::MUTED),
-                button(text("Check again").size(13))
+                text(line).size(12).color(tone),
+                button(text(retry).size(13))
                     .padding([8, 16])
                     .style(theme::ghost_button)
                     .on_press(Message::FetchNexoRelease),

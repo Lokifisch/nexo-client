@@ -156,6 +156,10 @@ pub struct App {
     /// Latest published Nexo Mod release, once looked up. `None` while
     /// unknown; the error is surfaced through `status` instead.
     nexo_release: Option<nexo_core::nexo_mod::Release>,
+    /// Why the last release lookup failed, if it did. Without this the card
+    /// cannot tell "still asking" apart from "asked and it went wrong", and a
+    /// failure leaves it reading "Checking for the latest release…" forever.
+    nexo_release_error: Option<String>,
     /// Edition picked in the injector card, if the user picked one. `None`
     /// falls back to whatever the instance already has, then to the release's
     /// own default, so the card is never in a state with nothing selected.
@@ -314,6 +318,7 @@ impl App {
             skin_key: 0,
             running: std::collections::HashSet::new(),
             nexo_release: None,
+            nexo_release_error: None,
             nexo_edition: None,
             content_query: String::new(),
             content_kind: ProjectKind::Mod,
@@ -577,6 +582,9 @@ impl App {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
+                // Clear first, so a retry shows the pending state instead of
+                // the previous attempt's error sitting under a spinner.
+                self.nexo_release_error = None;
                 Task::perform(
                     async move {
                         core.nexo_mod
@@ -590,10 +598,12 @@ impl App {
 
             Message::NexoReleaseLoaded(Ok(release)) => {
                 self.nexo_release = Some(release);
+                self.nexo_release_error = None;
                 Task::none()
             }
             Message::NexoReleaseLoaded(Err(err)) => {
                 tracing::warn!(%err, "could not look up the latest Nexo Mod release");
+                self.nexo_release_error = Some(err);
                 Task::none()
             }
 

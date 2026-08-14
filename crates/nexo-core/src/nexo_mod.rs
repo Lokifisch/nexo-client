@@ -180,6 +180,53 @@ fn jar_stem(file_name: &str) -> Option<String> {
     base.strip_suffix(".jar").map(str::to_string)
 }
 
+/// Turns GitHub's rate-limit refusal into something the user can act on.
+///
+/// Unauthenticated requests get 60 an hour per IP, and GitHub spends that
+/// budget on a bare 403 whose body the UI never shows. Passed through
+/// `error_for_status`, a condition that clears itself in a known number of
+/// minutes reaches the user as "HTTP status client error (403 Forbidden)" —
+/// indistinguishable from the repository having gone away.
+///
+/// Only a 403/429 that GitHub *also* marks as having no quota left is
+/// rewritten. A genuine permission failure keeps its own error.
+fn github_status(response: reqwest::Response) -> Result<reqwest::Response> {
+    let status = response.status();
+    let rate_limited = matches!(
+        status,
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ) && response
+        .headers()
+        .get("x-ratelimit-remaining")
+        .and_then(|v| v.to_str().ok())
+        == Some("0");
+
+    if !rate_limited {
+        return Ok(response.error_for_status()?);
+    }
+
+    // The reset header is advisory: if it's missing or already in the past,
+    // say so without a number rather than printing "in 0 minutes".
+    let retry_in = response
+        .headers()
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|reset| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            reset.checked_sub(now).filter(|secs| *secs > 0)
+        })
+        .map(|secs| format!(" Try again in about {} minutes.", secs.div_ceil(60)))
+        .unwrap_or_else(|| " Try again shortly.".to_string());
+
+    Err(Error::Invalid(format!(
+        "GitHub is rate-limiting this machine, so the release list can't be read.{retry_in}"
+    )))
+}
+
 /// Whether a file in `mods/` is one of Nexo Mod's own jars — either edition,
 /// any version, enabled or disabled.
 fn is_nexo_jar(file_name: &str) -> bool {
@@ -469,17 +516,17 @@ impl NexoMod {
     /// The newest release of any kind, prereleases included. Nexo Mod ships
     /// alpha builds, so this is the one the UI wants.
     pub async fn latest_including_prereleases(&self) -> Result<Release> {
-        let releases: Vec<GithubRelease> = self
-            .http
-            .get(format!(
-                "https://api.github.com/repos/{REPO}/releases?per_page=10"
-            ))
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let releases: Vec<GithubRelease> = github_status(
+            self.http
+                .get(format!(
+                    "https://api.github.com/repos/{REPO}/releases?per_page=10"
+                ))
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await?,
+        )?
+        .json()
+        .await?;
 
         // GitHub returns newest first; take the first one carrying both
         // required assets rather than assuming the newest is complete. A
@@ -499,15 +546,15 @@ impl NexoMod {
     }
 
     async fn resolve(&self, url: &str) -> Result<Release> {
-        let release: GithubRelease = self
-            .http
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let release: GithubRelease = github_status(
+            self.http
+                .get(url)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await?,
+        )?
+        .json()
+        .await?;
         self.resolve_release(release).await
     }
 
@@ -836,6 +883,48 @@ mod tests {
         assert_eq!(release.editions().len(), 1);
         // The unresolvable default falls back to what is actually published.
         assert_eq!(release.default_edition(), Edition::Tactical);
+    }
+
+    /// Building the response by hand rather than waiting to actually be
+    /// rate-limited: the live test only exercises this path on the unlucky
+    /// run that trips the quota, which is exactly when nobody is looking.
+    fn github_response(status: u16, remaining: &str, reset_in: i64) -> reqwest::Response {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let raw = http::Response::builder()
+            .status(status)
+            .header("x-ratelimit-remaining", remaining)
+            .header("x-ratelimit-reset", (now + reset_in).to_string())
+            .body("")
+            .unwrap();
+        reqwest::Response::from(raw)
+    }
+
+    #[test]
+    fn an_exhausted_quota_says_so_and_says_when() {
+        let err = github_status(github_response(403, "0", 11 * 60)).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("rate-limiting"),
+            "a bare 403 is indistinguishable from the repo being gone: {message}"
+        );
+        assert!(
+            message.contains("11 minutes"),
+            "the wait is the actionable part: {message}"
+        );
+    }
+
+    #[test]
+    fn a_403_with_quota_left_keeps_its_own_error() {
+        // A real permission failure must not be relabelled as a rate limit —
+        // that would send the user off to wait for something that never clears.
+        let err = github_status(github_response(403, "57", 600)).unwrap_err();
+        assert!(
+            !err.to_string().contains("rate-limiting"),
+            "only an exhausted quota is a rate limit"
+        );
     }
 
     #[test]
