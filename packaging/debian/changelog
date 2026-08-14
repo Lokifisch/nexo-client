@@ -1,3 +1,12 @@
+nexo-client (0.3.0-1) unstable; urgency=medium
+
+  * Java is installed automatically when the machine has none new enough,
+    and an instance can be pointed at a specific runtime.
+  * Windows: the account store no longer starts PowerShell on every read,
+    which was causing console windows and stutter.
+
+ -- Lokifisch <lokifisch@lokifisch.dev>  Fri, 14 Aug 2026 14:30:00 +0200
+
 nexo-client (0.2.0-1) unstable; urgency=medium
 
   * First published release: instances, Microsoft sign-in, and the
