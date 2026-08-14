@@ -106,7 +106,9 @@ jobs:
           # directory deeper than a plain `cargo build --release` leaves it,
           # and the script's own default points at the latter.
           $bin = Resolve-Path "target\${{ matrix.target }}\release"
-          & iscc "/DBinDir=$bin" packaging\windows\nexo.iss
+          # AppVersion comes from Cargo.toml, not from the exe's VERSIONINFO:
+          # that is a numeric quad and would turn 0.2.0-alpha into 0.2.0.0.
+          & iscc "/DBinDir=$bin" "/DAppVersion=${{ needs.version.outputs.version }}" packaging\windows\nexo.iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed with $LASTEXITCODE" }
           Copy-Item dist\*.exe out\
 

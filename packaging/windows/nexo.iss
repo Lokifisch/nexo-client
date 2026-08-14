@@ -32,7 +32,19 @@
 #endif
 
 #define AppName "Nexo"
-#define AppVersion GetVersionNumbersString(Exe)
+
+; The version users see. Cargo.toml is the source of truth and the workflow
+; passes it straight through.
+;
+; The fallback reads the exe's VERSIONINFO, which is a four-number quad and
+; cannot carry a prerelease: 0.2.0-alpha comes back as "0.2.0.0". That is
+; tolerable for a local build but not for a release, because the self-updater
+; compares the release tag against Cargo.toml — an installer announcing a
+; version neither of them uses is how those quietly drift apart.
+#ifndef AppVersion
+  #define AppVersion GetVersionNumbersString(Exe)
+#endif
+
 #define Publisher "Lokifisch"
 #define AppUrl "https://github.com/Lokifisch/nexo-client"
 
@@ -48,7 +60,9 @@ AppPublisher={#Publisher}
 AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}/issues
 AppUpdatesURL={#AppUrl}/releases
-VersionInfoVersion={#AppVersion}
+; Read from the exe rather than from AppVersion: this field must be a numeric
+; quad, so a prerelease string would be rejected outright.
+VersionInfoVersion={#GetVersionNumbersString(Exe)}
 
 ; Per-user install, so there is no UAC prompt and no admin account needed.
 ; This is how Discord and the mainstream Minecraft launchers install, and it
