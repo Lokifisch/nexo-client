@@ -33,7 +33,7 @@ optdepends=(
 	'vulkan-intel: Vulkan driver for Intel GPUs'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('9e293fed26598ec60df226205d19e07b1d95346fc47bc4daad6707bc485b138b')
 
 prepare() {
 	cd "$pkgname-$pkgver"
