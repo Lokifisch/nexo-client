@@ -387,7 +387,6 @@ impl<Message> shader::Program<Message> for SkinViewer {
             skin: Arc::clone(&self.skin),
             cape: self.cape.clone(),
             key: self.key,
-            bounds,
             outlined: self.outlined,
             time: state
                 .started
@@ -639,7 +638,6 @@ pub struct Scene {
     skin: Arc<Rgba>,
     cape: Option<Arc<Rgba>>,
     key: u64,
-    bounds: Rectangle,
     outlined: bool,
     time: f32,
 }
@@ -666,9 +664,19 @@ impl shader::Primitive for Scene {
         pipeline: &mut Self::Pipeline,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: &Rectangle,
+        bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
+        // The one place both the logical bounds and the scale factor are in
+        // scope; `render` has neither.
+        let scale = viewport.scale_factor();
+        pipeline.viewport = Rectangle {
+            x: bounds.x * scale,
+            y: bounds.y * scale,
+            width: bounds.width * scale,
+            height: bounds.height * scale,
+        };
+
         pipeline.upload_geometry(device, queue, &self.geometry);
         pipeline.upload_textures(device, queue, self.key, &self.skin, self.cape.as_deref());
         pipeline.resize_depth(device, viewport.physical_size());
@@ -787,10 +795,10 @@ impl shader::Primitive for Scene {
                 // Same viewport as the final pass, so mask pixels and screen
                 // pixels are the same pixels.
                 pass.set_viewport(
-                    self.bounds.x,
-                    self.bounds.y,
-                    self.bounds.width,
-                    self.bounds.height,
+                    pipeline.viewport.x,
+                    pipeline.viewport.y,
+                    pipeline.viewport.width,
+                    pipeline.viewport.height,
                     0.0,
                     1.0,
                 );
@@ -822,10 +830,10 @@ impl shader::Primitive for Scene {
                 clip_bounds.height.max(1),
             );
             pass.set_viewport(
-                self.bounds.x,
-                self.bounds.y,
-                self.bounds.width,
-                self.bounds.height,
+                pipeline.viewport.x,
+                pipeline.viewport.y,
+                pipeline.viewport.width,
+                pipeline.viewport.height,
                 0.0,
                 1.0,
             );
@@ -869,10 +877,10 @@ impl shader::Primitive for Scene {
             clip_bounds.height.max(1),
         );
         pass.set_viewport(
-            self.bounds.x,
-            self.bounds.y,
-            self.bounds.width,
-            self.bounds.height,
+            pipeline.viewport.x,
+            pipeline.viewport.y,
+            pipeline.viewport.width,
+            pipeline.viewport.height,
             0.0,
             1.0,
         );
@@ -908,6 +916,17 @@ pub struct ModelPipeline {
     uploaded_key: Option<u64>,
     depth: Option<wgpu::TextureView>,
     depth_size: (u32, u32),
+    /// The widget's rectangle in **physical** pixels, computed in `prepare`
+    /// where the scale factor is available and consumed in `render`, which
+    /// only gets the clip rectangle.
+    ///
+    /// `wgpu`'s viewport and scissor are both physical, but iced hands the
+    /// primitive its bounds in logical units. On a 100%-scaled display the two
+    /// are identical, which is why this was invisible on Linux and broke on a
+    /// Windows desktop at 125%: the viewport landed at bounds/scale — up and
+    /// to the left of the widget, and smaller — so the figure was clipped to
+    /// whatever corner still overlapped, or vanished entirely.
+    viewport: Rectangle,
 }
 
 impl shader::Pipeline for ModelPipeline {
@@ -1197,6 +1216,7 @@ impl shader::Pipeline for ModelPipeline {
             uploaded_key: None,
             depth: None,
             depth_size: (0, 0),
+            viewport: Rectangle::default(),
         }
     }
 }
