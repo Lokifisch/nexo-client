@@ -333,3 +333,113 @@ async fn self_update_check_survives_a_repo_with_no_releases() {
         }
     }
 }
+
+/// Adoptium's asset schema, against the real API.
+///
+/// Every field in `java::adoptium` is a guess about someone else's JSON, and
+/// this one decides whether a machine with no Java can launch the game at all.
+/// A rename upstream would otherwise surface as a failed launch rather than a
+/// failing test.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn adoptium_publishes_a_runtime_for_this_platform() {
+    use nexo_core::java::MIN_JAVA_MAJOR;
+
+    let paths = temp_paths();
+    let http = reqwest::Client::new();
+
+    // Nothing is installed under a fresh root, so this exercises the whole
+    // path bar the download itself.
+    assert!(
+        nexo_core::java::adoptium::installed(&paths, MIN_JAVA_MAJOR)
+            .await
+            .is_none(),
+        "an empty runtimes directory must not report an installed JVM"
+    );
+
+    let (os, arch) = match std::env::consts::OS {
+        "linux" => ("linux", "x64"),
+        "windows" => ("windows", "x64"),
+        "macos" => ("mac", "x64"),
+        other => panic!("no Adoptium mapping for {other}"),
+    };
+    let url = format!(
+        "https://api.adoptium.net/v3/assets/latest/{MIN_JAVA_MAJOR}/hotspot\
+         ?architecture={arch}&image_type=jre&os={os}&vendor=eclipse"
+    );
+
+    let assets: serde_json::Value = http
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .expect("Adoptium should answer")
+        .json()
+        .await
+        .unwrap();
+
+    let first = assets
+        .as_array()
+        .and_then(|a| a.first())
+        .unwrap_or_else(|| panic!("Adoptium publishes no Java {MIN_JAVA_MAJOR} JRE for {os}-{arch}"));
+
+    let package = &first["binary"]["package"];
+    for field in ["name", "link", "checksum"] {
+        assert!(
+            package[field].as_str().is_some_and(|v| !v.is_empty()),
+            "binary.package.{field} is missing — java::adoptium reads it: {package}"
+        );
+    }
+    assert!(
+        first["release_name"].as_str().is_some_and(|v| !v.is_empty()),
+        "release_name is missing; it names the install directory"
+    );
+
+    // The archive format decides which extractor runs.
+    let name = package["name"].as_str().unwrap();
+    let expected = if cfg!(windows) { ".zip" } else { ".tar.gz" };
+    assert!(
+        name.ends_with(expected),
+        "expected a {expected} for {os}, got {name}"
+    );
+}
+
+/// The whole auto-install path, for real: query, download, verify, extract,
+/// and run the result.
+///
+/// Downloads ~45 MB, so it is heavier than the rest of this file even by
+/// `--ignored` standards. It earns that by being the only thing that proves
+/// the extracted runtime is actually executable — on Unix that hinges on tar
+/// preserving the mode bits, which no amount of parsing can tell you.
+#[tokio::test]
+#[ignore = "downloads a ~45 MB JRE"]
+async fn a_runtime_can_be_installed_and_then_run() {
+    use nexo_core::java::{MIN_JAVA_MAJOR, adoptium};
+
+    let paths = temp_paths();
+    let http = reqwest::Client::new();
+
+    let install = adoptium::ensure(&http, &paths, MIN_JAVA_MAJOR, None)
+        .await
+        .expect("a JRE should install");
+
+    assert!(
+        install.major >= MIN_JAVA_MAJOR,
+        "installed Java {} is below the floor of {MIN_JAVA_MAJOR}",
+        install.major
+    );
+    assert!(
+        install.path.starts_with(paths.java_runtimes()),
+        "the runtime landed outside the managed directory: {}",
+        install.path.display()
+    );
+
+    // Asking again must reuse it rather than downloading a second copy.
+    let again = adoptium::installed(&paths, MIN_JAVA_MAJOR)
+        .await
+        .expect("the freshly installed runtime should be found");
+    assert_eq!(again.path, install.path);
+
+    std::fs::remove_dir_all(paths.root()).ok();
+}

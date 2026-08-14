@@ -165,6 +165,10 @@ pub struct App {
     /// cannot tell "still asking" apart from "asked and it went wrong", and a
     /// failure leaves it reading "Checking for the latest release…" forever.
     nexo_release_error: Option<String>,
+    /// Every JVM the user could pick for an instance — this machine's plus
+    /// any Nexo downloaded. Loaded when an instance is opened, since probing
+    /// each candidate means running it.
+    java_options: Vec<nexo_core::java::JavaInstall>,
     /// The launcher's *own* update, once a check has found one newer than
     /// this build. `None` covers both "not asked yet" and "already current";
     /// `update_checked` is what tells those apart.
@@ -239,6 +243,17 @@ pub enum Message {
     Stop(String),
     GameExited(String),
     LaunchProgress(Progress),
+
+    // Java
+    LoadJavaOptions,
+    JavaOptionsLoaded(Vec<nexo_core::java::JavaInstall>),
+    /// `None` restores automatic detection.
+    SetInstanceJava {
+        instance: String,
+        path: Option<std::path::PathBuf>,
+    },
+    BrowseForJava(String),
+    InstanceSaved(Result<(), String>),
 
     // Updating the launcher itself
     /// `announce` separates the check that runs at startup from one the user
@@ -363,6 +378,7 @@ impl App {
             running: std::collections::HashSet::new(),
             nexo_release: None,
             nexo_release_error: None,
+            java_options: Vec::new(),
             update: None,
             update_busy: false,
             update_checked: false,
@@ -608,10 +624,11 @@ impl App {
                 // The edition picker starts from this instance's own state,
                 // not from what was chosen on the last one.
                 self.nexo_edition = None;
+                let mut tasks = vec![icons, Task::done(Message::LoadJavaOptions)];
                 if self.nexo_release.is_none() {
-                    return Task::batch([icons, Task::done(Message::FetchNexoRelease)]);
+                    tasks.push(Task::done(Message::FetchNexoRelease));
                 }
-                icons
+                Task::batch(tasks)
             }
 
             Message::Stop(id) => {
@@ -629,6 +646,81 @@ impl App {
                     self.status = Status::Idle;
                 }
                 Task::none()
+            }
+
+            Message::LoadJavaOptions => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { nexo_core::java::options(&core.paths).await },
+                    Message::JavaOptionsLoaded,
+                )
+            }
+            Message::JavaOptionsLoaded(options) => {
+                self.java_options = options;
+                Task::none()
+            }
+
+            Message::SetInstanceJava { instance, path } => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        let mut target = core
+                            .instances
+                            .get(&instance)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        target.java_path = path;
+                        core.instances
+                            .save(&target)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::InstanceSaved,
+                )
+            }
+
+            Message::BrowseForJava(instance) => {
+                Task::perform(
+                    async move {
+                        // Awaited off the UI thread so the window keeps
+                        // painting while the dialog is open.
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Pick a Java executable")
+                            .pick_file()
+                            .await
+                        else {
+                            // Cancelled, which is not a failure.
+                            return None;
+                        };
+                        Some((instance, handle.path().to_path_buf()))
+                    },
+                    |picked| match picked {
+                        Some((instance, path)) => Message::SetInstanceJava {
+                            instance,
+                            path: Some(path),
+                        },
+                        None => Message::Noop,
+                    },
+                )
+            }
+
+            Message::InstanceSaved(result) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                match result {
+                    // Re-reads from disk rather than patching the in-memory
+                    // copy, so the screen can't drift from what was saved.
+                    Ok(()) => Task::batch([reload(core), Task::done(Message::LoadJavaOptions)]),
+                    Err(err) => {
+                        self.status = Status::Error(err);
+                        Task::none()
+                    }
+                }
             }
 
             Message::CheckForUpdate { announce } => {

@@ -26,6 +26,10 @@ sha2.workspace = true
 # Release-tag ordering for the self-updater. Getting prerelease precedence
 # wrong here would offer 0.2.0-alpha to someone already running 0.2.0.
 semver = "1"
+# Adoptium ships JVMs as .tar.gz everywhere except Windows, where it is a .zip
+# the `zip` dependency above already covers.
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
 reqwest.workspace = true

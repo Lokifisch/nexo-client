@@ -1,6 +1,8 @@
 use crate::theme;
 use crate::{App, Message, Screen};
-use iced::widget::{button, column, container, image, row, scrollable, text, text_input, Space};
+use iced::widget::{
+    button, column, container, image, pick_list, row, scrollable, text, text_input, Space,
+};
 use iced::{Element, Fill};
 use nexo_core::instance::InstalledMod;
 use nexo_core::nexo_mod;
@@ -584,6 +586,115 @@ fn compact(n: u64) -> String {
     }
 }
 
+/// One entry in the Java picker.
+///
+/// `Automatic` is not "no Java" — it means "whatever `java::ensure` decides",
+/// which prefers a system JVM and downloads one only when there is nothing
+/// suitable. It stays the default because it is right for almost everyone;
+/// the picker exists for the machine with four JDKs where it guesses wrong.
+#[derive(Clone, PartialEq, Eq)]
+pub enum JavaChoice {
+    Automatic,
+    Explicit(nexo_core::java::JavaInstall),
+}
+
+impl std::fmt::Display for JavaChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Automatic => f.write_str("Automatic"),
+            Self::Explicit(java) => {
+                // The version alone is ambiguous on a machine with several
+                // builds of the same release, so the directory it lives in
+                // comes along. The full path would be too wide for the row —
+                // it is still shown underneath the picker.
+                let where_ = java
+                    .path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if where_.is_empty() {
+                    write!(f, "Java {}", java.version)
+                } else {
+                    write!(f, "Java {} · {where_}", java.version)
+                }
+            }
+        }
+    }
+}
+
+/// Which JVM this instance launches with.
+fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let mut choices = vec![JavaChoice::Automatic];
+    choices.extend(app.java_options.iter().cloned().map(JavaChoice::Explicit));
+
+    // An instance can name a JVM that discovery no longer finds — an uninstalled
+    // JDK, an unplugged drive. Adding it keeps the picker showing what is
+    // actually configured instead of silently snapping back to Automatic, which
+    // would look like the setting had been lost.
+    let selected = match &instance.java_path {
+        None => JavaChoice::Automatic,
+        Some(path) => {
+            let known = app.java_options.iter().find(|j| &j.path == path).cloned();
+            match known {
+                Some(java) => JavaChoice::Explicit(java),
+                None => {
+                    let missing = nexo_core::java::JavaInstall {
+                        path: path.clone(),
+                        major: 0,
+                        version: "not found".to_string(),
+                    };
+                    choices.push(JavaChoice::Explicit(missing.clone()));
+                    JavaChoice::Explicit(missing)
+                }
+            }
+        }
+    };
+
+    let id = instance.id.clone();
+    let picker = pick_list(choices, Some(selected), move |choice| {
+        Message::SetInstanceJava {
+            instance: id.clone(),
+            path: match choice {
+                JavaChoice::Automatic => None,
+                JavaChoice::Explicit(java) => Some(java.path),
+            },
+        }
+    })
+    .padding(6)
+    .text_size(12)
+    .width(260);
+
+    let mut rows = column![
+        row![
+            text("Java").size(12).color(theme::MUTED).width(140),
+            picker,
+            button(text("Browse…").size(12))
+                .padding([6, 10])
+                .style(theme::ghost_button)
+                .on_press(Message::BrowseForJava(instance.id.clone())),
+        ]
+        .spacing(10)
+        .align_y(iced::Center)
+    ]
+    .spacing(4);
+
+    // The exact path matters when two entries read alike, and it is the only
+    // way to see what Automatic actually resolved to.
+    if let Some(path) = &instance.java_path {
+        rows = rows.push(
+            row![
+                Space::new().width(140),
+                text(path.display().to_string()).size(11).color(theme::MUTED),
+            ]
+            .spacing(10),
+        );
+    }
+
+    rows.into()
+}
+
 fn details_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let field = |label: &'static str, value: String| {
         row![
@@ -607,14 +718,7 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
                     .map(|mb| format!("{mb} MiB"))
                     .unwrap_or_else(|| "Default".to_string()),
             ),
-            field(
-                "Java",
-                instance
-                    .java_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "Detected automatically".to_string()),
-            ),
+            java_field(app, instance),
             Space::new().height(6),
             row![
                 button(text("Open folder").size(13))

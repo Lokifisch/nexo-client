@@ -5,8 +5,13 @@
 //! `UnsupportedClassVersionError`. We probe candidates, read each one's real
 //! version, and only accept ones that clear the game's floor.
 
+pub mod adoptium;
+
 use crate::error::{Error, Result};
+use crate::minecraft::Progress;
+use crate::paths::Paths;
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Minimum Java major version for the Minecraft versions v1 targets.
 /// `Mod/README.md` lists Java 25+ for MC 26.1.2.
@@ -148,13 +153,15 @@ async fn candidates() -> Vec<PathBuf> {
 /// Turns "no suitable JVM" into a message that says what to do about it.
 pub fn missing_java_error() -> Error {
     Error::invalid(format!(
-        "no Java {MIN_JAVA_MAJOR}+ installation found — install a JDK (e.g. Temurin {MIN_JAVA_MAJOR}) \
-         or set one explicitly in the instance's settings"
+        "no Java {MIN_JAVA_MAJOR}+ runtime is available and one couldn't be downloaded — \
+         install Temurin {MIN_JAVA_MAJOR} yourself, or point the instance at an existing one"
     ))
 }
 
-/// Resolves the JVM to launch with: the instance's override if it has one,
-/// otherwise the best system JVM.
+/// Resolves the JVM to launch with, without installing anything.
+///
+/// Kept separate from [`ensure`] so callers that must not touch the network —
+/// or must not silently download 45 MB — have a way to ask.
 pub async fn resolve(instance_override: Option<&Path>) -> Result<JavaInstall> {
     if let Some(path) = instance_override {
         return probe(path).await.ok_or_else(|| {
@@ -162,6 +169,50 @@ pub async fn resolve(instance_override: Option<&Path>) -> Result<JavaInstall> {
         });
     }
     find_suitable().await.ok_or_else(missing_java_error)
+}
+
+/// Resolves the JVM to launch with, downloading one if the machine has none
+/// new enough.
+///
+/// Order matters and is deliberate:
+///
+/// 1. **The instance's own setting**, if it has one. An explicit choice is
+///    never second-guessed and never silently replaced — if it is broken, that
+///    is an error, not a reason to go and fetch something else.
+/// 2. **A system JVM.** Anything already installed and new enough wins over
+///    downloading, so Nexo doesn't accumulate a copy of what the machine
+///    already has.
+/// 3. **A runtime Nexo manages**, reused if present and downloaded if not.
+pub async fn ensure(
+    http: &reqwest::Client,
+    paths: &Paths,
+    instance_override: Option<&Path>,
+    progress: Option<&UnboundedSender<Progress>>,
+) -> Result<JavaInstall> {
+    if let Some(path) = instance_override {
+        return probe(path).await.ok_or_else(|| {
+            Error::invalid(format!("{} is not a working Java runtime", path.display()))
+        });
+    }
+
+    if let Some(system) = find_suitable().await {
+        return Ok(system);
+    }
+
+    adoptium::ensure(http, paths, MIN_JAVA_MAJOR, progress).await
+}
+
+/// Every JVM the user could pick for an instance: the ones on this machine,
+/// then the ones Nexo downloaded, newest first and without duplicates.
+pub async fn options(paths: &Paths) -> Vec<JavaInstall> {
+    let mut all = discover().await;
+    for managed in adoptium::all_installed(paths).await {
+        if !all.iter().any(|j| j.path == managed.path) {
+            all.push(managed);
+        }
+    }
+    all.sort_by_key(|j| std::cmp::Reverse(j.major));
+    all
 }
 
 #[cfg(test)]

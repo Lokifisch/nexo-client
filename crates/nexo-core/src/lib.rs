@@ -116,7 +116,17 @@ impl Nexo {
         // Before anything expensive: a launch with a dead token wastes a
         // whole install pass before failing.
         let account = self.accounts.active_valid(&self.auth).await?;
-        let java = java::resolve(instance.java_path.as_deref()).await?;
+        // Downloads a runtime if the machine has none new enough, so a fresh
+        // install doesn't stop at "go and install Java first". An existing
+        // system JVM is always preferred, and an instance that names its own
+        // is never overridden.
+        let java = java::ensure(
+            &self.http,
+            &self.paths,
+            instance.java_path.as_deref(),
+            progress,
+        )
+        .await?;
 
         let version = self.installer.install(&instance, progress).await?;
 
