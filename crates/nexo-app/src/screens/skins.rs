@@ -83,11 +83,11 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
     let variant = row![
         text("Model").size(13).color(theme::MUTED).width(90),
         button(text("Classic").size(13))
-            .padding([7, 16])
+            .padding([6, 13])
             .style(theme::nav_button(model == SkinModel::Classic))
             .on_press(Message::SetSkinModel(SkinModel::Classic)),
         button(text("Slim").size(13))
-            .padding([7, 16])
+            .padding([6, 13])
             .style(theme::nav_button(model == SkinModel::Slim))
             .on_press(Message::SetSkinModel(SkinModel::Slim)),
     ]
@@ -105,11 +105,11 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
             Space::new().height(4),
             row![
                 button(text("Upload skin…").size(13))
-                    .padding([9, 18])
+                    .padding([7, 15])
                     .style(theme::primary_button)
                     .on_press_maybe((!app.is_busy()).then_some(Message::UploadSkin)),
                 button(text("Reset to default").size(13))
-                    .padding([9, 18])
+                    .padding([7, 15])
                     .style(theme::ghost_button)
                     .on_press_maybe((!app.is_busy()).then_some(Message::ResetSkin)),
             ]
@@ -158,11 +158,11 @@ fn library_card(app: &App) -> Element<'_, Message> {
                         text("Delete?").size(12).color(theme::TEXT),
                         row![
                             button(text("Yes").size(11))
-                                .padding([4, 10])
+                                .padding([4, 8])
                                 .style(theme::danger_button)
                                 .on_press(Message::ConfirmDeleteSkin(saved.id.clone())),
                             button(text("No").size(11))
-                                .padding([4, 10])
+                                .padding([4, 8])
                                 .style(theme::ghost_button)
                                 .on_press(Message::CancelDeleteSkin),
                         ]
@@ -271,7 +271,7 @@ fn capes_card(app: &App) -> Element<'_, Message> {
         .spacing(3)
         .width(Fill),
         button(text("Refresh").size(12))
-            .padding([7, 14])
+            .padding([6, 12])
             .style(theme::ghost_button)
             .on_press(Message::LoadCapes),
     ]

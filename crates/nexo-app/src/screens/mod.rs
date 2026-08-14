@@ -14,7 +14,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
     let nav_entry = |label: &'static str, screen: Screen| {
         button(text(label).size(15))
             .width(Fill)
-            .padding([10, 14])
+            .padding([8, 12])
             .style(theme::nav_button(app.screen.nav_group() == screen))
             .on_press(Message::Navigate(screen))
     };
@@ -75,7 +75,7 @@ fn updater(app: &App) -> Element<'_, Message> {
         Some(update) if update.install.is_replaceable() => {
             button(text(format!("Update to {}", update.version)).size(12))
                 .width(Fill)
-                .padding([6, 10])
+                .padding([5, 9])
                 .style(theme::primary_button)
                 .on_press(Message::InstallUpdate)
                 .into()
@@ -139,7 +139,7 @@ fn account_button(app: &App) -> Element<'_, Message> {
                     .spacing(10)
                     .align_y(iced::Center),
             )
-            .padding([6, 12])
+            .padding([5, 10])
             .style(theme::ghost_button)
             .on_press(Message::Navigate(Screen::Accounts))
             .into()
@@ -163,7 +163,7 @@ fn account_button(app: &App) -> Element<'_, Message> {
             .spacing(8)
             .align_y(iced::Center),
         )
-        .padding([6, 12])
+        .padding([5, 10])
         .style(theme::ghost_button)
         .on_press_maybe((!app.signing_in && app.core.is_some()).then_some(Message::StartSignIn))
         .into(),
@@ -176,7 +176,7 @@ pub fn status_bar(status: &Status) -> Element<'_, Message> {
     match status {
         Status::Idle => Space::new().height(0).into(),
         Status::Busy(label) => container(text(label).size(14))
-            .padding([10, 16])
+            .padding([8, 14])
             .width(Fill)
             .style(theme::banner(false))
             .into(),
@@ -184,14 +184,14 @@ pub fn status_bar(status: &Status) -> Element<'_, Message> {
             row![
                 text(message).size(14).width(Fill),
                 button(text("Dismiss").size(13))
-                    .padding([4, 10])
+                    .padding([4, 8])
                     .style(theme::ghost_button)
                     .on_press(Message::DismissStatus),
             ]
             .spacing(12)
             .align_y(iced::Center),
         )
-        .padding([10, 16])
+        .padding([8, 14])
         .width(Fill)
         .style(theme::banner(true))
         .into(),

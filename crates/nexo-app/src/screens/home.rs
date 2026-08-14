@@ -42,7 +42,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         content = content.push(Space::new().height(16));
         content = content.push(
             button(text("Sign in with Microsoft").size(15))
-                .padding([12, 26])
+                .padding([10, 22])
                 .style(theme::primary_button)
                 .on_press_maybe((!app.signing_in && app.core.is_some()).then_some(Message::StartSignIn)),
         );
@@ -55,7 +55,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         content = content.push(Space::new().height(16));
         content = content.push(
             button(text("Go to instances").size(14))
-                .padding([10, 22])
+                .padding([8, 18])
                 .style(theme::ghost_button)
                 .on_press(Message::Navigate(Screen::Instances)),
         );

@@ -14,7 +14,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let running = app.running.contains(&instance.id);
 
     let back = button(text("‹ Instances").size(13))
-        .padding([6, 12])
+        .padding([5, 10])
         .style(theme::ghost_button)
         .on_press(Message::Navigate(Screen::Instances));
 
@@ -72,7 +72,7 @@ fn launch_control<'a>(
 
     if running {
         return button(text("Stop").size(15))
-            .padding([12, 32])
+            .padding([10, 26])
             .style(theme::stop_button)
             .on_press(Message::Stop(instance.id.clone()))
             .into();
@@ -81,7 +81,7 @@ fn launch_control<'a>(
     let label = if app.is_busy() { "Preparing…" } else { "Play" };
 
     let play = button(text(label).size(15))
-        .padding([12, 32])
+        .padding([10, 26])
         .style(theme::primary_button)
         // Launching without an account fails deep in the pipeline, so the
         // button is disabled until there is one.
@@ -150,7 +150,7 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
             column![
                 text(line).size(12).color(tone),
                 button(text(retry).size(13))
-                    .padding([8, 16])
+                    .padding([7, 13])
                     .style(theme::ghost_button)
                     .on_press(Message::FetchNexoRelease),
             ]
@@ -294,7 +294,7 @@ fn release_section<'a>(
     {
         actions = actions.push(
             button(text(label).size(14))
-                .padding([10, 20])
+                .padding([8, 17])
                 .style(theme::primary_button)
                 .on_press_maybe((!app.is_busy()).then(|| Message::InstallNexoMod {
                     instance: instance.id.clone(),
@@ -305,7 +305,7 @@ fn release_section<'a>(
     if installed.is_some() {
         actions = actions.push(
             button(text("Remove").size(13))
-                .padding([8, 16])
+                .padding([7, 13])
                 .style(theme::danger_button)
                 .on_press(Message::RemoveNexoMod(instance.id.clone())),
         );
@@ -376,11 +376,11 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
 
     let actions = row![
         button(text("Install from Modrinth").size(13))
-            .padding([8, 16])
+            .padding([7, 13])
             .style(theme::primary_button)
             .on_press(Message::OpenModrinthBrowser),
         button(text("Add from file").size(13))
-            .padding([8, 16])
+            .padding([7, 13])
             .style(theme::ghost_button)
             .on_press_maybe(
                 (!app.is_busy()).then(|| Message::AddFromFile(instance.id.clone()))
@@ -427,7 +427,7 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
                     .width(Fill),
                     text(&installed.version_number).size(12).color(theme::MUTED),
                     button(text("Remove").size(12))
-                        .padding([6, 12])
+                        .padding([5, 10])
                         .style(theme::danger_button)
                         .on_press_maybe((!app.is_busy()).then(|| Message::RemoveContent {
                             instance: instance.id.clone(),
@@ -462,7 +462,7 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
     for kind in ProjectKind::ALL {
         filters = filters.push(
             button(text(kind.label()).size(13))
-                .padding([8, 14])
+                .padding([6, 12])
                 // Selected filter is filled, so the current scope is obvious
                 // without a separate label.
                 .style(theme::nav_button(app.content_kind == kind))
@@ -477,11 +477,11 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
                 .color(theme::TEXT)
                 .width(Fill),
             button(text("Search").size(13))
-                .padding([8, 16])
+                .padding([7, 13])
                 .style(theme::primary_button)
                 .on_press(Message::SearchContent),
             button(text("Done").size(13))
-                .padding([8, 16])
+                .padding([7, 13])
                 .style(theme::ghost_button)
                 .on_press(Message::CloseModrinthBrowser),
         ]
@@ -534,11 +534,11 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
                         .width(Fill),
                         if installed {
                             button(text("Installed").size(12))
-                                .padding([7, 14])
+                                .padding([6, 12])
                                 .style(theme::ghost_button)
                         } else {
                             button(text("Install").size(12))
-                                .padding([7, 14])
+                                .padding([6, 12])
                                 .style(theme::primary_button)
                                 .on_press_maybe((!app.is_busy()).then(|| {
                                     Message::InstallProject {
@@ -671,7 +671,7 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
             text("Java").size(12).color(theme::MUTED).width(140),
             picker,
             button(text("Browse…").size(12))
-                .padding([6, 10])
+                .padding([5, 9])
                 .style(theme::ghost_button)
                 .on_press(Message::BrowseForJava(instance.id.clone())),
         ]
@@ -722,11 +722,11 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
             Space::new().height(6),
             row![
                 button(text("Open folder").size(13))
-                    .padding([8, 16])
+                    .padding([7, 13])
                     .style(theme::ghost_button)
                     .on_press(Message::OpenFolder(instance.id.clone())),
                 button(text("Export .mrpack").size(13))
-                    .padding([8, 16])
+                    .padding([7, 13])
                     .style(theme::ghost_button)
                     .on_press_maybe(
                         (!app.is_busy()).then(|| Message::ExportPack(instance.id.clone()))
@@ -754,7 +754,7 @@ fn danger_card(instance: &Instance, running: bool) -> Element<'_, Message> {
             .spacing(3)
             .width(Fill),
             button(text("Delete").size(13))
-                .padding([9, 16])
+                .padding([7, 14])
                 .style(theme::danger_button)
                 // Deleting the folder out from under a running game would
                 // leave it writing into nothing.

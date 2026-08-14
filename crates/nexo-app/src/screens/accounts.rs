@@ -13,7 +13,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         })
         .size(14),
     )
-    .padding([10, 20])
+    .padding([8, 17])
     .style(theme::primary_button)
     .on_press_maybe((!app.signing_in && app.core.is_some()).then_some(Message::StartSignIn));
 
@@ -111,7 +111,7 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
     if !is_active {
         actions = actions.push(
             button(text("Use this one").size(13))
-                .padding([8, 14])
+                .padding([6, 12])
                 .style(theme::ghost_button)
                 .on_press(Message::SetActiveAccount(account.uuid.clone())),
         );
@@ -119,7 +119,7 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
 
     actions = actions.push(
         button(text("Sign out").size(13))
-            .padding([8, 14])
+            .padding([6, 12])
             .style(theme::danger_button)
             .on_press(Message::RemoveAccount(account.uuid.clone())),
     );

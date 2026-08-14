@@ -51,12 +51,12 @@ fn create_form(app: &App) -> Element<'_, Message> {
     .width(160);
 
     let create = button(text("Create").size(14))
-        .padding([10, 20])
+        .padding([8, 17])
         .style(theme::primary_button)
         .on_press_maybe(can_create.then_some(Message::CreateInstance));
 
     let import = button(text("Import .mrpack").size(13))
-        .padding([10, 16])
+        .padding([8, 14])
         .style(theme::ghost_button)
         .on_press_maybe(can_create.then_some(Message::ImportPack));
 
@@ -117,14 +117,14 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     // the same instance never shows two different states.
     let action: iced::Element<'a, Message> = if running {
         button(text("Stop").size(14))
-            .padding([9, 22])
+            .padding([7, 18])
             .style(theme::stop_button)
             .on_press(Message::Stop(instance.id.clone()))
             .into()
     } else {
         let can_launch = !app.is_busy() && app.active_account().is_some();
         button(text("Play").size(14))
-            .padding([9, 22])
+            .padding([7, 18])
             .style(theme::primary_button)
             .on_press_maybe(can_launch.then(|| Message::Launch(instance.id.clone())))
             .into()
