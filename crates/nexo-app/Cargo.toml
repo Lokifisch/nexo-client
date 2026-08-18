@@ -15,8 +15,16 @@ path = "src/main.rs"
 nexo-core.workspace = true
 
 # `tokio` feature so iced drives our async core on a tokio runtime;
-# `advanced` for custom widget styling.
-iced = { version = "0.14.0", features = ["tokio", "advanced", "image", "svg", "lazy"] }
+# `advanced` for custom widget styling; `canvas` for the live-log pulse, which
+# draws expanding rings that no combination of styled containers can express.
+iced = { version = "0.14.0", features = [
+    "tokio",
+    "advanced",
+    "image",
+    "svg",
+    "lazy",
+    "canvas",
+] }
 
 tokio.workspace = true
 futures.workspace = true

@@ -10,7 +10,7 @@
 //! can't be silently forgotten.
 
 use iced::widget::{button, container, text_input};
-use iced::{Background, Border, Color, Shadow, Theme, Vector};
+use iced::{border, gradient, Background, Border, Color, Shadow, Theme, Vector};
 
 /// Logo violet — the primary accent.
 pub const VIOLET: Color = rgb(0x7b, 0x3c, 0xff);
@@ -43,16 +43,163 @@ pub fn alpha(color: Color, a: f32) -> Color {
     Color { a, ..color }
 }
 
+/// Gradient angles. iced measures radians clockwise from straight up, which
+/// is easy to get backwards — these are named so a style never has to.
+pub mod angle {
+    /// Left to right.
+    pub const ACROSS: f32 = std::f32::consts::FRAC_PI_2;
+    /// Top to bottom.
+    pub const DOWN: f32 = std::f32::consts::PI;
+}
+
+/// Lays `top` over `base` at `amount` opacity.
+///
+/// Buttons need an *opaque* result: they sit on the page in some places and
+/// on a raised card in others, and a translucent tint would come out a
+/// different colour in each. Blending against the app's own black keeps every
+/// button the same black wherever it lands.
+fn blend(base: Color, top: Color, amount: f32) -> Color {
+    Color {
+        r: base.r + (top.r - base.r) * amount,
+        g: base.g + (top.g - base.g) * amount,
+        b: base.b + (top.b - base.b) * amount,
+        a: 1.0,
+    }
+}
+
+/// The neon-sign construction every button in the app is built from: black
+/// glass, a lit outline, and the glow it throws onto the page around it.
+///
+/// The colour is in the *light*, never in the fill. That is what separates a
+/// neon sign from a painted one, and it is why the accent arrives as a border,
+/// a label and a halo while the surface itself stays near-black — a filled
+/// swatch of the same colour reads as plastic no matter how bright it is.
+///
+/// `quiet` holds the glow back until the cursor arrives. A toolbar of six lit
+/// buttons is a toolbar with no emphasis left to give the one that matters, so
+/// only the primary action on a screen glows at rest.
+fn lit(accent: Color, status: button::Status, quiet: bool) -> button::Style {
+    // Neon is a bright line on a dark ground, so the outline and the label
+    // take a lightened accent rather than the raw brand colour: #7b3cff on
+    // near-black sits around 4:1, which is thin for a control label.
+    let bright = lighten(accent, 0.22);
+
+    let (border, glow, wash) = match status {
+        button::Status::Active if quiet => (0.4, 0.0, 0.05),
+        button::Status::Active => (0.9, 15.0, 0.09),
+        button::Status::Hovered => (1.0, 27.0, 0.15),
+        // Dimmer and tighter, not brighter: a neon tube pressed against the
+        // page should look like it moved closer to it.
+        button::Status::Pressed => (1.0, 9.0, 0.22),
+        button::Status::Disabled => (0.16, 0.0, 0.0),
+    };
+
+    button::Style {
+        background: Some(Background::Color(blend(INK, accent, wash))),
+        text_color: match status {
+            button::Status::Disabled => alpha(MUTED, 0.45),
+            _ => bright,
+        },
+        border: Border {
+            radius: 10.0.into(),
+            width: if quiet { 1.0 } else { 1.5 },
+            color: alpha(bright, border),
+        },
+        shadow: Shadow {
+            color: alpha(accent, 0.6),
+            // No offset: a halo, not a drop shadow. A glow that falls to one
+            // side reads as an object lit from elsewhere rather than as one
+            // that is lit.
+            offset: Vector::new(0.0, 0.0),
+            blur_radius: glow,
+        },
+        ..Default::default()
+    }
+}
+
+/// How long the accent takes to travel once around the colour wheel.
+///
+/// Slow on purpose. The glow should look like it is drifting when you happen
+/// to notice it, not flashing while you are trying to read a log — and a fast
+/// cycle turns every button into a distraction competing with the content.
+pub const RAINBOW_PERIOD: f32 = 12.0;
+
+/// A fully saturated neon at `turns` around the colour wheel; wraps, so the
+/// caller can hand it a raw elapsed time over [`RAINBOW_PERIOD`].
+///
+/// Lightness sits at 0.66 rather than full: a pure hue at maximum lightness
+/// goes white at yellow and cyan, so a cycling accent would visibly flatten
+/// twice per revolution.
+pub fn spectrum(turns: f32) -> Color {
+    let hue = turns.rem_euclid(1.0) * 6.0;
+    let sector = hue.floor();
+    let f = hue - sector;
+
+    // HSL at S = 1, L = 0.66, expanded by hand: the general conversion is
+    // mostly branches that fall away once saturation is fixed.
+    const L: f32 = 0.66;
+    const C: f32 = (1.0 - 2.0 * L + 1.0) * 1.0; // chroma at S=1 → 2(1-L)
+    let (min, max) = (L - C / 2.0, L + C / 2.0);
+    let rise = min + (max - min) * f;
+    let fall = max - (max - min) * f;
+
+    let (r, g, b) = match sector as u32 % 6 {
+        0 => (max, rise, min),
+        1 => (fall, max, min),
+        2 => (min, max, rise),
+        3 => (min, fall, max),
+        4 => (rise, min, max),
+        _ => (max, min, fall),
+    };
+    Color { r, g, b, a: 1.0 }
+}
+
+/// Where a colour sits on the wheel, in turns.
+///
+/// Lets a style build a *ramp* around the accent it was handed — the tab bar
+/// needs three hues spaced across the spectrum, and the only thing it receives
+/// is the one colour in the palette. Deriving the neighbours instead of
+/// threading the animation clock through every style function is what keeps
+/// [`nexo`] the single place the animation exists.
+fn hue_of(color: Color) -> f32 {
+    let max = color.r.max(color.g).max(color.b);
+    let min = color.r.min(color.g).min(color.b);
+    let span = max - min;
+    if span <= f32::EPSILON {
+        return 0.0;
+    }
+
+    let hue = if max == color.r {
+        (color.g - color.b) / span
+    } else if max == color.g {
+        2.0 + (color.b - color.r) / span
+    } else {
+        4.0 + (color.r - color.g) / span
+    };
+    (hue / 6.0).rem_euclid(1.0)
+}
+
 /// The app-wide theme. Built from a custom palette so iced's generated
 /// component colors (hover shades, contrast text) derive from the brand
 /// rather than being hand-maintained per widget.
-pub fn nexo() -> Theme {
+///
+/// `clock` is elapsed seconds, and it is the *whole* animation: the accent is
+/// carried in `primary`, so every style below reads its colour out of the
+/// theme it is already handed and no widget, screen, or call site knows that
+/// the accent moves. Rebuilt each frame, which costs one palette generation —
+/// a handful of colour conversions, against a frame that was going to be
+/// drawn anyway.
+///
+/// `success` and `danger` deliberately do not move. Mint means *ready* and red
+/// means *this destroys something*; a Delete button that drifts through green
+/// is a Delete button that has stopped warning anyone.
+pub fn nexo(clock: f32) -> Theme {
     Theme::custom(
         "Nexo".to_string(),
         iced::theme::Palette {
             background: INK,
             text: TEXT,
-            primary: VIOLET,
+            primary: spectrum(clock / RAINBOW_PERIOD),
             success: MINT,
             warning: rgb(0xff, 0xd9, 0x3c),
             danger: DANGER,
@@ -60,132 +207,89 @@ pub fn nexo() -> Theme {
     )
 }
 
-/// The main call-to-action: filled violet with a soft glow that intensifies
-/// on hover. The glow is a shadow rather than a border so it reads as light
-/// spill instead of an outline.
-pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let (background, glow) = match status {
-        button::Status::Active => (VIOLET, 12.0),
-        button::Status::Hovered => (lighten(VIOLET, 0.12), 22.0),
-        button::Status::Pressed => (darken(VIOLET, 0.10), 8.0),
-        button::Status::Disabled => (alpha(VIOLET, 0.25), 0.0),
-    };
-
-    button::Style {
-        background: Some(Background::Color(background)),
-        text_color: if matches!(status, button::Status::Disabled) {
-            alpha(TEXT, 0.5)
-        } else {
-            Color::WHITE
-        },
-        border: Border {
-            radius: 10.0.into(),
-            ..Border::default()
-        },
-        shadow: Shadow {
-            color: alpha(VIOLET, 0.55),
-            offset: Vector::new(0.0, 0.0),
-            blur_radius: glow,
-        },
-        ..Default::default()
-    }
+/// The accent as it stands this frame. Every style takes its colour from here
+/// rather than from [`VIOLET`], which is now only the resting brand colour for
+/// anything that must not move.
+fn accent(theme: &Theme) -> Color {
+    theme.palette().primary
 }
 
-/// Quieter actions that sit next to a primary one.
-pub fn ghost_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let (background, border_color) = match status {
-        button::Status::Active => (Color::TRANSPARENT, alpha(VIOLET, 0.45)),
-        button::Status::Hovered => (alpha(VIOLET, 0.14), VIOLET),
-        button::Status::Pressed => (alpha(VIOLET, 0.22), VIOLET),
-        button::Status::Disabled => (Color::TRANSPARENT, alpha(MUTED, 0.3)),
-    };
-
-    button::Style {
-        background: Some(Background::Color(background)),
-        text_color: match status {
-            button::Status::Disabled => alpha(TEXT, 0.4),
-            _ => TEXT,
-        },
-        border: Border {
-            radius: 10.0.into(),
-            width: 1.0,
-            color: border_color,
-        },
-        shadow: Shadow::default(),
-        ..Default::default()
-    }
+/// The main call-to-action: violet neon, lit at rest.
+pub fn primary_button(theme: &Theme, status: button::Status) -> button::Style {
+    lit(accent(theme), status, false)
 }
 
-/// Stop, shown in place of Play while a game is running. Filled red rather
-/// than outlined: it occupies the primary action's slot, so it needs the same
-/// visual weight while clearly not being "go".
+/// Play — the one control that must be found without looking.
+///
+/// Mint rather than violet, and the only mint button in the app. It is the
+/// palette's "ready" signal, so spending it here means *go* is the one word
+/// the colour ever says; a second mint button anywhere would cost that.
+pub fn hero_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = lit(MINT, status, false);
+
+    // A touch more light than the others carry, so it wins the screen even
+    // sitting beside a lit primary.
+    style.shadow.blur_radius *= 1.35;
+    style
+}
+
+/// Quieter actions that sit next to a primary one. Unlit until the cursor
+/// arrives — see [`lit`] on why they have to be.
+pub fn ghost_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = lit(accent(theme), status, true);
+
+    // Plain text rather than violet: these are labels like "Open folder" and
+    // "Browse…", and a row of them in accent colour would look like a row of
+    // primary actions.
+    style.text_color = match status {
+        button::Status::Disabled => alpha(MUTED, 0.45),
+        _ => TEXT,
+    };
+    style
+}
+
+/// Stop, shown in place of Play while a game is running. Lit at rest, since it
+/// occupies the primary action's slot and needs the same weight while clearly
+/// not being "go".
 pub fn stop_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let (background, glow) = match status {
-        button::Status::Active => (DANGER, 12.0),
-        button::Status::Hovered => (lighten(DANGER, 0.10), 20.0),
-        button::Status::Pressed => (darken(DANGER, 0.10), 8.0),
-        button::Status::Disabled => (alpha(DANGER, 0.25), 0.0),
-    };
-
-    button::Style {
-        background: Some(Background::Color(background)),
-        text_color: Color::WHITE,
-        border: Border {
-            radius: 10.0.into(),
-            ..Border::default()
-        },
-        shadow: Shadow {
-            color: alpha(DANGER, 0.5),
-            offset: Vector::new(0.0, 0.0),
-            blur_radius: glow,
-        },
-        ..Default::default()
-    }
+    lit(DANGER, status, false)
 }
 
-/// Destructive actions. Red rather than brand-violet so it can't be confused
-/// with a primary action.
+/// Destructive actions. Red, and dark until touched: a Delete that glows on
+/// its own draws the eye to exactly the button nobody should press by
+/// accident.
 pub fn danger_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Active => Color::TRANSPARENT,
-        button::Status::Hovered => alpha(DANGER, 0.18),
-        button::Status::Pressed => alpha(DANGER, 0.28),
-        button::Status::Disabled => Color::TRANSPARENT,
+    let mut style = lit(DANGER, status, true);
+    style.text_color = match status {
+        button::Status::Disabled => alpha(MUTED, 0.45),
+        _ => DANGER,
     };
-
-    button::Style {
-        background: Some(Background::Color(background)),
-        text_color: DANGER,
-        border: Border {
-            radius: 10.0.into(),
-            width: 1.0,
-            color: alpha(DANGER, 0.5),
-        },
-        shadow: Shadow::default(),
-        ..Default::default()
-    }
+    style
 }
 
-/// Sidebar navigation entries. The selected one gets a filled violet wash so
-/// the current screen is obvious without a separate indicator.
+/// Sidebar navigation entries. The selected one is a lit tube; the rest are
+/// unlit glass, which is what makes "where you are" readable at a glance
+/// without a separate indicator.
 pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_theme, status| {
-        let background = if selected {
-            alpha(VIOLET, 0.22)
-        } else {
-            match status {
-                button::Status::Hovered | button::Status::Pressed => alpha(VIOLET, 0.10),
-                _ => Color::TRANSPARENT,
-            }
-        };
+    move |theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+
+        if selected {
+            let mut style = lit(accent(theme), status, false);
+            style.border.radius = 8.0.into();
+            return style;
+        }
 
         button::Style {
-            background: Some(Background::Color(background)),
-            text_color: if selected { TEXT } else { MUTED },
+            background: Some(Background::Color(if hovered {
+                blend(INK, accent(theme), 0.1)
+            } else {
+                Color::TRANSPARENT
+            })),
+            text_color: if hovered { TEXT } else { MUTED },
             border: Border {
                 radius: 8.0.into(),
-                width: if selected { 1.0 } else { 0.0 },
-                color: alpha(VIOLET, 0.5),
+                ..Default::default()
             },
             shadow: Shadow::default(),
             ..Default::default()
@@ -207,12 +311,12 @@ pub fn bare_button(_theme: &Theme, _status: button::Status) -> button::Style {
     }
 }
 
-/// A selectable tile, used for the cape grid.
-pub fn tile(_theme: &Theme, status: button::Status) -> button::Style {
+/// A selectable tile, used for the cape grid and the edition picker.
+pub fn tile(theme: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
         background: Some(Background::Color(if hovered {
-            alpha(VIOLET, 0.10)
+            blend(INK, accent(theme), 0.12)
         } else {
             SURFACE
         })),
@@ -220,7 +324,7 @@ pub fn tile(_theme: &Theme, status: button::Status) -> button::Style {
         border: Border {
             radius: 10.0.into(),
             width: 1.0,
-            color: alpha(MUTED, 0.2),
+            color: alpha(if hovered { accent(theme) } else { MUTED }, 0.35),
         },
         shadow: Shadow::default(),
         ..Default::default()
@@ -228,28 +332,188 @@ pub fn tile(_theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// The tile that's currently chosen.
+///
+/// Stays mint rather than taking the brand ramp: everywhere else in the app
+/// mint means *this is the one that is ready/chosen*, and a violet tile would
+/// read as merely hovered next to the violet washes on either side of it.
 pub fn selected_tile(_theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
-        background: Some(Background::Color(alpha(MINT, 0.12))),
+        background: Some(Background::Color(blend(INK, MINT, 0.1))),
         text_color: TEXT,
         border: Border {
             radius: 10.0.into(),
             width: 1.0,
             color: MINT,
         },
-        shadow: Shadow::default(),
+        shadow: Shadow {
+            color: alpha(MINT, 0.25),
+            offset: Vector::new(0.0, 1.0),
+            blur_radius: 14.0,
+        },
+        ..Default::default()
+    }
+}
+
+/// One tab on the instance screen.
+///
+/// Flat rather than a pill: the sidebar already uses filled pills for "where
+/// you are", and reusing that shape one level down would make the two rails
+/// compete. The selected tab is lit from below instead — a wash that fades
+/// upward out of its underline, so the two read as one lamp rather than as a
+/// panel with a line under it. See [`tab_underline`].
+pub fn tab_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let lit_accent = accent(theme);
+
+        // The light from the bar below, spilling up onto the tab and falling
+        // off. Transparent at the top so the tab itself stays black — the
+        // colour is in the glow, not in the surface.
+        let spill = |strength: f32| {
+            Background::from(
+                gradient::Linear::new(angle::DOWN)
+                    .add_stop(0.0, Color::TRANSPARENT)
+                    .add_stop(0.6, alpha(lit_accent, strength * 0.25))
+                    .add_stop(1.0, alpha(lit_accent, strength)),
+            )
+        };
+
+        button::Style {
+            background: Some(match (selected, hovered) {
+                (true, _) => spill(0.2),
+                (false, true) => spill(0.1),
+                (false, false) => Background::Color(Color::TRANSPARENT),
+            }),
+            text_color: if selected || hovered { TEXT } else { MUTED },
+            border: Border {
+                // Square at the bottom so the button sits flush on its
+                // underline instead of floating above a detached bar.
+                radius: border::Radius::default().top(8.0),
+                ..Default::default()
+            },
+            shadow: Shadow::default(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The bar under a tab. Every tab draws one, so the unselected ones join into
+/// a continuous rule and the selected one reads as a break in it.
+///
+/// The selected bar runs violet → magenta along the logo's own gradient and
+/// carries a glow beneath it, which is what makes the strip look lit rather
+/// than merely coloured in.
+pub fn tab_underline(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        if !selected {
+            return container::Style {
+                background: Some(Background::Color(alpha(MUTED, 0.15))),
+                ..Default::default()
+            };
+        }
+
+        // Left to right, so a row of tabs reads as one ramp rather than each
+        // tab restarting the gradient. This is the only place a full three-hue
+        // ramp is spent: it is a 3px sliver, which is exactly why it can carry
+        // the whole spectrum without the screen turning into a paint chart.
+        let base = hue_of(accent(theme));
+
+        container::Style {
+            background: Some(Background::from(
+                gradient::Linear::new(angle::ACROSS)
+                    .add_stop(0.0, spectrum(base))
+                    .add_stop(0.5, spectrum(base + 0.1))
+                    .add_stop(1.0, spectrum(base + 0.2)),
+            )),
+            border: Border {
+                radius: 2.0.into(),
+                ..Default::default()
+            },
+            shadow: Shadow {
+                // Cast from the middle of the ramp, so the spill under the bar
+                // matches the bar rather than naming one of its ends.
+                color: alpha(spectrum(base + 0.1), 0.75),
+                offset: Vector::new(0.0, 1.0),
+                blur_radius: 11.0,
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// The count beside a tab's label. Small, quiet, and only ever shown for a
+/// number that has actually been counted — see `App::tabs_loaded`.
+pub fn tab_badge(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| container::Style {
+        background: Some(Background::Color(blend(INK, accent(theme), 0.14))),
+        text_color: Some(if selected {
+            lighten(accent(theme), 0.28)
+        } else {
+            MUTED
+        }),
+        border: Border {
+            radius: 100.0.into(),
+            width: 1.0,
+            color: alpha(if selected { accent(theme) } else { MUTED }, 0.35),
+        },
+        ..Default::default()
+    }
+}
+
+/// A row that reacts to the cursor, for lists whose entries are clickable as
+/// a whole — files, worlds, logs.
+pub fn row_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let wash = match (selected, hovered) {
+            (true, true) => 0.2,
+            (true, false) => 0.15,
+            (false, true) => 0.08,
+            (false, false) => 0.0,
+        };
+
+        button::Style {
+            background: Some(Background::Color(if wash > 0.0 {
+                blend(INK, accent(theme), wash)
+            } else {
+                Color::TRANSPARENT
+            })),
+            text_color: if selected { TEXT } else { MUTED },
+            border: Border {
+                radius: 8.0.into(),
+                width: if selected { 1.0 } else { 0.0 },
+                color: alpha(accent(theme), 0.55),
+            },
+            // A list row is not a control, so it gets an outline and no halo.
+            // Rows glowing down a scrolling list would be a light show.
+            shadow: Shadow::default(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The ground under a log or any other block of preformatted text. Darker
+/// than a card on purpose — it is a viewport onto a file, not a panel.
+pub fn well(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(INK)),
+        border: Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: alpha(MUTED, 0.15),
+        },
         ..Default::default()
     }
 }
 
 /// A content card — instance tiles, account rows.
-pub fn card(_theme: &Theme) -> container::Style {
+pub fn card(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(RAISED)),
         border: Border {
             radius: 12.0.into(),
             width: 1.0,
-            color: alpha(VIOLET, 0.18),
+            color: alpha(accent(theme), 0.18),
         },
         ..Default::default()
     }
@@ -281,22 +545,22 @@ pub fn banner(is_error: bool) -> impl Fn(&Theme) -> container::Style {
 }
 
 /// The device-code callout, which needs to draw the eye more than a card.
-pub fn highlight(_theme: &Theme) -> container::Style {
+pub fn highlight(theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(alpha(VIOLET, 0.12))),
+        background: Some(Background::Color(alpha(accent(theme), 0.12))),
         border: Border {
             radius: 12.0.into(),
             width: 1.0,
-            color: alpha(VIOLET, 0.5),
+            color: alpha(accent(theme), 0.5),
         },
         ..Default::default()
     }
 }
 
-pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let border_color = match status {
-        text_input::Status::Focused { .. } => VIOLET,
-        text_input::Status::Hovered => alpha(VIOLET, 0.5),
+        text_input::Status::Focused { .. } => accent(theme),
+        text_input::Status::Hovered => alpha(accent(theme), 0.5),
         _ => alpha(MUTED, 0.3),
     };
 
@@ -310,7 +574,7 @@ pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
         icon: MUTED,
         placeholder: MUTED,
         value: TEXT,
-        selection: alpha(VIOLET, 0.4),
+        selection: alpha(accent(theme), 0.4),
     }
 }
 
@@ -323,11 +587,3 @@ fn lighten(color: Color, amount: f32) -> Color {
     }
 }
 
-fn darken(color: Color, amount: f32) -> Color {
-    Color {
-        r: (color.r - amount).max(0.0),
-        g: (color.g - amount).max(0.0),
-        b: (color.b - amount).max(0.0),
-        a: color.a,
-    }
-}

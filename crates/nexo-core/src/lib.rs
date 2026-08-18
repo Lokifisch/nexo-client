@@ -7,6 +7,7 @@
 
 pub mod accounts;
 pub mod auth;
+pub mod browse;
 pub mod content;
 pub mod cosmetics;
 pub mod error;
@@ -21,6 +22,7 @@ pub mod nexo_mod;
 pub mod paths;
 pub mod running;
 pub mod self_update;
+pub mod server_ping;
 pub mod shared_store;
 pub mod skin;
 pub mod skin_library;

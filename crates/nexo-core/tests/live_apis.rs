@@ -443,3 +443,40 @@ async fn a_runtime_can_be_installed_and_then_run() {
 
     std::fs::remove_dir_all(paths.root()).ok();
 }
+
+/// The SRV path, against servers that only work through it.
+///
+/// `hypixel.net` resolves to a web host with 25565 closed and `minehut.gg` has
+/// no A record at all — both exist purely as `_minecraft._tcp` records. Before
+/// SRV resolution they reported as unreachable in the server list, which is
+/// what this guards against coming back.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn srv_only_servers_answer_a_ping() {
+    for address in ["hypixel.net", "minehut.gg"] {
+        let status = nexo_core::server_ping::ping(address)
+            .await
+            .unwrap_or_else(|err| panic!("{address} should answer: {err}"));
+
+        assert!(
+            status.players_max > 0,
+            "{address} reported no player slots: {status:?}"
+        );
+        println!(
+            "{address}: {} — {}/{} online, {} ms",
+            status.motd, status.players_online, status.players_max, status.latency_ms
+        );
+    }
+}
+
+/// An explicit port must suppress the SRV lookup, the way the game does it.
+/// Port 25565 on `hypixel.net` is closed, so naming it has to fail even though
+/// the bare name succeeds above.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn an_explicit_port_bypasses_srv() {
+    assert!(
+        nexo_core::server_ping::ping("hypixel.net:25565").await.is_err(),
+        "an explicit port should have gone straight to a closed port"
+    );
+}

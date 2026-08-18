@@ -1,15 +1,63 @@
-use crate::theme;
+use crate::{pulse, theme};
 use crate::{App, Message, Screen};
 use iced::widget::{
     button, column, container, image, pick_list, row, scrollable, text, text_input, Space,
 };
-use iced::{Element, Fill};
+use iced::{Element, Fill, Font};
+use nexo_core::browse;
 use nexo_core::instance::InstalledMod;
 use nexo_core::nexo_mod;
+use nexo_core::util::human_bytes;
 use nexo_core::Instance;
+use std::path::PathBuf;
 
-/// Details for a single instance: what it is, how to launch it, its content,
-/// and the Nexo Mod injector.
+/// The four views onto an instance.
+///
+/// Deliberately the same set the other launchers offer, in the same order:
+/// this is the one screen where someone arrives already knowing what they are
+/// looking for, and inventing a different vocabulary for it would only make
+/// them hunt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Tab {
+    #[default]
+    Content,
+    Files,
+    Worlds,
+    Logs,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Content, Tab::Files, Tab::Worlds, Tab::Logs];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Content => "Content",
+            Tab::Files => "Files",
+            Tab::Worlds => "Worlds",
+            Tab::Logs => "Logs",
+        }
+    }
+
+    /// A glyph rather than an icon font: these are all in the fonts every
+    /// target already ships, so the tab strip needs no asset and cannot come
+    /// up as tofu on a machine missing one.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Tab::Content => "◈",
+            Tab::Files => "▤",
+            Tab::Worlds => "◍",
+            Tab::Logs => "≡",
+        }
+    }
+}
+
+/// Details for a single instance: what it is, how to launch it, and the four
+/// tabs onto what is inside it.
+///
+/// The details sit above the tabs rather than inside one of them because they
+/// describe the instance itself — which Minecraft, which loader, which JVM —
+/// and stay true whichever tab is open. Filing them under a tab would mean
+/// leaving the file you are looking at to check what version it belongs to.
 pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let running = app.running.contains(&instance.id);
 
@@ -36,29 +84,84 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     .spacing(4)
     .width(Fill);
 
-    let content = column![
+    let body = match app.tab {
+        Tab::Content => content_tab(app, instance),
+        Tab::Files => files_tab(app, instance),
+        Tab::Worlds => worlds_tab(app, instance),
+        Tab::Logs => logs_tab(app, instance),
+    };
+
+    column![
         back,
         row![heading, launch_control(app, instance, running)]
             .spacing(16)
             .align_y(iced::Center),
-        scrollable(if app.browsing {
-            column![browser_card(app, instance)].spacing(14).width(Fill)
-        } else {
+        details_card(app, instance, running),
+        tab_bar(app, instance),
+        body,
+    ]
+    .spacing(14)
+    .height(Fill)
+    .into()
+}
+
+/// The tab strip. Every tab carries its own underline, so the unselected ones
+/// join into one rule and the selected one breaks it.
+fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let mut bar = row![].spacing(2).align_y(iced::Bottom);
+
+    for tab in Tab::ALL {
+        let selected = app.tab == tab;
+
+        let mut label = row![
+            text(tab.glyph())
+                .size(13)
+                .color(if selected { app.accent() } else { theme::MUTED }),
+            text(tab.label()).size(14),
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+
+        // Only for a tab that has actually counted. A badge reading 0 on a
+        // directory nobody has opened yet would be a claim, not a number.
+        if let Some(count) = app.tab_count(tab, instance) {
+            label = label.push(
+                container(text(count.to_string()).size(10))
+                    .padding([1, 7])
+                    .style(theme::tab_badge(selected)),
+            );
+        }
+
+        bar = bar.push(
             column![
-                nexo_mod_card(app, instance),
-                installed_card(app, instance),
-                details_card(app, instance),
-                danger_card(instance, running),
+                button(label)
+                    .padding([9, 16])
+                    .style(theme::tab_button(selected))
+                    .on_press(Message::SelectTab(tab)),
+                container(Space::new().width(Fill).height(if selected { 3 } else { 2 }))
+                    .style(theme::tab_underline(selected)),
             ]
+            .spacing(0),
+        );
+    }
+
+    // Carries the rule out to the edge of the screen, so the strip reads as a
+    // divider the content hangs from rather than as four floating buttons.
+    bar.push(container(Space::new().width(Fill).height(2)).style(theme::tab_underline(false)))
+        .into()
+}
+
+/// What is installed, and the two ways to install more.
+fn content_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    scrollable(if app.browsing {
+        column![browser_card(app, instance)].spacing(14).width(Fill)
+    } else {
+        column![nexo_mod_card(app, instance), installed_card(app, instance)]
             .spacing(14)
             .width(Fill)
-        })
-        .height(Fill),
-    ]
-    .spacing(18)
-    .height(Fill);
-
-    content.into()
+    })
+    .height(Fill)
+    .into()
 }
 
 /// Play, or Stop while the game is up. Red and relabelled rather than a
@@ -82,7 +185,8 @@ fn launch_control<'a>(
 
     let play = button(text(label).size(15))
         .padding([10, 26])
-        .style(theme::primary_button)
+        // The one place the full ramp is spent — see `theme::hero_button`.
+        .style(theme::hero_button)
         // Launching without an account fails deep in the pipeline, so the
         // button is disabled until there is one.
         .on_press_maybe(
@@ -565,6 +669,699 @@ fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
         .into()
 }
 
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+/// The instance directory, browsable in place.
+///
+/// Read-only apart from opening things: this exists so someone can check
+/// whether a config landed where they think it did without leaving the
+/// launcher, and a file manager is one button away for anything more.
+fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let mut header = row![breadcrumb(app)].spacing(10).align_y(iced::Center);
+
+    header = header.push(
+        button(text("Open in file manager").size(13))
+            .padding([7, 13])
+            .style(theme::ghost_button)
+            .on_press(Message::OpenFolder(instance.id.clone())),
+    );
+
+    let mut list = column![].spacing(2).width(Fill);
+
+    // A folder that has vanished under us is worth saying out loud — the
+    // alternative is a listing that silently reads as empty.
+    if let Some(err) = &app.files_error {
+        list = list.push(text(err.as_str()).size(12).color(theme::DANGER));
+    } else if app.files.is_empty() {
+        list = list.push(
+            text(if app.files_at.as_os_str().is_empty() {
+                "This instance has no files yet. Installing something or launching it once will fill it in."
+            } else {
+                "This folder is empty."
+            })
+            .size(12)
+            .color(theme::MUTED),
+        );
+    }
+
+    for entry in &app.files {
+        let meta = row![
+            text(if entry.is_dir {
+                String::new()
+            } else {
+                human_bytes(entry.size)
+            })
+            .size(11)
+            .color(theme::MUTED)
+            .width(80),
+            text(entry.modified.map(ago).unwrap_or_default())
+                .size(11)
+                .color(theme::MUTED)
+                .width(110),
+        ]
+        .spacing(10)
+        .align_y(iced::Center);
+
+        let label = row![
+            // A glyph rather than an icon: it is the one distinction the list
+            // has to make at a glance, and it costs no asset.
+            text(if entry.is_dir { "▸" } else { "·" })
+                .size(13)
+                .color(if entry.is_dir {
+                    theme::VIOLET
+                } else {
+                    theme::MUTED
+                })
+                .width(14),
+            text(entry.name.as_str())
+                .size(13)
+                .color(theme::TEXT)
+                .width(Fill),
+            meta,
+        ]
+        .spacing(10)
+        .align_y(iced::Center);
+
+        // Directories navigate; files hand off to whatever the OS uses for
+        // them. Both are the whole row, since a row-sized target is easier to
+        // hit than a word.
+        list = list.push(
+            button(label)
+                .padding([7, 10])
+                .width(Fill)
+                .style(theme::row_button(false))
+                .on_press(if entry.is_dir {
+                    Message::BrowseFiles(entry.rel.clone())
+                } else {
+                    Message::OpenPath(entry.path.clone())
+                }),
+        );
+    }
+
+    column![
+        header,
+        // Room on the right for the overlay scrollbar, which otherwise sits
+        // on top of each row's size and timestamp.
+        scrollable(container(list).padding(iced::Padding {
+            top: 4.0,
+            right: 12.0,
+            bottom: 4.0,
+            left: 0.0,
+        }))
+        .height(Fill),
+    ]
+    .spacing(12)
+    .height(Fill)
+    .into()
+}
+
+/// Where the browser is, one clickable segment per level.
+fn breadcrumb(app: &App) -> Element<'_, Message> {
+    let mut trail = row![].spacing(4).align_y(iced::Center);
+
+    let at_root = app.files_at.as_os_str().is_empty();
+    trail = trail.push(
+        button(text("Instance").size(13))
+            .padding([5, 8])
+            .style(theme::row_button(at_root))
+            .on_press(Message::BrowseFiles(PathBuf::new())),
+    );
+
+    // Each segment gets the path *up to and including itself*, so clicking
+    // one goes there rather than to wherever the browser happens to be.
+    let mut so_far = PathBuf::new();
+    let last = app.files_at.components().count();
+    for (index, component) in app.files_at.components().enumerate() {
+        so_far.push(component);
+        trail = trail.push(text("/").size(12).color(theme::MUTED));
+        trail = trail.push(
+            button(text(component.as_os_str().to_string_lossy().into_owned()).size(13))
+                .padding([5, 8])
+                .style(theme::row_button(index + 1 == last))
+                .on_press(Message::BrowseFiles(so_far.clone())),
+        );
+    }
+
+    trail.width(Fill).into()
+}
+
+// ---------------------------------------------------------------------------
+// Worlds
+// ---------------------------------------------------------------------------
+
+/// Everywhere this instance can be played: single-player worlds under
+/// `saves/`, and the multiplayer list out of `servers.dat`.
+///
+/// One tab rather than two because that is the question being asked — *where
+/// can I go* — and splitting it would mean knowing whether a place is a folder
+/// or an address before you can look for it.
+fn worlds_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let running = app.running.contains(&instance.id);
+
+    let mut list = column![section_heading(
+        "Singleplayer",
+        app.worlds.len(),
+        None,
+    )]
+    .spacing(10)
+    .width(Fill);
+
+    if app.worlds.is_empty() {
+        list = list.push(empty_note(
+            "No worlds yet",
+            "Worlds appear here once this instance has been played.",
+        ));
+    }
+    for world in &app.worlds {
+        list = list.push(world_row(app, instance, world));
+    }
+
+    // The form is open for a *new* server when it carries no index; an open
+    // edit belongs against its own row further down.
+    let adding = matches!(&app.server_form, Some(form) if form.editing.is_none());
+
+    list = list.push(Space::new().height(8));
+    list = list.push(section_heading(
+        "Servers",
+        app.servers.len(),
+        Some(
+            row![
+                // Pings happen once per instance, so a server that was down
+                // when the tab opened would read as down until the instance is
+                // reopened. This is the way to ask again.
+                button(text("Refresh").size(12))
+                    .padding([6, 12])
+                    .style(theme::ghost_button)
+                    .on_press(Message::RepingServers),
+                button(text(if adding { "Cancel" } else { "Add server" }).size(12))
+                    .padding([6, 12])
+                    .style(theme::ghost_button)
+                    .on_press(if adding {
+                        Message::CloseServerForm
+                    } else {
+                        Message::OpenServerForm(None)
+                    }),
+            ]
+            .spacing(8)
+            .into(),
+        ),
+    ));
+
+    if adding && let Some(form) = &app.server_form {
+        list = list.push(server_form(form, running));
+    }
+
+    if app.servers.is_empty() && !adding {
+        list = list.push(empty_note(
+            "No servers yet",
+            "Servers you add in-game show up here, and so does anything added above.",
+        ));
+    }
+
+    for server in &app.servers {
+        // The form takes the row's place while that row is being edited, so
+        // the fields sit exactly where the values they replace were.
+        match &app.server_form {
+            Some(form) if form.editing == Some(server.index) => {
+                list = list.push(server_form(form, running))
+            }
+            _ => list = list.push(server_row(app, server)),
+        }
+    }
+
+    // The scrollbar is an overlay, so without room reserved for it on the
+    // right it sits on top of each row's buttons.
+    scrollable(container(list).padding([0, 12]))
+        .height(Fill)
+        .into()
+}
+
+/// A heading over one of the tab's two lists, with its count and an optional
+/// action on the right.
+fn section_heading<'a>(
+    label: &'a str,
+    count: usize,
+    action: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut head = row![
+        text(label).size(13).color(theme::TEXT),
+        text(count.to_string()).size(12).color(theme::MUTED),
+        Space::new().width(Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    if let Some(action) = action {
+        head = head.push(action);
+    }
+    head.into()
+}
+
+fn empty_note<'a>(title: &'a str, detail: &'a str) -> Element<'a, Message> {
+    container(
+        column![
+            text(title).size(15).color(theme::TEXT),
+            text(detail).size(12).color(theme::MUTED),
+        ]
+        .spacing(4),
+    )
+    .padding(18)
+    .width(Fill)
+    .style(theme::card)
+    .into()
+}
+
+/// Name and address, written straight into `servers.dat`. One form for both
+/// adding and editing — the only difference is where it is rendered and which
+/// verb the button carries.
+fn server_form(form: &crate::ServerForm, running: bool) -> Element<'_, Message> {
+    let ready = !form.address.trim().is_empty() && !running;
+    let editing = form.editing.is_some();
+
+    let mut body = column![
+        row![
+            text_input("Name (optional)", &form.name)
+                .on_input(Message::ServerFormNameChanged)
+                .padding(9)
+                .style(theme::input)
+                .width(Fill),
+            text_input("Address — mc.example.com or 192.168.1.9:25577", &form.address)
+                .on_input(Message::ServerFormAddressChanged)
+                .on_submit_maybe(ready.then_some(Message::SubmitServerForm))
+                .padding(9)
+                .style(theme::input)
+                .width(Fill),
+        ]
+        .spacing(10),
+    ]
+    .spacing(10);
+
+    // Minecraft writes the whole list back when it closes the multiplayer
+    // screen, so anything added now would vanish on exit. Said out loud rather
+    // than left as a mysteriously dead button.
+    if running {
+        body = body.push(
+            text("Close the game first — Minecraft overwrites its server list on exit.")
+                .size(11)
+                .color(theme::DANGER),
+        );
+    }
+
+    let mut actions = row![Space::new().width(Fill)].spacing(10);
+    // An edit is rendered in place of its row, so without its own way out
+    // there would be nothing on screen to dismiss it.
+    if editing {
+        actions = actions.push(
+            button(text("Cancel").size(13))
+                .padding([7, 16])
+                .style(theme::ghost_button)
+                .on_press(Message::CloseServerForm),
+        );
+    }
+    body = body.push(
+        actions.push(
+            button(text(if editing { "Save" } else { "Add" }).size(13))
+                .padding([7, 16])
+                .style(theme::primary_button)
+                .on_press_maybe(ready.then_some(Message::SubmitServerForm)),
+        ),
+    );
+
+    container(body)
+        .padding(14)
+        .width(Fill)
+        .style(theme::card)
+        .into()
+}
+
+/// One entry from the multiplayer list, filled in by a live ping.
+fn server_row<'a>(app: &'a App, server: &'a browse::Server) -> Element<'a, Message> {
+    // The icon a server publishes is 64×64, so this is a downscale rather than
+    // the blur an upscale would give.
+    let icon: Element<'a, Message> = match app.server_icons.get(&server.address) {
+        Some(handle) => image(handle.clone()).width(48).height(48).into(),
+        None => container(Space::new().width(48).height(48))
+            .style(theme::well)
+            .into(),
+    };
+
+    // Three states, and they have to stay distinguishable: still waiting, up,
+    // or unreachable. Collapsing "waiting" into "down" would report every
+    // server as offline for the first few seconds the tab is open.
+    let detail: Element<'a, Message> = match app.server_status.get(&server.address) {
+        None => text("Pinging…").size(11).color(theme::MUTED).into(),
+        Some(Err(err)) => row![
+            text("Unreachable").size(11).color(theme::DANGER),
+            text(err.as_str()).size(11).color(theme::MUTED),
+        ]
+        .spacing(8)
+        .into(),
+        Some(Ok(status)) => column![
+            text(status.motd.as_str()).size(12).color(theme::TEXT),
+            row![
+                text(format!(
+                    "{}/{} online",
+                    status.players_online, status.players_max
+                ))
+                .size(11)
+                .color(theme::MINT),
+                text(status.version.as_str()).size(11).color(theme::MUTED),
+                text(format!("{} ms", status.latency_ms))
+                    .size(11)
+                    .color(theme::MUTED),
+            ]
+            .spacing(10),
+        ]
+        .spacing(3)
+        .into(),
+    };
+
+    container(
+        row![
+            icon,
+            column![
+                row![
+                    text(server.name.as_str()).size(15).color(theme::TEXT),
+                    text(server.address.as_str()).size(11).color(theme::MUTED),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+                detail,
+            ]
+            .spacing(4)
+            .width(Fill),
+            // Addressed by index rather than by name: two servers may share
+            // both a name and an address, so position is the only identity
+            // an edit can safely act on.
+            button(text("✎").size(14))
+                .padding([6, 11])
+                .style(theme::ghost_button)
+                .on_press(Message::OpenServerForm(Some(server.index))),
+        ]
+        .spacing(14)
+        .align_y(iced::Center),
+    )
+    .padding(14)
+    .width(Fill)
+    .style(theme::card)
+    .into()
+}
+
+fn world_row<'a>(
+    app: &'a App,
+    instance: &'a Instance,
+    world: &'a browse::World,
+) -> Element<'a, Message> {
+    // Minecraft's own world icon, straight off disk — iced loads it lazily and
+    // caches it, so there is no reason to route it through app state the way
+    // the network-fetched project icons are.
+    let icon: Element<'a, Message> = match &world.icon {
+        Some(path) => image(path).width(56).height(56).into(),
+        None => container(Space::new().width(56).height(56))
+            .style(theme::well)
+            .into(),
+    };
+
+    let mut tags = row![].spacing(10).align_y(iced::Center);
+    if world.hardcore {
+        tags = tags.push(text("Hardcore").size(11).color(theme::DANGER));
+    }
+    if let Some(mode) = world.mode {
+        tags = tags.push(text(mode).size(11).color(theme::MUTED));
+    }
+    if let Some(version) = &world.game_version {
+        // The version that last *wrote* the world, which is not always the
+        // instance's — opening a world in an older Minecraft is how they get
+        // broken, so the mismatch is worth colouring.
+        let matches_instance = *version == instance.game_version;
+        tags = tags.push(text(version.as_str()).size(11).color(if matches_instance {
+            theme::MUTED
+        } else {
+            theme::MAGENTA
+        }));
+    }
+    tags = tags.push(text(human_bytes(world.size)).size(11).color(theme::MUTED));
+    tags = tags.push(
+        text(
+            world
+                .last_played
+                .map(|when| format!("played {}", ago(when)))
+                .unwrap_or_else(|| "never played".to_string()),
+        )
+        .size(11)
+        .color(theme::MUTED),
+    );
+
+    let mut details = column![text(world.name.as_str()).size(15).color(theme::TEXT)]
+        .spacing(4)
+        .width(Fill);
+
+    // Only when it says something the name doesn't. Minecraft names the folder
+    // after the world, so for most worlds these two lines are identical and
+    // the second is pure noise; it earns its place exactly when a world has
+    // been renamed and the folder no longer matches.
+    if world.folder != world.name {
+        details = details.push(text(world.folder.as_str()).size(11).color(theme::MUTED));
+    }
+    details = details.push(tags);
+
+    // Two steps, like the saved-skin grid: this is the only control in the
+    // launcher that can destroy a world, and the folder is gone for good.
+    let actions: Element<'a, Message> = if app.confirm_delete_world.as_deref() == Some(&world.folder)
+    {
+        row![
+            text("Delete for good?").size(12).color(theme::DANGER),
+            button(text("Cancel").size(12))
+                .padding([6, 12])
+                .style(theme::ghost_button)
+                .on_press(Message::AskDeleteWorld(None)),
+            button(text("Delete").size(12))
+                .padding([6, 12])
+                .style(theme::danger_button)
+                .on_press(Message::DeleteWorld(world.folder.clone())),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        row![
+            button(text("Open folder").size(12))
+                .padding([6, 12])
+                .style(theme::ghost_button)
+                .on_press(Message::OpenPath(world.path.clone())),
+            button(text("Delete").size(12))
+                .padding([6, 12])
+                .style(theme::ghost_button)
+                .on_press(Message::AskDeleteWorld(Some(world.folder.clone()))),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    };
+
+    container(
+        row![icon, details, actions]
+            .spacing(14)
+            .align_y(iced::Center),
+    )
+    .padding(14)
+    .width(Fill)
+    .style(theme::card)
+    .into()
+}
+
+// ---------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------
+
+/// `logs/` and `crash-reports/`, with the selected file's tail beside them.
+fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let running = app.running.contains(&instance.id);
+    let mut list = column![].spacing(2).width(Fill);
+
+    if app.logs.is_empty() {
+        list = list.push(
+            text("No logs yet — they appear after the first launch.")
+                .size(12)
+                .color(theme::MUTED),
+        );
+    }
+
+    for log in &app.logs {
+        let selected = app.selected_log.as_deref() == Some(&log.name);
+
+        let mut title = row![text(log.name.as_str()).size(12).color(if log.crash {
+            // The file someone came to this tab to find.
+            theme::DANGER
+        } else {
+            theme::TEXT
+        })]
+        .spacing(6)
+        .align_y(iced::Center);
+
+        // The same dot as the viewer's, so the file that is being written is
+        // recognisable in the list without selecting it first.
+        if is_live_file(log) {
+            title = title.push(pulse::view(if running {
+                pulse::Pulse::live(app.clock)
+            } else {
+                pulse::Pulse::idle()
+            }));
+        }
+
+        list = list.push(
+            button(
+                column![
+                    title,
+                    text(format!(
+                        "{}{}",
+                        human_bytes(log.size),
+                        log.modified.map(|w| format!(" · {}", ago(w))).unwrap_or_default()
+                    ))
+                    .size(10)
+                    .color(theme::MUTED),
+                ]
+                .spacing(2)
+                .width(Fill),
+            )
+            .padding([7, 10])
+            .width(Fill)
+            .style(theme::row_button(selected))
+            .on_press(Message::SelectLog(log.name.clone())),
+        );
+    }
+
+    let selected = app
+        .selected_log
+        .as_ref()
+        .and_then(|name| app.logs.iter().find(|l| &l.name == name));
+
+    let viewer: Element<'_, Message> = match (selected, &app.log_text) {
+        (Some(log), Some((body, truncated))) => {
+            let live = running && is_live_file(log);
+
+            let mut head = row![text(log.name.as_str()).size(14).color(theme::TEXT)]
+                .spacing(8)
+                .align_y(iced::Center);
+
+            // `latest.log` is the session's own log, so it gets the indicator
+            // either way: pulsing while the game writes to it, dimmed once it
+            // stops. Two states rather than one, because a dot that simply
+            // disappears reads as a bug in the dot.
+            if is_live_file(log) {
+                head = head.push(pulse::view(if live {
+                    pulse::Pulse::live(app.clock)
+                } else {
+                    pulse::Pulse::idle()
+                }));
+                head = head.push(
+                    text(if live { "Live" } else { "Last session" })
+                        .size(11)
+                        .color(pulse::label_color(live)),
+                );
+            }
+
+            head = head.push(Space::new().width(Fill));
+
+            // Saying so matters: without it the first visible line looks like
+            // the start of the session, and someone would go looking for a
+            // startup error that is simply off the top.
+            if *truncated {
+                head = head.push(text("showing the end only").size(11).color(theme::MUTED));
+            }
+
+            head = head.push(
+                button(text("Open file").size(12))
+                    .padding([6, 12])
+                    .style(theme::ghost_button)
+                    .on_press(Message::OpenPath(log.path.clone())),
+            );
+
+            column![
+                head,
+                container(
+                    scrollable(
+                        container(
+                            text(body.as_str())
+                                .size(11)
+                                .font(Font::MONOSPACE)
+                                .color(theme::TEXT)
+                        )
+                        .padding(12)
+                    )
+                    // Measured from the bottom, so a log that grows under the
+                    // viewer keeps its newest line in view instead of pushing
+                    // it off the end and making the reader chase it.
+                    .anchor_bottom()
+                    .height(Fill)
+                    .width(Fill)
+                )
+                .style(theme::well)
+                .height(Fill),
+            ]
+            .spacing(10)
+            .height(Fill)
+            .into()
+        }
+        (Some(_), None) => centered_note("Reading…"),
+        (None, _) if app.logs.is_empty() => centered_note("Nothing to show."),
+        (None, _) => centered_note("Pick a log to read it."),
+    };
+
+    row![
+        container(scrollable(list).height(Fill))
+            .width(250)
+            .height(Fill),
+        container(viewer).width(Fill).height(Fill),
+    ]
+    .spacing(14)
+    .height(Fill)
+    .into()
+}
+
+/// Whether this is the log the game writes into as it runs.
+///
+/// Minecraft's own naming, not a guess: `latest.log` is the open handle and
+/// everything else in `logs/` has been rotated out and closed. Kept in one
+/// place because the tab bar, the file list and the viewer all have to agree
+/// on which row gets the indicator.
+pub fn is_live_file(log: &browse::LogFile) -> bool {
+    !log.crash && log.name == "latest.log"
+}
+
+fn centered_note(message: &str) -> Element<'_, Message> {
+    container(text(message.to_string()).size(12).color(theme::MUTED))
+        .width(Fill)
+        .height(Fill)
+        .align_x(iced::Center)
+        .align_y(iced::Center)
+        .style(theme::well)
+        .into()
+}
+
+/// Coarse relative time, for rows where the exact second never matters.
+///
+/// Clamped at zero rather than going negative: a file's mtime can sit slightly
+/// in the future after a clock correction or on a network share, and "in 3
+/// seconds" would be a strange thing for a log to say.
+fn ago(when: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(when);
+    let seconds = now.saturating_sub(when);
+
+    match seconds {
+        s if s < 60 => "just now".to_string(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 86_400 * 30 => format!("{}d ago", s / 86_400),
+        s => format!("{}mo ago", s / (86_400 * 30)),
+    }
+}
+
 /// A project's icon, or reserved space while it loads. Keeping the space
 /// stops rows from reflowing as icons arrive one by one.
 fn icon_or_placeholder<'a>(app: &'a App, project: &str, size: f32) -> Element<'a, Message> {
@@ -666,9 +1463,10 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
     .text_size(12)
     .width(260);
 
+    let label_width = 42;
     let mut rows = column![
         row![
-            text("Java").size(12).color(theme::MUTED).width(140),
+            text("Java").size(12).color(theme::MUTED).width(label_width),
             picker,
             button(text("Browse…").size(12))
                 .padding([5, 9])
@@ -678,14 +1476,15 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
         .spacing(10)
         .align_y(iced::Center)
     ]
-    .spacing(4);
+    .spacing(4)
+    .width(Fill);
 
     // The exact path matters when two entries read alike, and it is the only
     // way to see what Automatic actually resolved to.
     if let Some(path) = &instance.java_path {
         rows = rows.push(
             row![
-                Space::new().width(140),
+                Space::new().width(label_width),
                 text(path.display().to_string()).size(11).color(theme::MUTED),
             ]
             .spacing(10),
@@ -695,77 +1494,84 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
     rows.into()
 }
 
-fn details_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let field = |label: &'static str, value: String| {
-        row![
-            text(label).size(12).color(theme::MUTED).width(140),
-            text(value).size(12).color(theme::TEXT),
+/// The facts about the instance, and the actions that apply to all of it.
+///
+/// Laid out across rather than down: this sits above the tabs now, so every
+/// row it takes is a row the tab below loses. The old stacked-label form cost
+/// five, this costs two.
+fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Element<'a, Message> {
+    let fact = |label: &'static str, value: String| {
+        column![
+            text(label).size(10).color(theme::MUTED),
+            text(value).size(13).color(theme::TEXT),
         ]
-        .spacing(10)
+        .spacing(2)
     };
+
+    let facts = row![
+        fact("Minecraft", instance.game_version.clone()),
+        fact(
+            "Loader",
+            match &instance.loader_version {
+                Some(version) => format!("{} {version}", instance.loader),
+                None => instance.loader.to_string(),
+            }
+        ),
+        fact(
+            "Memory",
+            instance
+                .memory_mb
+                .map(|mb| format!("{mb} MiB"))
+                .unwrap_or_else(|| "Default".to_string()),
+        ),
+        fact("Folder", instance.id.clone()),
+        fact(
+            "Content",
+            match instance.mods.len() {
+                1 => "1 item".to_string(),
+                n => format!("{n} items"),
+            }
+        ),
+    ]
+    .spacing(28);
 
     container(
         column![
-            text("Details").size(16).color(theme::TEXT),
-            Space::new().height(4),
-            field("Folder", instance.id.clone()),
-            field("Minecraft", instance.game_version.clone()),
-            field("Loader", instance.loader.to_string()),
-            field(
-                "Memory",
-                instance
-                    .memory_mb
-                    .map(|mb| format!("{mb} MiB"))
-                    .unwrap_or_else(|| "Default".to_string()),
-            ),
-            java_field(app, instance),
-            Space::new().height(6),
+            facts,
             row![
-                button(text("Open folder").size(13))
-                    .padding([7, 13])
-                    .style(theme::ghost_button)
-                    .on_press(Message::OpenFolder(instance.id.clone())),
-                button(text("Export .mrpack").size(13))
-                    .padding([7, 13])
-                    .style(theme::ghost_button)
-                    .on_press_maybe(
-                        (!app.is_busy()).then(|| Message::ExportPack(instance.id.clone()))
-                    ),
+                java_field(app, instance),
+                row![
+                    button(text("Open folder").size(13))
+                        .padding([7, 13])
+                        .style(theme::ghost_button)
+                        .on_press(Message::OpenFolder(instance.id.clone())),
+                    button(text("Export .mrpack").size(13))
+                        .padding([7, 13])
+                        .style(theme::ghost_button)
+                        .on_press_maybe(
+                            (!app.is_busy()).then(|| Message::ExportPack(instance.id.clone()))
+                        ),
+                    // Rehomed here when the tabs took over the card stack the
+                    // danger card used to sit in. It belongs with the other
+                    // whole-instance actions anyway — the tabs are all about
+                    // what is *inside* the instance.
+                    button(text("Delete").size(13))
+                        .padding([7, 13])
+                        .style(theme::danger_button)
+                        // Deleting the folder out from under a running game
+                        // would leave it writing into nothing.
+                        .on_press_maybe(
+                            (!running).then(|| Message::DeleteInstance(instance.id.clone()))
+                        ),
+                ]
+                .spacing(10),
             ]
-            .spacing(10),
+            .spacing(16)
+            .align_y(iced::Center),
         ]
-        .spacing(8),
+        .spacing(14),
     )
-    .padding(18)
-    .width(Fill)
-    .style(theme::card)
-    .into()
-}
-
-fn danger_card(instance: &Instance, running: bool) -> Element<'_, Message> {
-    container(
-        row![
-            column![
-                text("Delete instance").size(14).color(theme::TEXT),
-                text("Removes the folder and everything in it, saves included.")
-                    .size(12)
-                    .color(theme::MUTED),
-            ]
-            .spacing(3)
-            .width(Fill),
-            button(text("Delete").size(13))
-                .padding([7, 14])
-                .style(theme::danger_button)
-                // Deleting the folder out from under a running game would
-                // leave it writing into nothing.
-                .on_press_maybe(
-                    (!running).then(|| Message::DeleteInstance(instance.id.clone()))
-                ),
-        ]
-        .spacing(12)
-        .align_y(iced::Center),
-    )
-    .padding(18)
+    .padding(16)
     .width(Fill)
     .style(theme::card)
     .into()

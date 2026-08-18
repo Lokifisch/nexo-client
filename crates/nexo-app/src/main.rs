@@ -8,6 +8,7 @@
 //! pure state transition, which is what keeps the window responsive while a
 //! ~1,000-file install runs underneath it.
 
+mod pulse;
 mod screens;
 mod skin3d;
 mod theme;
@@ -23,6 +24,14 @@ use std::sync::Arc;
 /// Minecraft version new instances default to — the single version `Mod/`
 /// targets for v1.
 const DEFAULT_GAME_VERSION: &str = "26.1.2";
+
+/// Where `App::clock` wraps, in seconds.
+///
+/// A whole multiple of every animation period built on it — the accent's
+/// [`theme::RAINBOW_PERIOD`] (12s) and the live pulse's 2.4s ring — so both
+/// pass through the wrap without a jump. Adding a third animation means
+/// checking its period divides this, or raising this to suit.
+const CLOCK_WRAP: f32 = theme::RAINBOW_PERIOD;
 
 /// Desktop identity. Must stay in sync with `assets/nexo.desktop`'s filename
 /// and its `StartupWMClass` key.
@@ -60,7 +69,11 @@ fn main() -> iced::Result {
         // breaks the higher-ranked lifetime resolution for `view` across the
         // whole builder chain, with an error that points at the chain rather
         // than at this line.
-        .theme(|_state: &App| theme::nexo())
+        // The accent colour is a function of the clock, so the whole app
+        // drifts through the spectrum from this one line. See `theme::nexo`.
+        .theme(|state: &App| theme::nexo(state.clock))
+        // Stops entirely when the window loses focus — see `App::subscription`.
+        .subscription(App::subscription)
         // Sets the Wayland `app_id` / X11 `WM_CLASS`. It has to match the
         // basename of the installed `nexo.desktop`, or desktop environments
         // can't tie the running window back to its launcher entry and show a
@@ -105,6 +118,22 @@ impl Screen {
         }
     }
 }
+
+/// The open server form: which entry it edits, and what has been typed.
+#[derive(Debug, Clone, Default)]
+pub struct ServerForm {
+    /// Position in `servers.dat`, or `None` for a server being added.
+    pub editing: Option<usize>,
+    pub name: String,
+    pub address: String,
+}
+
+/// What a server answered, minus the icon.
+///
+/// The favicon is stripped out on the way in and turned into an
+/// `image::Handle` immediately, so the megabyte-scale PNG bytes are not held
+/// twice — once here and once in the widget — for every server in the list.
+pub type ServerStatus = nexo_core::server_ping::Status;
 
 /// Transient feedback shown in the header strip.
 #[derive(Debug, Clone, Default)]
@@ -187,6 +216,56 @@ pub struct App {
     /// Cleared when another instance is opened — it's a choice about that
     /// instance, not a global preference.
     nexo_edition: Option<nexo_core::nexo_mod::Edition>,
+
+    /// Which of the instance screen's four tabs is open. Reset to Content
+    /// when an instance is opened — it is a view onto that instance, not a
+    /// preference that should follow the user between them.
+    tab: screens::instance::Tab,
+    /// Tabs that have read their directory at least once for the open
+    /// instance. Without it a count badge cannot tell "none" from "haven't
+    /// looked", and would show a confident 0 for both.
+    tabs_loaded: std::collections::HashSet<screens::instance::Tab>,
+    /// The app's animation clock, in seconds. Drives both the drifting accent
+    /// colour and the live-log pulse — one clock rather than two, so the two
+    /// animations can never disagree about what time it is.
+    ///
+    /// Wrapped at [`CLOCK_WRAP`], which is a whole multiple of both periods,
+    /// so neither animation jumps when it comes round.
+    clock: f32,
+    /// Whether the window has focus. The clock stops when it doesn't.
+    focused: bool,
+
+    // Files tab.
+    files: Vec<nexo_core::browse::Entry>,
+    /// Where the browser is, relative to the instance root. Empty is the
+    /// instance itself. Kept relative rather than absolute so the path that
+    /// reaches `browse::list_dir` is always one it can bounds-check.
+    files_at: std::path::PathBuf,
+    files_error: Option<String>,
+
+    // Worlds tab — singleplayer worlds and the multiplayer server list.
+    worlds: Vec<nexo_core::browse::World>,
+    /// Which world is one click away from being deleted, if any. Same
+    /// two-step as the saved-skin grid, for the same reason.
+    confirm_delete_world: Option<String>,
+    servers: Vec<nexo_core::browse::Server>,
+    /// Ping results, keyed by address. Absent means the ping is still out —
+    /// the row shows that rather than pretending the server is down.
+    server_status: std::collections::HashMap<String, Result<ServerStatus, String>>,
+    /// Server icons, keyed by address. Sourced from the live ping when it
+    /// answers and from `servers.dat`'s cached copy until then.
+    server_icons: std::collections::HashMap<String, image::Handle>,
+    /// The server form, when one is open. Adding and editing share it, which
+    /// makes "only one open at a time" structural rather than a rule three
+    /// separate flags would have to keep agreeing on.
+    server_form: Option<ServerForm>,
+
+    // Logs tab.
+    logs: Vec<nexo_core::browse::LogFile>,
+    selected_log: Option<String>,
+    /// The tail of the selected log, and whether it was cut short. `None`
+    /// while it is being read.
+    log_text: Option<(String, bool)>,
 
     // Content, on the instance details screen.
     /// Filters the *installed* list. Modrinth has its own separate query.
@@ -282,6 +361,58 @@ pub enum Message {
     },
     RemoveNexoMod(String),
     NexoModDone(Result<(), String>),
+
+    // Instance tabs
+    SelectTab(screens::instance::Tab),
+    /// Navigates the file browser. The path is relative to the instance root.
+    BrowseFiles(std::path::PathBuf),
+    FilesLoaded(Result<Vec<nexo_core::browse::Entry>, String>),
+    /// Hands a file or folder to whatever the desktop opens it with.
+    OpenPath(std::path::PathBuf),
+    LoadWorlds,
+    WorldsLoaded(Vec<nexo_core::browse::World>),
+    /// `None` backs out of the confirmation.
+    AskDeleteWorld(Option<String>),
+    DeleteWorld(String),
+
+    // Servers, on the same tab as worlds
+    LoadServers,
+    ServersLoaded(Vec<nexo_core::browse::Server>),
+    /// One server answered, or didn't. Carries the address rather than an
+    /// index: the list can be reloaded while pings are still out, and an index
+    /// would then land on a different server.
+    ServerPinged {
+        address: String,
+        result: Result<ServerStatus, String>,
+    },
+    ServerIconLoaded {
+        address: String,
+        handle: image::Handle,
+    },
+    /// Opens the server form. `Some(index)` edits that entry, `None` adds a
+    /// new one; the index is the position in `servers.dat` — see
+    /// `browse::Server::index` for why nothing else can identify an entry.
+    OpenServerForm(Option<usize>),
+    CloseServerForm,
+    ServerFormNameChanged(String),
+    ServerFormAddressChanged(String),
+    SubmitServerForm,
+    /// Forgets every ping result so the list asks again.
+    RepingServers,
+    LoadLogs,
+    LogsLoaded(Vec<nexo_core::browse::LogFile>),
+    SelectLog(String),
+    LogLoaded(Result<(String, bool), String>),
+    /// Advances the animation clock. Carries the elapsed seconds rather than a
+    /// frame count so the animations run at the same speed whatever the tick
+    /// interval turns out to be on a loaded machine.
+    Tick(f32),
+    WindowFocused(bool),
+    /// Re-reads the log being followed. Separate from [`Message::SelectLog`]
+    /// because it must not clear the text first — blanking the viewer once a
+    /// second is not "live", it is a strobe.
+    FollowLog,
+    LogFollowed(Result<(String, bool), String>),
 
     // Content
     ContentQueryChanged(String),
@@ -384,6 +515,22 @@ impl App {
             update_checked: false,
             update_installed: false,
             nexo_edition: None,
+            tab: screens::instance::Tab::Content,
+            tabs_loaded: std::collections::HashSet::new(),
+            clock: 0.0,
+            focused: true,
+            files: Vec::new(),
+            files_at: std::path::PathBuf::new(),
+            files_error: None,
+            worlds: Vec::new(),
+            confirm_delete_world: None,
+            servers: Vec::new(),
+            server_status: std::collections::HashMap::new(),
+            server_icons: std::collections::HashMap::new(),
+            server_form: None,
+            logs: Vec::new(),
+            selected_log: None,
+            log_text: None,
             content_query: String::new(),
             content_kind: ProjectKind::Mod,
             browsing: false,
@@ -617,14 +764,16 @@ impl App {
             Message::OpenInstance(id) => {
                 let icons = Task::done(Message::LoadJarIcons(id.clone()));
                 self.screen = Screen::Instance(id);
-                // The details screen shows injector state, so look up what's
-                // published the first time one is opened.
-                self.browsing = false;
-                self.content_query.clear();
                 // The edition picker starts from this instance's own state,
                 // not from what was chosen on the last one.
                 self.nexo_edition = None;
+                // Every tab shows one instance's directory. Carrying any of it
+                // across would show the last instance's worlds under this
+                // one's name until the reload landed.
+                self.reset_tabs();
                 let mut tasks = vec![icons, Task::done(Message::LoadJavaOptions)];
+                // The details screen shows injector state, so look up what's
+                // published the first time one is opened.
                 if self.nexo_release.is_none() {
                     tasks.push(Task::done(Message::FetchNexoRelease));
                 }
@@ -897,6 +1046,388 @@ impl App {
                 self.status = Status::Error(err);
                 Task::none()
             }
+
+            Message::SelectTab(tab) => {
+                self.tab = tab;
+                // Re-read on every visit rather than caching. The game writes
+                // into this directory while it runs, so a cached listing is
+                // stale the moment it matters — and a directory read is
+                // cheap next to being wrong about what is on disk.
+                match tab {
+                    screens::instance::Tab::Content => Task::none(),
+                    screens::instance::Tab::Files => {
+                        Task::done(Message::BrowseFiles(self.files_at.clone()))
+                    }
+                    // One tab, two lists: the worlds on disk and the servers
+                    // in the multiplayer list.
+                    screens::instance::Tab::Worlds => Task::batch([
+                        Task::done(Message::LoadWorlds),
+                        Task::done(Message::LoadServers),
+                    ]),
+                    screens::instance::Tab::Logs => Task::done(Message::LoadLogs),
+                }
+            }
+
+            Message::BrowseFiles(rel) => {
+                let Some(dir) = self.open_instance_dir() else {
+                    return Task::none();
+                };
+                // Moved before the read lands, so the breadcrumb follows the
+                // click immediately instead of after the directory answers.
+                self.files_at = rel.clone();
+                self.files_error = None;
+                Task::perform(
+                    async move {
+                        nexo_core::browse::list_dir(&dir, &rel)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::FilesLoaded,
+                )
+            }
+
+            Message::FilesLoaded(Ok(entries)) => {
+                self.files = entries;
+                self.files_error = None;
+                self.tabs_loaded.insert(screens::instance::Tab::Files);
+                Task::none()
+            }
+            Message::FilesLoaded(Err(err)) => {
+                // Shown in the tab rather than the header banner: it is about
+                // this one folder, not about the app.
+                self.files.clear();
+                self.files_error = Some(err);
+                self.tabs_loaded.remove(&screens::instance::Tab::Files);
+                Task::none()
+            }
+
+            Message::OpenPath(path) => {
+                if let Err(err) = open::that_detached(&path) {
+                    self.status = Status::Error(format!("Couldn't open that: {err}"));
+                }
+                Task::none()
+            }
+
+            Message::LoadWorlds => {
+                let Some(dir) = self.open_instance_dir() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { nexo_core::browse::worlds(&dir).await },
+                    Message::WorldsLoaded,
+                )
+            }
+            Message::WorldsLoaded(worlds) => {
+                // A world that was deleted while the listing was in flight
+                // must not leave the confirmation armed against a name that
+                // no longer exists.
+                if let Some(pending) = &self.confirm_delete_world
+                    && !worlds.iter().any(|w| &w.folder == pending)
+                {
+                    self.confirm_delete_world = None;
+                }
+                self.worlds = worlds;
+                self.tabs_loaded.insert(screens::instance::Tab::Worlds);
+                Task::none()
+            }
+
+            Message::AskDeleteWorld(folder) => {
+                self.confirm_delete_world = folder;
+                Task::none()
+            }
+            Message::DeleteWorld(folder) => {
+                let Some(dir) = self.open_instance_dir() else {
+                    return Task::none();
+                };
+                self.confirm_delete_world = None;
+                Task::perform(
+                    async move {
+                        nexo_core::browse::delete_world(&dir, &folder)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    // Reuses the generic "an action finished" handler, which
+                    // reports the error and reloads. The reload re-reads the
+                    // instance list; the worlds themselves come from the
+                    // follow-up below.
+                    |result| match result {
+                        Ok(()) => Message::LoadWorlds,
+                        Err(err) => Message::InstanceSaved(Err(err)),
+                    },
+                )
+            }
+
+            Message::LoadServers => {
+                let Some(dir) = self.open_instance_dir() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { nexo_core::browse::servers(&dir).await },
+                    Message::ServersLoaded,
+                )
+            }
+
+            Message::ServersLoaded(servers) => {
+                let mut tasks = Vec::new();
+
+                for server in &servers {
+                    // The icon the game cached, shown until — or instead of —
+                    // a live one. A server that is down still gets its face.
+                    if let Some(icon) = &server.icon
+                        && !self.server_icons.contains_key(&server.address)
+                    {
+                        self.server_icons.insert(
+                            server.address.clone(),
+                            image::Handle::from_bytes(icon.clone()),
+                        );
+                    }
+
+                    // Re-pinging every server on every visit to the tab would
+                    // be a burst of connections to other people's machines
+                    // each time someone clicks between tabs. One ping per
+                    // server per open instance is enough to fill the list.
+                    if !self.server_status.contains_key(&server.address) {
+                        let address = server.address.clone();
+                        tasks.push(Task::perform(
+                            async move {
+                                let result = nexo_core::server_ping::ping(&address)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                                (address, result)
+                            },
+                            |(address, result)| Message::ServerPinged { address, result },
+                        ));
+                    }
+                }
+
+                self.servers = servers;
+                self.tabs_loaded.insert(screens::instance::Tab::Worlds);
+                Task::batch(tasks)
+            }
+
+            Message::ServerPinged { address, mut result } => {
+                // Decoded off the UI thread and handed over as a handle. The
+                // favicon is taken out of the status either way, so the stored
+                // copy never carries the PNG bytes around with it.
+                let favicon = match &mut result {
+                    Ok(status) => status.favicon.take(),
+                    Err(_) => None,
+                };
+                self.server_status.insert(address.clone(), result);
+
+                match favicon {
+                    Some(bytes) => Task::done(Message::ServerIconLoaded {
+                        address,
+                        handle: image::Handle::from_bytes(bytes),
+                    }),
+                    None => Task::none(),
+                }
+            }
+
+            Message::ServerIconLoaded { address, handle } => {
+                self.server_icons.insert(address, handle);
+                Task::none()
+            }
+
+            Message::OpenServerForm(editing) => {
+                // Editing starts from what is already there, so a rename does
+                // not mean retyping the address — and an empty address field
+                // would disable the very button that saves it.
+                let existing = editing
+                    .and_then(|index| self.servers.iter().find(|s| s.index == index));
+
+                self.server_form = Some(ServerForm {
+                    editing,
+                    name: existing.map(|s| s.name.clone()).unwrap_or_default(),
+                    address: existing.map(|s| s.address.clone()).unwrap_or_default(),
+                });
+                Task::none()
+            }
+            Message::CloseServerForm => {
+                self.server_form = None;
+                Task::none()
+            }
+            Message::ServerFormNameChanged(name) => {
+                if let Some(form) = &mut self.server_form {
+                    form.name = name;
+                }
+                Task::none()
+            }
+            Message::ServerFormAddressChanged(address) => {
+                if let Some(form) = &mut self.server_form {
+                    form.address = address;
+                }
+                Task::none()
+            }
+
+            Message::RepingServers => {
+                // Only the results are dropped; the icons stay, so the list
+                // keeps its faces while it re-pings instead of flashing empty.
+                self.server_status.clear();
+                Task::done(Message::LoadServers)
+            }
+
+            Message::SubmitServerForm => {
+                let Some(dir) = self.open_instance_dir() else {
+                    return Task::none();
+                };
+                let Screen::Instance(id) = &self.screen else {
+                    return Task::none();
+                };
+                let Some(form) = self.server_form.take() else {
+                    return Task::none();
+                };
+
+                // Minecraft rewrites the whole of servers.dat when it closes
+                // the multiplayer screen, so anything written underneath a
+                // running game is discarded without a word. Refusing is the
+                // only honest answer; the button is disabled too, and this is
+                // the backstop for the race between the two.
+                if self.running.contains(id) {
+                    self.status = Status::Error(
+                        "Close the game first — Minecraft overwrites its server list on exit."
+                            .into(),
+                    );
+                    return Task::none();
+                }
+
+                // The address may have changed, so the old ping result no
+                // longer describes this row. Dropping it puts the row back to
+                // "Pinging…" rather than showing the previous server's MOTD
+                // under the new address.
+                if let Some(index) = form.editing
+                    && let Some(server) = self.servers.iter().find(|s| s.index == index)
+                {
+                    self.server_status.remove(&server.address);
+                    self.server_icons.remove(&server.address);
+                }
+
+                Task::perform(
+                    async move {
+                        match form.editing {
+                            Some(index) => {
+                                nexo_core::browse::update_server(
+                                    &dir,
+                                    index,
+                                    &form.name,
+                                    &form.address,
+                                )
+                                .await
+                            }
+                            None => {
+                                nexo_core::browse::add_server(&dir, &form.name, &form.address).await
+                            }
+                        }
+                        .map_err(|e| e.to_string())
+                    },
+                    |result| match result {
+                        Ok(()) => Message::LoadServers,
+                        Err(err) => Message::InstanceSaved(Err(err)),
+                    },
+                )
+            }
+
+            Message::LoadLogs => {
+                let Some(dir) = self.open_instance_dir() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { nexo_core::browse::logs(&dir).await },
+                    Message::LogsLoaded,
+                )
+            }
+            Message::LogsLoaded(logs) => {
+                // Opening the tab with the newest log already showing saves
+                // the one click that is right nearly every time — that file
+                // is the session someone just came back from.
+                let first = logs.first().map(|l| l.name.clone());
+                let still_there = self
+                    .selected_log
+                    .as_ref()
+                    .filter(|name| logs.iter().any(|l| &&l.name == name))
+                    .cloned();
+                self.logs = logs;
+                self.tabs_loaded.insert(screens::instance::Tab::Logs);
+
+                match still_there.or(first) {
+                    Some(name) if self.selected_log.as_ref() != Some(&name) => {
+                        Task::done(Message::SelectLog(name))
+                    }
+                    Some(_) => Task::none(),
+                    None => {
+                        self.selected_log = None;
+                        self.log_text = None;
+                        Task::none()
+                    }
+                }
+            }
+
+            Message::SelectLog(name) => {
+                let Some(file) = self.logs.iter().find(|l| l.name == name).cloned() else {
+                    return Task::none();
+                };
+                self.selected_log = Some(name);
+                // Cleared so the viewer says "Reading…" instead of leaving the
+                // previous file's text under the new file's name.
+                self.log_text = None;
+                Task::perform(
+                    async move {
+                        nexo_core::browse::read_log(&file)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::LogLoaded,
+                )
+            }
+            Message::LogLoaded(Ok(read)) => {
+                self.log_text = Some(read);
+                Task::none()
+            }
+            Message::LogLoaded(Err(err)) => {
+                self.log_text = Some((err, false));
+                Task::none()
+            }
+
+            Message::Tick(seconds) => {
+                // Wrapped rather than left to grow. An f32 accumulating 30
+                // times a second loses its fractional precision within a day
+                // of uptime, and both animations would start visibly stepping.
+                self.clock = (self.clock + seconds) % CLOCK_WRAP;
+                Task::none()
+            }
+
+            Message::WindowFocused(focused) => {
+                self.focused = focused;
+                Task::none()
+            }
+
+            Message::FollowLog => {
+                let Some(file) = self
+                    .selected_log
+                    .as_ref()
+                    .and_then(|name| self.logs.iter().find(|l| &l.name == name))
+                    .cloned()
+                else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        nexo_core::browse::read_log(&file)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::LogFollowed,
+                )
+            }
+            Message::LogFollowed(Ok(read)) => {
+                // A failed re-read is dropped on purpose: the file is being
+                // written to, so a transient read error is expected, and
+                // replacing a screen of log with an error message every time
+                // one happens would be worse than showing slightly stale text.
+                self.log_text = Some(read);
+                Task::none()
+            }
+            Message::LogFollowed(Err(_)) => Task::none(),
 
             Message::ContentQueryChanged(query) => {
                 // Filters the installed list in `view`; no work to do here.
@@ -1736,6 +2267,15 @@ impl App {
             .into()
     }
 
+    /// The accent as it stands this frame.
+    ///
+    /// Widget *styles* get this from the theme they are handed; this is for
+    /// the handful of places that colour a piece of text directly, where
+    /// there is no style function to read it out of.
+    pub fn accent(&self) -> iced::Color {
+        theme::spectrum(self.clock / theme::RAINBOW_PERIOD)
+    }
+
     /// The account launches will use.
     fn active_account(&self) -> Option<&Account> {
         let uuid = self.active_account.as_deref()?;
@@ -1744,6 +2284,124 @@ impl App {
 
     fn is_busy(&self) -> bool {
         matches!(self.status, Status::Busy(_))
+    }
+
+    /// The instance the details screen is showing, if that is where we are.
+    ///
+    /// The tab messages carry no instance id: they are only reachable from
+    /// this screen, and reading it here means a listing can never be applied
+    /// to an instance other than the visible one — including when a slow
+    /// directory walk lands after the user has already navigated away.
+    fn open_instance_dir(&self) -> Option<std::path::PathBuf> {
+        let Screen::Instance(id) = &self.screen else {
+            return None;
+        };
+        Some(self.core.as_ref()?.paths.instance(id))
+    }
+
+    /// Drops everything the four tabs hold. Called when an instance is opened,
+    /// since all of it describes one instance's directory.
+    fn reset_tabs(&mut self) {
+        self.tab = screens::instance::Tab::Content;
+        self.tabs_loaded.clear();
+        self.browsing = false;
+        self.content_query.clear();
+        self.files.clear();
+        self.files_at = std::path::PathBuf::new();
+        self.files_error = None;
+        self.worlds.clear();
+        self.confirm_delete_world = None;
+        self.servers.clear();
+        // Cleared too, so opening another instance re-pings rather than
+        // showing this instance's results under the other one's addresses.
+        self.server_status.clear();
+        self.server_icons.clear();
+        self.server_form = None;
+        self.logs.clear();
+        self.selected_log = None;
+        self.log_text = None;
+    }
+
+    /// The number beside a tab's label, or `None` when there is nothing
+    /// honest to put there yet.
+    ///
+    /// Content is the exception that is always known: it comes off the
+    /// instance manifest, which is already in memory, where the other three
+    /// have to read a directory first.
+    fn tab_count(&self, tab: screens::instance::Tab, instance: &Instance) -> Option<usize> {
+        use screens::instance::Tab;
+        match tab {
+            Tab::Content => Some(instance.mods.len()),
+            Tab::Files => self.tabs_loaded.contains(&tab).then_some(self.files.len()),
+            // Both lists, since both live behind this one tab.
+            Tab::Worlds => self
+                .tabs_loaded
+                .contains(&tab)
+                .then_some(self.worlds.len() + self.servers.len()),
+            Tab::Logs => self.tabs_loaded.contains(&tab).then_some(self.logs.len()),
+        }
+    }
+
+    /// Whether the log on screen is one the game is writing to right now.
+    ///
+    /// Three things have to hold, and each rules out a way the indicator could
+    /// lie: the Logs tab is what is on screen, the selected file is the open
+    /// handle rather than a rotated archive, and *this* instance's game is the
+    /// one running — another instance being up says nothing about this file.
+    fn following_live_log(&self) -> bool {
+        let Screen::Instance(id) = &self.screen else {
+            return false;
+        };
+        self.tab == screens::instance::Tab::Logs
+            && self.running.contains(id)
+            && self
+                .selected_log
+                .as_ref()
+                .and_then(|name| self.logs.iter().find(|l| &l.name == name))
+                .is_some_and(screens::instance::is_live_file)
+    }
+
+    /// The animation clock, and the live log's re-read.
+    ///
+    /// Gated on focus, which is the whole reason this is a method and not a
+    /// constant. A launcher left open behind a game would otherwise repaint 30
+    /// times a second forever to animate colours nobody is looking at — on a
+    /// laptop that is battery spent on an empty room. Returning an empty
+    /// subscription lets iced park the event loop until something happens.
+    fn subscription(&self) -> iced::Subscription<Message> {
+        const FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+        const REREAD: std::time::Duration = std::time::Duration::from_secs(1);
+
+        // Always listening, even unfocused — this is what turns the rest back
+        // on, so it can never be the thing that got switched off.
+        let focus = iced::event::listen_with(|event, _status, _window| match event {
+            iced::Event::Window(iced::window::Event::Focused) => {
+                Some(Message::WindowFocused(true))
+            }
+            iced::Event::Window(iced::window::Event::Unfocused) => {
+                Some(Message::WindowFocused(false))
+            }
+            _ => None,
+        });
+
+        if !self.focused {
+            return focus;
+        }
+
+        let mut feeds = vec![
+            focus,
+            iced::time::every(FRAME).map(|_| Message::Tick(FRAME.as_secs_f32())),
+        ];
+
+        if self.following_live_log() {
+            // Slower than the animation on purpose. The pulse has to be smooth
+            // to look alive; re-reading 64 KiB off disk at 30 Hz to achieve
+            // that would be absurd, and a second is well inside what reads as
+            // immediate for a log.
+            feeds.push(iced::time::every(REREAD).map(|_| Message::FollowLog));
+        }
+
+        iced::Subscription::batch(feeds)
     }
 }
 

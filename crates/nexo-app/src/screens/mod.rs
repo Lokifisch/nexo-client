@@ -22,7 +22,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
     container(
         column![
             // Wordmark stands in for the logo until the SVG is embedded.
-            text("NEXO").size(26).color(theme::VIOLET),
+            text("NEXO").size(26).color(app.accent()),
             text("native client").size(11).color(theme::MUTED),
             Space::new().height(24),
             nav_entry("Home", Screen::Home),

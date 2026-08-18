@@ -30,6 +30,17 @@ semver = "1"
 # the `zip` dependency above already covers.
 tar = "0.4"
 flate2 = "1"
+# SRV lookups for the server-list ping. Minecraft resolves
+# `_minecraft._tcp.<host>` before falling back to A/AAAA, and most real servers
+# rely on it — `minehut.gg` has no A record at all, and `hypixel.net` points at
+# a web host with 25565 closed. Hand-rolling the query would mean discovering
+# the system nameserver on Windows too, which is the part this earns its place
+# for. `system-config` keeps DNS on the resolver the machine is already using
+# rather than sending the player's server list to a public one.
+hickory-resolver = { version = "0.26.1", default-features = false, features = [
+    "system-config",
+    "tokio",
+] }
 
 [dev-dependencies]
 reqwest.workspace = true
