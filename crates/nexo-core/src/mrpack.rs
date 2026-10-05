@@ -73,6 +73,34 @@ pub struct IndexFile {
     pub file_size: u64,
 }
 
+/// Where a pack may fetch files from. Anything else is skipped: the index is
+/// third-party data and a URL in it is otherwise an open fetch (SSRF, LAN
+/// probing, redirects to attacker hosts).
+const DOWNLOAD_HOSTS: &[&str] = &[
+    "cdn.modrinth.com",
+    "github.com",
+    "raw.githubusercontent.com",
+    "gitlab.com",
+];
+
+/// Top-level instance folders a listed file may be written under. Notably
+/// excludes `nexo-instance.json`, which would let a pack rewrite its own
+/// instance metadata (java path, ids).
+const ALLOWED_DIRS: &[&str] = &[
+    "mods",
+    "resourcepacks",
+    "shaderpacks",
+    "config",
+    "datapacks",
+    "defaultconfigs",
+    "kubejs",
+    "scripts",
+    "global_packs",
+];
+/// Top-level files a listed entry may write.
+const ALLOWED_ROOT_FILES: &[&str] = &["options.txt", "servers.dat"];
+const MAX_PACK_FILE: u64 = 512 * 1024 * 1024;
+
 /// What an import produced, so the UI can say what happened.
 #[derive(Debug, Clone)]
 pub struct Imported {
@@ -115,7 +143,9 @@ impl MrPack {
 
         let game_version = index
             .minecraft_version()
-            .ok_or_else(|| Error::invalid("this pack doesn't say which Minecraft version it needs"))?
+            .ok_or_else(|| {
+                Error::invalid("this pack doesn't say which Minecraft version it needs")
+            })?
             .to_string();
 
         let loader = index.loader().ok_or_else(|| {
@@ -123,6 +153,16 @@ impl MrPack {
                 "this pack needs a mod loader Nexo doesn't support yet — only Fabric works",
             )
         })?;
+
+        if !crate::util::is_safe_version(&game_version)
+            || index
+                .fabric_loader_version()
+                .is_some_and(|v| !crate::util::is_safe_version(v))
+        {
+            return Err(Error::invalid(
+                "this pack has an invalid Minecraft or loader version",
+            ));
+        }
 
         let mut instance = instances.create(&index.name, &game_version, loader).await?;
         instance.loader_version = index.fabric_loader_version().map(str::to_string);
@@ -144,7 +184,9 @@ impl MrPack {
                     if let Some(parent) = destination.parent() {
                         tokio::fs::create_dir_all(parent).await.ctx(parent)?;
                     }
-                    tokio::fs::write(&destination, &bytes).await.ctx(&destination)?;
+                    tokio::fs::write(&destination, &bytes)
+                        .await
+                        .ctx(&destination)?;
                     installed += 1;
 
                     instance.mods.push(InstalledMod {
@@ -169,9 +211,11 @@ impl MrPack {
         // file happened to write.
         let pack = pack.to_path_buf();
         let root_for_overrides = root.clone();
-        tokio::task::spawn_blocking(move || extract_overrides(&pack, &root_for_overrides))
-            .await
-            .map_err(|err| Error::invalid(format!("could not unpack overrides: {err}")))??;
+        let refused =
+            tokio::task::spawn_blocking(move || extract_overrides(&pack, &root_for_overrides))
+                .await
+                .map_err(|err| Error::invalid(format!("could not unpack overrides: {err}")))??;
+        skipped.extend(refused);
 
         instances.save(&instance).await?;
 
@@ -186,29 +230,44 @@ impl MrPack {
     async fn fetch_file(&self, file: &IndexFile) -> Result<Vec<u8>> {
         let url = file
             .downloads
-            .first()
-            .ok_or_else(|| Error::invalid("a pack entry lists no download"))?;
-
-        let bytes = self
-            .http
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-
-        if let Some(expected) = file.hashes.get("sha1") {
-            let actual = crate::util::sha1_hex(&bytes);
-            if &actual != expected {
-                return Err(Error::invalid(format!(
-                    "{} failed its checksum",
+            .iter()
+            .find(|u| crate::util::https_host_allowed(u, DOWNLOAD_HOSTS))
+            .ok_or_else(|| {
+                Error::invalid(format!(
+                    "{} has no download from an allowed host",
                     file.path
-                )));
-            }
+                ))
+            })?;
+        // Unverified bytes into mods/ are code execution, so a hash is required.
+        if !file.hashes.contains_key("sha512") && !file.hashes.contains_key("sha1") {
+            return Err(Error::invalid(format!(
+                "{} lists no sha1/sha512 hash",
+                file.path
+            )));
         }
 
-        Ok(bytes.to_vec())
+        let cap = if file.file_size > 0 {
+            (file.file_size + (1 << 20)).min(MAX_PACK_FILE)
+        } else {
+            MAX_PACK_FILE
+        };
+        let response = self.http.get(url).send().await?.error_for_status()?;
+        let bytes = crate::util::read_capped(response, cap).await?;
+
+        // Every hash the pack lists must match; sha512 preferred when present.
+        let sha512_ok = file
+            .hashes
+            .get("sha512")
+            .map(|h| h.eq_ignore_ascii_case(&crate::util::sha512_hex(&bytes)));
+        let sha1_ok = file
+            .hashes
+            .get("sha1")
+            .map(|h| h.eq_ignore_ascii_case(&crate::util::sha1_hex(&bytes)));
+        if sha512_ok == Some(false) || sha1_ok == Some(false) {
+            return Err(Error::invalid(format!("{} failed its checksum", file.path)));
+        }
+
+        Ok(bytes)
     }
 
     /// Writes an instance out as a pack.
@@ -290,19 +349,52 @@ fn file_stem(path: &str) -> String {
 /// anything that would escape it.
 ///
 /// Pack indexes are third-party data, and `../` in a path would otherwise
-/// write wherever it liked.
+/// write wherever it liked. Only plain `Normal` components survive (so no
+/// drive prefixes, `C:`, or absolute roots), the first one must be one of
+/// [`ALLOWED_DIRS`], and the file must sit below it.
 fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
-    let mut out = root.to_path_buf();
-    for part in relative.split('/') {
-        match part {
-            "" | "." => continue,
-            ".." => return None,
-            part if part.contains('\\') => return None,
-            part => out.push(part),
-        }
+    use std::path::Component;
+    if relative.contains(['\\', ':', '\0']) {
+        return None;
     }
-    // A path of only separators would leave the root itself.
-    (out != root).then_some(out)
+    let mut out = root.to_path_buf();
+    let mut depth = 0;
+    for part in relative.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        // Re-parse so the check is the platform's own idea of a component.
+        let mut comps = Path::new(part).components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(n)), None) if n == part => {}
+            _ => return None,
+        }
+        if depth == 0
+            && !ALLOWED_DIRS.contains(&part)
+            && !ALLOWED_ROOT_FILES.contains(&part)
+            && part != "saves"
+        {
+            return None;
+        }
+        out.push(part);
+        depth += 1;
+    }
+    let parts: Vec<&str> = relative
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    // saves/<world>/datapacks/<file...> only.
+    if parts.first() == Some(&"saves") {
+        return (parts.len() >= 4 && parts[2] == "datapacks").then_some(out);
+    }
+    // A root file is itself the file; an allowed folder alone isn't.
+    if parts
+        .first()
+        .is_some_and(|p| ALLOWED_ROOT_FILES.contains(p))
+    {
+        return (depth == 1).then_some(out);
+    }
+    (depth >= 2).then_some(out)
 }
 
 fn read_index(pack: &Path) -> Result<Index> {
@@ -327,7 +419,30 @@ fn read_index(pack: &Path) -> Result<Index> {
     Ok(index)
 }
 
-fn extract_overrides(pack: &Path, root: &Path) -> Result<()> {
+/// True for the instance manifest under any spelling a case-insensitive or
+/// dot/space-stripping filesystem would fold onto it.
+fn is_protected(relative: &Path) -> bool {
+    relative.components().next().is_some_and(|c| {
+        let n = c.as_os_str().to_string_lossy();
+        n.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(crate::instance::MANIFEST)
+    })
+}
+
+/// Zip-bomb guards for `overrides/`: real packs (worlds, shader packs) stay
+/// well under these; a lying header is caught by counting bytes as written.
+const MAX_ENTRY_BYTES: u64 = 1 << 30; // 1 GiB per file
+const MAX_TOTAL_BYTES: u64 = 4 << 30; // 4 GiB per pack
+
+/// Unpacks `overrides/` with a denylist (worlds, emotes, schematics, shader
+/// options and so on are legitimate pack content). Refused: the instance
+/// manifest, non-plain path components, `:` `\` NUL, and `~N` short-name
+/// spellings at the root. Listed files with downloads still use the strict
+/// [`safe_join`] allowlist. Returns the entries refused, as `overrides/<path>`.
+fn extract_overrides(pack: &Path, root: &Path) -> Result<Vec<String>> {
+    use std::path::Component;
+    let mut refused = Vec::new();
+    let mut total = 0u64;
     let file = std::fs::File::open(pack).ctx(pack)?;
     let mut archive = zip::ZipArchive::new(file)?;
 
@@ -345,15 +460,39 @@ fn extract_overrides(pack: &Path, root: &Path) -> Result<()> {
             continue;
         }
 
+        let text = relative.to_string_lossy();
+        let short_name = relative.components().next().is_some_and(|c| {
+            let n = c.as_os_str().to_string_lossy();
+            n.split('~').skip(1).any(|t| t.starts_with(|d: char| d.is_ascii_digit()))
+        });
+        if !relative.components().all(|c| matches!(c, Component::Normal(_)))
+            || text.contains(['\\', ':', '\0'])
+            || is_protected(relative)
+            || short_name
+        {
+            tracing::warn!(path = %relative.display(), "skipping a refused override");
+            refused.push(format!("overrides/{}", relative.display()));
+            continue;
+        }
         let destination = root.join(relative);
+
+        if entry.size() > MAX_ENTRY_BYTES || total.saturating_add(entry.size()) > MAX_TOTAL_BYTES {
+            return Err(Error::invalid("the pack unpacks to more data than allowed; refusing it"));
+        }
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).ctx(parent)?;
         }
         let mut out = std::fs::File::create(&destination).ctx(&destination)?;
-        std::io::copy(&mut entry, &mut out).ctx(&destination)?;
+        // Count what actually comes out, since the header size can lie.
+        let budget = MAX_ENTRY_BYTES.min(MAX_TOTAL_BYTES - total);
+        let written = std::io::copy(&mut (&mut entry).take(budget + 1), &mut out).ctx(&destination)?;
+        if written > budget {
+            return Err(Error::invalid("the pack unpacks to more data than allowed; refusing it"));
+        }
+        total += written;
     }
 
-    Ok(())
+    Ok(refused)
 }
 
 fn write_pack(destination: &Path, index: &Index, bundled: &[(String, PathBuf)]) -> Result<()> {
@@ -422,6 +561,78 @@ mod tests {
         assert_eq!(safe_join(root, "mods\\..\\evil.jar"), None);
         // Nothing but separators leaves the root itself.
         assert_eq!(safe_join(root, "///"), None);
+        // Drive prefixes, absolute-ish and ':' forms.
+        assert_eq!(safe_join(root, "C:/Windows/evil.jar"), None);
+        assert_eq!(safe_join(root, "mods/C:evil.jar"), None);
+        assert_eq!(safe_join(root, "mods/a:b.jar"), None);
+        // Only the content folders, never the instance metadata or other dirs.
+        assert_eq!(safe_join(root, "nexo-instance.json"), None);
+        assert_eq!(safe_join(root, "saves/w/level.dat"), None);
+        assert_eq!(safe_join(root, "mods"), None);
+        assert!(safe_join(root, "config/sodium/a.json").is_some());
+    }
+
+    #[test]
+    fn overrides_cannot_replace_instance_manifest() {
+        let dir = std::env::temp_dir().join(format!("nexo-mrpack-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pack = dir.join("p.mrpack");
+        let file = std::fs::File::create(&pack).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let o: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        zip.start_file("overrides/nexo-instance.json", o).unwrap();
+        zip.write_all(b"evil").unwrap();
+        zip.start_file("overrides/options.txt", o).unwrap();
+        zip.write_all(b"ok").unwrap();
+        zip.start_file("overrides/saves/w/level.dat", o).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.start_file("overrides/emotes/x", o).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.start_file("overrides/optionsof.txt", o).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.start_file("overrides/a:b.txt", o).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.start_file("overrides/NEXO-I~1.JSO", o).unwrap();
+        zip.write_all(b"x").unwrap();
+        zip.start_file("overrides/config/ok.toml", o).unwrap();
+        zip.write_all(b"ok").unwrap();
+        zip.finish().unwrap();
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let refused = extract_overrides(&pack, &root).unwrap();
+        assert_eq!(refused.len(), 3, "{refused:?}");
+        assert!(root.join("saves/w/level.dat").exists() && root.join("emotes/x").exists());
+        assert!(root.join("optionsof.txt").exists() && !root.join("NEXO-I~1.JSO").exists());
+        assert!(root.join("config/ok.toml").exists());
+        assert!(!root.join("nexo-instance.json").exists());
+        assert!(root.join("options.txt").exists());
+        assert!(is_protected(Path::new("NEXO-INSTANCE.JSON")));
+        assert!(is_protected(Path::new("nexo-instance.json. ")));
+        assert!(!is_protected(Path::new("config/nexo-instance.json")));
+        let r = Path::new("/r");
+        assert!(safe_join(r, "options.txt").is_some() && safe_join(r, "servers.dat").is_some());
+        assert!(safe_join(r, "kubejs/a.js").is_some() && safe_join(r, "datapacks/a.zip").is_some());
+        assert!(safe_join(r, "saves/w/datapacks/a.zip").is_some());
+        assert!(safe_join(r, "saves/w/level.dat").is_none() && safe_join(r, "saves").is_none());
+        assert!(safe_join(r, "options.txt/x").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn downloads_need_an_allowed_host_and_a_hash() {
+        let m = MrPack::new(reqwest::Client::new(), Paths::with_root("/nonexistent"));
+        let mut f = IndexFile {
+            path: "mods/a.jar".into(),
+            hashes: Default::default(),
+            downloads: vec!["http://cdn.modrinth.com/a.jar".into()],
+            file_size: 0,
+        };
+        assert!(m.fetch_file(&f).await.is_err()); // http
+        f.downloads = vec!["https://169.254.169.254/a.jar".into()];
+        assert!(m.fetch_file(&f).await.is_err()); // host
+        f.downloads = vec!["https://cdn.modrinth.com/a.jar".into()];
+        let err = m.fetch_file(&f).await.unwrap_err().to_string();
+        assert!(err.contains("hash"), "{err}"); // no hash, rejected before any network
     }
 
     #[test]

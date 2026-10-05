@@ -104,8 +104,14 @@ pub enum Screen {
     Instances,
     Accounts,
     Skins,
+    /// Every Paper server this machine knows about — see `Mod/ROADMAP.md`
+    /// Phase 7. Cross-instance, unlike the other screens: a hosted server
+    /// outlives the "open instance" concept the details screen is scoped to.
+    Servers,
     /// Details for one instance, by id.
     Instance(String),
+    /// Live log + RCON console for one running Paper server, by id.
+    PaperConsole(String),
 }
 
 impl Screen {
@@ -114,6 +120,7 @@ impl Screen {
     fn nav_group(&self) -> Screen {
         match self {
             Screen::Instance(_) => Screen::Instances,
+            Screen::PaperConsole(_) => Screen::Servers,
             other => other.clone(),
         }
     }
@@ -182,10 +189,15 @@ pub struct App {
     /// them instead of doing it every frame.
     skin_key: u64,
 
-    /// Instances currently running, so Play can become Stop. Mirrors the
-    /// core registry rather than querying it during `view`, which must stay
-    /// free of locking.
+    /// Running game sessions (`nexo_core::running::session_key`: instance id
+    /// plus account uuid), so Play can show Stop. Mirrors the core registry
+    /// rather than querying it during `view`, which must stay free of locking.
     running: std::collections::HashSet<String>,
+    /// Launches still in their prepare phase (Launch sent, no Done/Failed yet).
+    preparing: usize,
+    /// Account chosen in each instance's launch picker (instance id -> uuid).
+    /// Per app session only; absent means "the active account".
+    launch_account: std::collections::HashMap<String, String>,
 
     /// Latest published Nexo Mod release, once looked up. `None` while
     /// unknown; the error is surfaced through `status` instead.
@@ -260,6 +272,24 @@ pub struct App {
     /// separate flags would have to keep agreeing on.
     server_form: Option<ServerForm>,
 
+    // Paper server hosting (Screen::Servers, plus the "Host as Paper Server"
+    // action on a Worlds-tab row).
+    paper_servers: Vec<nexo_core::paper_server::PaperServer>,
+    /// The world one click away from being converted, if any — same
+    /// two-step the world-delete button uses, except this step doubles as
+    /// EULA consent rather than a plain "are you sure". `(instance id,
+    /// world folder)` since the Worlds tab is scoped to whichever instance
+    /// is open, but this state must survive being read from a world row.
+    confirm_convert_world: Option<(String, String)>,
+
+    // Paper server console (Screen::PaperConsole).
+    /// The tail of `logs/latest.log`, and whether it was cut short. `None`
+    /// while it is being read.
+    paper_console_log: Option<(String, bool)>,
+    paper_console_input: String,
+    /// The last RCON command's response (or error), shown under the input.
+    paper_console_response: Option<String>,
+
     // Logs tab.
     logs: Vec<nexo_core::browse::LogFile>,
     selected_log: Option<String>,
@@ -318,8 +348,14 @@ pub enum Message {
     InstanceCreated(Result<(), String>),
     DeleteInstance(String),
     OpenInstance(String),
-    Launch(String),
+    /// Instance id, account uuid (`None` = the active account).
+    Launch(String, Option<String>),
+    /// The account to launch an instance with, picked on its screen.
+    PickLaunchAccount(String, String),
+    /// A session key, not an instance id.
     Stop(String),
+    /// Stops every session of an instance (the list's Stop button).
+    StopInstance(String),
     GameExited(String),
     LaunchProgress(Progress),
 
@@ -399,6 +435,31 @@ pub enum Message {
     SubmitServerForm,
     /// Forgets every ping result so the list asks again.
     RepingServers,
+    // Paper server hosting — see Mod/ROADMAP.md Phase 7.
+    LoadPaperServers,
+    PaperServersLoaded(Vec<nexo_core::paper_server::PaperServer>),
+    /// `None` backs out of the confirmation. `Some((instance, world folder))`
+    /// arms it — this doubles as the EULA-consent step, so there is no
+    /// separate modal.
+    AskConvertToPaperServer(Option<(String, String)>),
+    ConvertToPaperServer {
+        world_folder: String,
+        world_path: std::path::PathBuf,
+        game_version: String,
+        world_mode: Option<&'static str>,
+    },
+    PaperServerConverted(Result<nexo_core::paper_server::PaperServer, String>),
+    RevertPaperServer(String),
+    PaperServerReverted(Result<std::path::PathBuf, String>),
+    /// Re-reads `logs/latest.log` for the open `Screen::PaperConsole`. Fired
+    /// once on opening the screen and then on the same 1s tick the instance
+    /// Logs tab already uses.
+    PaperConsoleFollowLog,
+    PaperConsoleLogLoaded(Result<(String, bool), String>),
+    PaperConsoleInputChanged(String),
+    SendPaperConsoleCommand,
+    PaperConsoleCommandSent(Result<String, String>),
+
     LoadLogs,
     LogsLoaded(Vec<nexo_core::browse::LogFile>),
     SelectLog(String),
@@ -470,6 +531,13 @@ pub enum Message {
     ExportPack(String),
     PackImported(Result<String, String>),
 
+    // Options sync — copies options.txt from one instance to every other.
+    SyncOptions(String),
+    OptionsSynced(Result<(String, usize), String>),
+    /// The live watch loop for a since-closed instance has returned; nothing
+    /// to show for it, but `Task::perform` needs a message to land on.
+    OptionsWatchDone,
+
     // Accounts
     StartSignIn,
     SignInFinished(Result<Account, String>),
@@ -507,6 +575,8 @@ impl App {
             skin_model: nexo_core::SkinModel::Classic,
             skin_key: 0,
             running: std::collections::HashSet::new(),
+            preparing: 0,
+            launch_account: std::collections::HashMap::new(),
             nexo_release: None,
             nexo_release_error: None,
             java_options: Vec::new(),
@@ -528,6 +598,11 @@ impl App {
             server_status: std::collections::HashMap::new(),
             server_icons: std::collections::HashMap::new(),
             server_form: None,
+            paper_servers: Vec::new(),
+            confirm_convert_world: None,
+            paper_console_log: None,
+            paper_console_input: String::new(),
+            paper_console_response: None,
             logs: Vec::new(),
             selected_log: None,
             log_text: None,
@@ -637,13 +712,28 @@ impl App {
 
             Message::Navigate(screen) => {
                 let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
+                let opening_servers = screen == Screen::Servers && self.screen != Screen::Servers;
+                let opening_console = matches!(&screen, Screen::PaperConsole(_)) && screen != self.screen;
                 self.screen = screen;
+                if opening_console {
+                    self.paper_console_log = None;
+                    self.paper_console_input.clear();
+                    self.paper_console_response = None;
+                    return Task::done(Message::PaperConsoleFollowLog);
+                }
                 if opening_skins {
                     let mut tasks = vec![Task::done(Message::LoadSavedSkins)];
                     if self.capes.is_empty() {
                         tasks.push(Task::done(Message::LoadCapes));
                     }
                     return Task::batch(tasks);
+                }
+                if opening_servers {
+                    // Re-read every visit rather than caching: a server can
+                    // be started or stopped by the Mod between visits, and a
+                    // stale list would show a Stop button for a server that
+                    // already reverted.
+                    return Task::done(Message::LoadPaperServers);
                 }
                 Task::none()
             }
@@ -780,6 +870,11 @@ impl App {
                 Task::batch(tasks)
             }
 
+            Message::PickLaunchAccount(id, uuid) => {
+                self.launch_account.insert(id, uuid);
+                Task::none()
+            }
+
             Message::Stop(id) => {
                 if let Some(core) = &self.core {
                     core.stop(&id);
@@ -789,9 +884,17 @@ impl App {
                 Task::none()
             }
 
+            Message::StopInstance(id) => {
+                if let Some(core) = &self.core {
+                    core.stop_instance(&id);
+                }
+                Task::none()
+            }
+
             Message::GameExited(id) => {
                 self.running.remove(&id);
-                if !self.is_busy() {
+                // Never overwrites an Error, nor another launch's progress.
+                if self.is_busy() && self.preparing == 0 {
                     self.status = Status::Idle;
                 }
                 Task::none()
@@ -1126,6 +1229,11 @@ impl App {
                 {
                     self.confirm_delete_world = None;
                 }
+                if let Some((_, folder)) = &self.confirm_convert_world
+                    && !worlds.iter().any(|w| &w.folder == folder)
+                {
+                    self.confirm_convert_world = None;
+                }
                 self.worlds = worlds;
                 self.tabs_loaded.insert(screens::instance::Tab::Worlds);
                 Task::none()
@@ -1283,7 +1391,7 @@ impl App {
                 // running game is discarded without a word. Refusing is the
                 // only honest answer; the button is disabled too, and this is
                 // the backstop for the race between the two.
-                if self.running.contains(id) {
+                if self.instance_running(id) {
                     self.status = Status::Error(
                         "Close the game first — Minecraft overwrites its server list on exit."
                             .into(),
@@ -1325,6 +1433,154 @@ impl App {
                         Err(err) => Message::InstanceSaved(Err(err)),
                     },
                 )
+            }
+
+            Message::LoadPaperServers => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { core.paper_servers.store().list().await },
+                    Message::PaperServersLoaded,
+                )
+            }
+            Message::PaperServersLoaded(servers) => {
+                self.paper_servers = servers;
+                Task::none()
+            }
+
+            Message::AskConvertToPaperServer(pending) => {
+                self.confirm_convert_world = pending;
+                Task::none()
+            }
+
+            Message::ConvertToPaperServer { world_folder, world_path, game_version, world_mode } => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let Some(account) = self.active_account().cloned() else {
+                    return Task::none();
+                };
+                self.confirm_convert_world = None;
+                self.status = Status::Busy(format!(
+                    "Converting \"{world_folder}\" to a Paper server — this can take a few minutes, \
+                     Paper does a one-time migration pass the first time it opens a world"
+                ));
+
+                let game_mode = world_mode.unwrap_or("Survival").to_lowercase();
+                Task::perform(
+                    async move {
+                        core.paper_servers
+                            .convert_and_host(&world_path, &world_folder, &game_version, "launcher", &game_mode, &account.username)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::PaperServerConverted,
+                )
+            }
+            Message::PaperServerConverted(Ok(_)) => {
+                self.status = Status::Idle;
+                // Jumps to the cross-instance list so the result of the
+                // conversion is immediately visible, not left on the Worlds
+                // tab it was started from.
+                Task::batch([
+                    Task::done(Message::Navigate(Screen::Servers)),
+                    Task::done(Message::LoadPaperServers),
+                ])
+            }
+            Message::PaperServerConverted(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
+            }
+
+            Message::RevertPaperServer(id) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                self.status = Status::Busy(format!("Stopping and reverting \"{id}\""));
+                Task::perform(
+                    async move { core.paper_servers.stop_and_revert(&id).await.map_err(|e| e.to_string()) },
+                    Message::PaperServerReverted,
+                )
+            }
+            Message::PaperServerReverted(Ok(_backup)) => {
+                self.status = Status::Idle;
+                Task::done(Message::LoadPaperServers)
+            }
+            Message::PaperServerReverted(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
+            }
+
+            Message::PaperConsoleFollowLog => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                let Screen::PaperConsole(id) = &self.screen else {
+                    return Task::none();
+                };
+                let id = id.clone();
+                Task::perform(
+                    async move {
+                        let dir = core.paper_servers.store().server_dir(&id);
+                        let logs = nexo_core::browse::logs(&dir).await;
+                        let Some(latest) = logs.into_iter().find(|l| l.name == "latest.log") else {
+                            return Err("No log yet".to_string());
+                        };
+                        nexo_core::browse::read_log(&latest).await.map_err(|e| e.to_string())
+                    },
+                    Message::PaperConsoleLogLoaded,
+                )
+            }
+            Message::PaperConsoleLogLoaded(Ok(read)) => {
+                self.paper_console_log = Some(read);
+                Task::none()
+            }
+            // A failed re-read is dropped, same as the instance Logs tab's
+            // `LogFollowed`: the file may not exist yet right after
+            // conversion, and replacing the view with an error on every
+            // missed tick would be worse than showing slightly stale text.
+            Message::PaperConsoleLogLoaded(Err(_)) => Task::none(),
+
+            Message::PaperConsoleInputChanged(text) => {
+                self.paper_console_input = text;
+                Task::none()
+            }
+            Message::SendPaperConsoleCommand => {
+                let Screen::PaperConsole(id) = &self.screen else {
+                    return Task::none();
+                };
+                let Some(server) = self.paper_servers.iter().find(|s| &s.id == id).cloned() else {
+                    return Task::none();
+                };
+                let command = std::mem::take(&mut self.paper_console_input);
+                if command.trim().is_empty() {
+                    return Task::none();
+                }
+                Task::perform(
+                    async move {
+                        let mut client = nexo_core::paper_server::rcon::RconClient::connect(
+                            "127.0.0.1",
+                            server.rcon.port,
+                            &server.rcon.password,
+                            std::time::Duration::from_secs(5),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        client.command(&command).await.map_err(|e| e.to_string())
+                    },
+                    Message::PaperConsoleCommandSent,
+                )
+            }
+            Message::PaperConsoleCommandSent(Ok(response)) => {
+                self.paper_console_response = Some(response);
+                // The command likely just changed something worth seeing in
+                // the log too (e.g. an op/gamemode grant).
+                Task::done(Message::PaperConsoleFollowLog)
+            }
+            Message::PaperConsoleCommandSent(Err(err)) => {
+                self.paper_console_response = Some(format!("Error: {err}"));
+                Task::none()
             }
 
             Message::LoadLogs => {
@@ -1692,13 +1948,28 @@ impl App {
                             format!("Imported {} — {} files", imported.name, imported.files)
                         } else {
                             // Named rather than counted: knowing which mod is
-                            // missing is what makes it fixable.
+                            // missing is what makes it fixable. Past 10, only
+                            // the first few, so the message stays readable.
+                            let n = imported.skipped.len();
+                            // Paths come from the pack: strip control chars, cap length.
+                            let clean = |p: &String| -> String {
+                                p.chars()
+                                    .filter(|c| {
+                                        !c.is_control()
+                                            && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+                                    })
+                                    .take(120)
+                                    .collect()
+                            };
+                            let shown = if n > 10 {
+                                let first: Vec<_> = imported.skipped[..5].iter().map(clean).collect();
+                                format!("{}, and {} more", first.join(", "), n - 5)
+                            } else {
+                                imported.skipped.iter().map(clean).collect::<Vec<_>>().join(", ")
+                            };
                             format!(
                                 "Imported {} — {} files, {} unavailable ({})",
-                                imported.name,
-                                imported.files,
-                                imported.skipped.len(),
-                                imported.skipped.join(", ")
+                                imported.name, imported.files, n, shown
                             )
                         })
                     },
@@ -1748,6 +2019,61 @@ impl App {
                 self.status = Status::Error(err);
                 Task::none()
             }
+
+            Message::SyncOptions(id) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                self.status = Status::Busy("Syncing options".into());
+                let running_now = self.instance_running(&id);
+
+                let sync_id = id.clone();
+                let sync_core = core.clone();
+                let sync = Task::perform(
+                    async move {
+                        nexo_core::options_sync::sync_to_all(
+                            &sync_core.paths,
+                            &sync_core.instances,
+                            &sync_id,
+                        )
+                        .await
+                        .map(|n| (sync_id, n))
+                        .map_err(|e| e.to_string())
+                    },
+                    Message::OptionsSynced,
+                );
+
+                // Still running: keep re-syncing every time this instance's
+                // options.txt changes, until it closes. A one-shot sync
+                // would otherwise miss anything changed after this click.
+                if running_now {
+                    let watch = Task::perform(
+                        nexo_core::options_sync::watch_and_sync(
+                            core.paths,
+                            core.instances,
+                            core.running,
+                            id,
+                        ),
+                        |()| Message::OptionsWatchDone,
+                    );
+                    Task::batch([sync, watch])
+                } else {
+                    sync
+                }
+            }
+            Message::OptionsSynced(Ok((id, count))) => {
+                self.status = if count == 0 {
+                    Status::Error(format!("\"{id}\" has no options.txt yet — play it once first"))
+                } else {
+                    Status::Idle
+                };
+                Task::none()
+            }
+            Message::OptionsSynced(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
+            }
+            Message::OptionsWatchDone => Task::none(),
 
             Message::LoadSavedSkins => {
                 let Some(core) = self.core.clone() else {
@@ -2076,10 +2402,22 @@ impl App {
                 Task::none()
             }
 
-            Message::Launch(id) => {
+            Message::Launch(id, account) => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
+                let Some(uuid) = account.or_else(|| self.active_account.clone()) else {
+                    return Task::none();
+                };
+                // The server would kick a second client on the same account;
+                // refuse here too, since a failed launch ends in GameExited,
+                // which would otherwise clear the *live* session's entry.
+                let key = nexo_core::running::session_key(&id, &uuid);
+                if self.running.contains(&key) {
+                    self.status =
+                        Status::Error("That account is already playing this instance.".into());
+                    return Task::none();
+                }
                 self.status = Status::Busy("Preparing to launch".into());
 
                 // Progress flows back over a channel while the install runs,
@@ -2097,19 +2435,27 @@ impl App {
                 // Marked running up front so the button flips immediately
                 // rather than after the install finishes. Any failure path
                 // still ends in GameExited, which clears it again.
-                self.running.insert(id.clone());
+                self.running.insert(key.clone());
+                self.preparing += 1;
 
                 let run = Task::perform(
                     async move {
-                        if let Err(err) = core.play(&id, Some(&tx)).await {
+                        // Spawned so a panic inside play_as still ends in
+                        // Failed + GameExited instead of a stuck button.
+                        let c2 = core.clone();
+                        let (id2, uuid2, tx2) = (id.clone(), uuid.clone(), tx.clone());
+                        let res = tokio::spawn(async move { c2.play_as(&id2, Some(&uuid2), Some(&tx2)).await })
+                            .await
+                            .unwrap_or_else(|e| Err(nexo_core::Error::invalid(format!("launch crashed: {e}"))));
+                        if let Err(err) = res {
                             let _ = tx.send(Progress::Failed(err.to_string()));
                         } else {
                             let _ = tx.send(Progress::Done);
                             // Resolves when the JVM exits, however that
                             // happens — quit from the menu, crash, or Stop.
-                            core.running.wait_for_exit(&id).await;
+                            core.running.wait_for_exit(&key).await;
                         }
-                        id
+                        key
                     },
                     Message::GameExited,
                 );
@@ -2128,10 +2474,23 @@ impl App {
                     }
                     Progress::Advanced { .. } => {}
                     Progress::Done => {
-                        self.status = Status::Idle;
+                        self.preparing = self.preparing.saturating_sub(1);
+                        if self.is_busy() && self.preparing == 0 {
+                            self.status = Status::Idle;
+                        }
                         return self.core.clone().map(reload).unwrap_or_else(Task::none);
                     }
-                    Progress::Failed(err) => self.status = Status::Error(err),
+                    Progress::Failed(err) => {
+                        self.preparing = self.preparing.saturating_sub(1);
+                        if err == nexo_core::running::LAUNCH_CANCELLED {
+                            // A Stop during prepare: quiet, not an error.
+                            if self.is_busy() && self.preparing == 0 {
+                                self.status = Status::Idle;
+                            }
+                        } else {
+                            self.status = Status::Error(err);
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -2242,12 +2601,20 @@ impl App {
             Screen::Instances => screens::instances::view(self),
             Screen::Accounts => screens::accounts::view(self),
             Screen::Skins => screens::skins::view(self),
+            Screen::Servers => screens::paper_servers::view(self),
             Screen::Instance(id) => match self.instances.iter().find(|i| &i.id == id) {
                 Some(instance) => screens::instance::view(self, instance),
                 // Deleted from under us, or an id that no longer exists.
                 None => empty_state(
                     "That instance is gone",
                     "It was deleted, or its folder was removed outside the launcher.",
+                ),
+            },
+            Screen::PaperConsole(id) => match self.paper_servers.iter().find(|s| &s.id == id) {
+                Some(server) => screens::paper_console::view(self, server),
+                None => empty_state(
+                    "That server is gone",
+                    "It was stopped and reverted, or its record was removed.",
                 ),
             },
         };
@@ -2274,6 +2641,28 @@ impl App {
     /// there is no style function to read it out of.
     pub fn accent(&self) -> iced::Color {
         theme::spectrum(self.clock / theme::RAINBOW_PERIOD)
+    }
+
+    /// Whether any session of the instance is running.
+    fn instance_running(&self, id: &str) -> bool {
+        !self.instance_sessions(id).is_empty()
+    }
+
+    /// (session key, account name) for each running session of the instance.
+    fn instance_sessions(&self, id: &str) -> Vec<(String, String)> {
+        let mut out: Vec<_> = self
+            .running
+            .iter()
+            .filter_map(|key| {
+                let (inst, uuid) = nexo_core::running::split_session_key(key)?;
+                (inst == id).then(|| {
+                    let name = self.accounts.iter().find(|a| a.uuid == uuid);
+                    (key.clone(), name.map_or(uuid, |a| &a.username).to_string())
+                })
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// The account launches will use.
@@ -2311,6 +2700,7 @@ impl App {
         self.files_error = None;
         self.worlds.clear();
         self.confirm_delete_world = None;
+        self.confirm_convert_world = None;
         self.servers.clear();
         // Cleared too, so opening another instance re-pings rather than
         // showing this instance's results under the other one's addresses.
@@ -2353,7 +2743,7 @@ impl App {
             return false;
         };
         self.tab == screens::instance::Tab::Logs
-            && self.running.contains(id)
+            && self.instance_running(id)
             && self
                 .selected_log
                 .as_ref()
@@ -2399,6 +2789,15 @@ impl App {
             // that would be absurd, and a second is well inside what reads as
             // immediate for a log.
             feeds.push(iced::time::every(REREAD).map(|_| Message::FollowLog));
+        }
+
+        if let Screen::PaperConsole(id) = &self.screen
+            && self
+                .paper_servers
+                .iter()
+                .any(|s| &s.id == id && s.status == nexo_core::paper_server::status::RUNNING)
+        {
+            feeds.push(iced::time::every(REREAD).map(|_| Message::PaperConsoleFollowLog));
         }
 
         iced::Subscription::batch(feeds)

@@ -88,7 +88,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         None => "Never played".to_string(),
     };
 
-    let running = app.running.contains(&instance.id);
+    let running = app.instance_running(&instance.id);
 
     // The whole card is the way into the details screen; a plain text button
     // keeps it looking like a card rather than a control.
@@ -119,14 +119,14 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         button(text("Stop").size(14))
             .padding([7, 18])
             .style(theme::stop_button)
-            .on_press(Message::Stop(instance.id.clone()))
+            .on_press(Message::StopInstance(instance.id.clone()))
             .into()
     } else {
         let can_launch = !app.is_busy() && app.active_account().is_some();
         button(text("Play").size(14))
             .padding([7, 18])
             .style(theme::primary_button)
-            .on_press_maybe(can_launch.then(|| Message::Launch(instance.id.clone())))
+            .on_press_maybe(can_launch.then(|| Message::Launch(instance.id.clone(), None)))
             .into()
     };
 

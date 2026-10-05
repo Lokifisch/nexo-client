@@ -13,6 +13,55 @@ use std::sync::{Arc, Mutex};
 use tokio::process::Child;
 use tokio::sync::{oneshot, watch};
 
+/// Separates instance id from account uuid in a session key.
+const SEP: char = '#';
+
+/// Registry key for one instance launched with one account.
+pub fn session_key(instance_id: &str, account_uuid: &str) -> String {
+    format!("{instance_id}{SEP}{account_uuid}")
+}
+
+/// Splits a session key into (instance id, account uuid).
+pub fn split_session_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once(SEP)
+}
+
+/// Message of the error `Core::play_as` returns when a Stop landed during the
+/// prepare phase; the UI treats it as a quiet cancel, not a failure.
+pub const LAUNCH_CANCELLED: &str = "launch cancelled";
+
+/// Only `{id}#{uuid}` sessions belong to an instance (Paper servers register
+/// as `paper:<id>`, never a plain id).
+fn in_instance(key: &str, instance_id: &str) -> bool {
+    key.strip_prefix(instance_id)
+        .is_some_and(|rest| rest.starts_with(SEP))
+}
+
+type Preparing = Arc<Mutex<HashMap<String, bool>>>;
+
+/// A session in its prepare phase (install, before spawn). Dropping removes it.
+pub struct PrepareGuard {
+    key: String,
+    preparing: Preparing,
+}
+
+impl PrepareGuard {
+    pub fn is_cancelled(&self) -> bool {
+        self.preparing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&self.key)
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for PrepareGuard {
+    fn drop(&mut self) {
+        self.preparing.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.key);
+    }
+}
+
 #[derive(Debug)]
 struct RunningGame {
     /// Taken when a stop is requested; the watcher kills on receipt.
@@ -23,15 +72,30 @@ struct RunningGame {
     exited: watch::Receiver<bool>,
 }
 
-/// Registry of games started by this launcher, keyed by instance id.
+/// Registry of games started by this launcher. Game launches are keyed by
+/// [`session_key`] (one instance can run once per account); Paper servers use
+/// `paper:<id>`. `stop`/`wait_for_exit` take an exact key.
 #[derive(Debug, Clone, Default)]
 pub struct RunningGames {
     games: Arc<Mutex<HashMap<String, RunningGame>>>,
+    /// Sessions still preparing -> whether a stop was requested.
+    preparing: Preparing,
 }
 
 impl RunningGames {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Marks `key` as preparing so a stop can cancel it before the game
+    /// exists. `None` if that key is already preparing.
+    pub fn begin_prepare(&self, key: &str) -> Option<PrepareGuard> {
+        let mut p = self.preparing.lock().unwrap_or_else(|p| p.into_inner());
+        if p.contains_key(key) {
+            return None;
+        }
+        p.insert(key.to_string(), false);
+        Some(PrepareGuard { key: key.to_string(), preparing: Arc::clone(&self.preparing) })
     }
 
     /// Takes ownership of a freshly spawned child and starts watching it.
@@ -81,8 +145,42 @@ impl RunningGames {
         });
     }
 
+    /// True if the exact session key is registered or any session of that
+    /// instance runs.
     pub fn is_running(&self, instance_id: &str) -> bool {
-        self.lock().contains_key(instance_id)
+        let games = self.lock();
+        games.contains_key(instance_id) || games.keys().any(|k| in_instance(k, instance_id))
+    }
+
+    /// Account uuids of the sessions currently running for `instance_id`.
+    pub fn sessions(&self, instance_id: &str) -> Vec<String> {
+        let prefix = format!("{instance_id}{SEP}");
+        self.lock()
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    }
+
+    /// Stops every session of the instance. Returns `false` if none ran.
+    pub fn stop_instance(&self, instance_id: &str) -> bool {
+        let keys: Vec<String> = self
+            .lock()
+            .keys()
+            .filter(|k| in_instance(k, instance_id))
+            .cloned()
+            .collect();
+        let mut any = false;
+        for k in &keys {
+            any |= self.stop(k);
+        }
+        // Sessions still preparing have no process yet: flag them cancelled.
+        for (k, cancelled) in self.preparing.lock().unwrap_or_else(|p| p.into_inner()).iter_mut() {
+            if in_instance(k, instance_id) {
+                *cancelled = true;
+                any = true;
+            }
+        }
+        any
     }
 
     pub fn running_ids(&self) -> Vec<String> {
@@ -102,7 +200,13 @@ impl RunningGames {
                 }
                 true
             }
-            None => false,
+            None => match self.preparing.lock().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+                Some(cancelled) => {
+                    *cancelled = true;
+                    true
+                }
+                None => false,
+            },
         }
     }
 
@@ -121,7 +225,9 @@ impl RunningGames {
         // A panic while holding this lock would only ever leave the registry
         // mid-insert; recovering is far better than poisoning every later
         // launch.
-        self.games.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.games
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -140,21 +246,74 @@ mod tests {
     #[tokio::test]
     async fn tracks_and_stops_a_running_game() {
         let games = RunningGames::new();
-        games.register("demo", spawn_sleeper("30"));
+        let k = session_key("demo", "A");
+        games.register(&k, spawn_sleeper("30"));
         assert!(games.is_running("demo"));
 
-        assert!(games.stop("demo"));
-        games.wait_for_exit("demo").await;
+        assert!(games.stop(&k));
+        games.wait_for_exit(&k).await;
         assert!(!games.is_running("demo"));
     }
 
     #[tokio::test]
     async fn deregisters_when_the_game_exits_on_its_own() {
         let games = RunningGames::new();
-        games.register("quick", spawn_sleeper("0"));
+        let k = session_key("quick", "A");
+        games.register(&k, spawn_sleeper("0"));
 
-        games.wait_for_exit("quick").await;
+        games.wait_for_exit(&k).await;
         assert!(!games.is_running("quick"));
+    }
+
+    #[tokio::test]
+    async fn sessions_of_one_instance_are_independent() {
+        let games = RunningGames::new();
+        let (a, b, c) = (session_key("inst", "A"), session_key("inst", "B"), session_key("other", "A"));
+        games.register(&a, spawn_sleeper("30"));
+        games.register(&b, spawn_sleeper("30"));
+        games.register(&c, spawn_sleeper("30"));
+
+        assert!(games.is_running("inst") && games.is_running(&a) && games.is_running("other"));
+        let mut s = games.sessions("inst");
+        s.sort();
+        assert_eq!(s, ["A", "B"]);
+        // "inst" must not match "inst2"-style ids by prefix alone.
+        assert!(!games.is_running("ins") && games.sessions("ins").is_empty());
+
+        assert!(games.stop(&a));
+        games.wait_for_exit(&a).await;
+        assert_eq!(games.sessions("inst"), ["B"]);
+        assert!(games.is_running("inst") && games.is_running("other"));
+
+        assert!(games.stop_instance("inst"));
+        games.wait_for_exit(&b).await;
+        assert!(!games.is_running("inst") && games.is_running("other"));
+        games.stop(&c);
+        games.wait_for_exit(&c).await;
+    }
+
+    #[tokio::test]
+    async fn paper_ids_do_not_belong_to_an_instance() {
+        let games = RunningGames::new();
+        games.register("paper:inst", spawn_sleeper("30"));
+        assert!(!games.is_running("inst") && !games.stop_instance("inst"));
+        assert!(games.stop("paper:inst"));
+        games.wait_for_exit("paper:inst").await;
+    }
+
+    #[test]
+    fn stop_cancels_a_preparing_session() {
+        let games = RunningGames::new();
+        let (a, b) = (session_key("inst", "A"), session_key("inst", "B"));
+        let (ga, gb) = (games.begin_prepare(&a).unwrap(), games.begin_prepare(&b).unwrap());
+        assert!(games.begin_prepare(&a).is_none());
+        assert!(!ga.is_cancelled() && !gb.is_cancelled());
+        assert!(games.stop(&a));
+        assert!(ga.is_cancelled() && !gb.is_cancelled());
+        assert!(games.stop_instance("inst") && gb.is_cancelled());
+        drop(ga);
+        assert!(games.begin_prepare(&a).is_some());
+        assert!(!games.stop("nope#x"));
     }
 
     #[tokio::test]

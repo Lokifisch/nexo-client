@@ -176,7 +176,9 @@ impl Cosmetics {
             return Ok(());
         }
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(Error::auth("this account's session expired — sign in again"));
+            return Err(Error::auth(
+                "this account's session expired — sign in again",
+            ));
         }
 
         let detail = response.text().await.unwrap_or_default();

@@ -53,7 +53,9 @@ impl SkinLibrary {
     /// Saved skins, most recently added first.
     pub async fn list(&self) -> Result<Vec<SavedSkin>> {
         let mut index = self.read_index().await?;
-        index.skins.sort_by_key(|skin| std::cmp::Reverse(skin.added_at));
+        index
+            .skins
+            .sort_by_key(|skin| std::cmp::Reverse(skin.added_at));
 
         // Drop entries whose file has gone — deleted by hand, or a partial
         // write — rather than showing tiles that can't be worn.
@@ -142,8 +144,14 @@ mod tests {
     async fn saving_the_same_skin_twice_keeps_one_entry() {
         let (library, root) = library();
 
-        let first = library.save(b"pretend png", SkinModel::Classic).await.unwrap();
-        let again = library.save(b"pretend png", SkinModel::Classic).await.unwrap();
+        let first = library
+            .save(b"pretend png", SkinModel::Classic)
+            .await
+            .unwrap();
+        let again = library
+            .save(b"pretend png", SkinModel::Classic)
+            .await
+            .unwrap();
 
         assert_eq!(first.id, again.id, "the id is the content's hash");
         assert_eq!(library.list().await.unwrap().len(), 1);
@@ -155,7 +163,10 @@ mod tests {
     async fn re_saving_updates_the_model() {
         let (library, root) = library();
 
-        library.save(b"pretend png", SkinModel::Classic).await.unwrap();
+        library
+            .save(b"pretend png", SkinModel::Classic)
+            .await
+            .unwrap();
         // Same texture, worn as slim this time.
         library.save(b"pretend png", SkinModel::Slim).await.unwrap();
 
@@ -197,7 +208,9 @@ mod tests {
 
         let saved = library.save(b"one", SkinModel::Classic).await.unwrap();
         // Deleted by hand, behind the library's back.
-        tokio::fs::remove_file(library.png_path(&saved.id)).await.unwrap();
+        tokio::fs::remove_file(library.png_path(&saved.id))
+            .await
+            .unwrap();
 
         assert!(library.list().await.unwrap().is_empty());
 

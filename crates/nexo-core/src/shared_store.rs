@@ -66,7 +66,7 @@ struct StoredData {
 }
 
 /// What the launcher works with: accounts plus which one is active.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Contents {
     pub accounts: Vec<Account>,
     pub active: Option<String>,
@@ -180,9 +180,17 @@ impl SharedStore {
 
         // Write-then-rename: the game may be reading this file while the
         // launcher writes it, and a torn read would look like corruption.
-        let temp = self.path.with_extension("dat.tmp");
-        tokio::fs::write(&temp, &encrypted).await.ctx(&temp)?;
-        tokio::fs::rename(&temp, &self.path).await.ctx(&self.path)?;
+        // The temp file is created 0600 *before* any bytes go in, under a
+        // unique name, so there is no window where tokens sit world-readable
+        // or where a pre-planted file/symlink at a fixed name gets written.
+        let temp = self
+            .path
+            .with_extension(format!("dat.{}.tmp", uuid::Uuid::new_v4().simple()));
+        write_private(&temp, encrypted).await?;
+        if let Err(err) = tokio::fs::rename(&temp, &self.path).await {
+            tokio::fs::remove_file(&temp).await.ok();
+            return Err(err).ctx(&self.path);
+        }
 
         restrict(&self.path).await
     }
@@ -209,8 +217,8 @@ fn encrypt(plaintext: &[u8], cipher: &Aes256Gcm) -> Result<Vec<u8>> {
     let nonce_bytes: [u8; NONCE_BYTES] = random.as_bytes()[..NONCE_BYTES]
         .try_into()
         .expect("uuid is 16 bytes");
-    let nonce = Nonce::try_from(&nonce_bytes[..])
-        .map_err(|_| Error::invalid("nonce was not 12 bytes"))?;
+    let nonce =
+        Nonce::try_from(&nonce_bytes[..]).map_err(|_| Error::invalid("nonce was not 12 bytes"))?;
 
     let ciphertext = cipher
         .encrypt(
@@ -279,6 +287,28 @@ fn dash(uuid: &str) -> String {
 /// of this crate keys accounts by.
 fn undash(uuid: &str) -> String {
     uuid.chars().filter(|c| *c != '-').collect()
+}
+
+/// Creates `path` exclusively (never following an existing file or symlink),
+/// owner-only from the first byte on unix, and writes `bytes` into it.
+async fn write_private(path: &Path, bytes: Vec<u8>) -> Result<()> {
+    let target = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&target)?;
+        file.write_all(&bytes)?;
+        file.sync_all()
+    })
+    .await
+    .map_err(|err| Error::invalid(format!("could not write the account store: {err}")))?
+    .ctx(path)
 }
 
 #[cfg(unix)]
@@ -379,13 +409,29 @@ mod tests {
         let loaded = store.load().await.unwrap();
 
         assert_eq!(loaded.accounts.len(), 2);
-        assert_eq!(loaded.active.as_deref(), Some("853c80ef3c3749fdaa49938b674adae6"));
+        assert_eq!(
+            loaded.active.as_deref(),
+            Some("853c80ef3c3749fdaa49938b674adae6")
+        );
         assert_eq!(loaded.accounts[0].username, "Alpha");
         assert_eq!(loaded.accounts[0].skin_model, SkinModel::Slim);
         assert!(loaded.is_offline("069a79f444e94726a5befca90e38aaf5"));
         assert!(!loaded.is_offline("853c80ef3c3749fdaa49938b674adae6"));
 
         tokio::fs::remove_file(&path).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_writes_are_owner_only_and_exclusive() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("nexo-priv-{}.tmp", uuid::Uuid::new_v4()));
+        write_private(&path, b"secret".to_vec()).await.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // An existing file is never reused.
+        assert!(write_private(&path, b"x".to_vec()).await.is_err());
+        std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]

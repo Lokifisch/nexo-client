@@ -20,8 +20,8 @@ impl Paths {
     /// - Windows: `%APPDATA%\Nexo\data`
     /// - macOS: `~/Library/Application Support/dev.nexoclient.nexo`
     pub fn discover() -> Result<Self> {
-        let dirs = directories::ProjectDirs::from("dev", "nexoclient", "nexo")
-            .ok_or(Error::NoDataDir)?;
+        let dirs =
+            directories::ProjectDirs::from("dev", "nexoclient", "nexo").ok_or(Error::NoDataDir)?;
         Ok(Self {
             root: dirs.data_dir().to_path_buf(),
         })
@@ -72,6 +72,16 @@ impl Paths {
     /// Per-version client jars and their JSON manifests.
     pub fn versions(&self) -> PathBuf {
         self.root.join("versions")
+    }
+
+    /// One subdirectory per hosted Paper server, keyed by id. Shared with
+    /// Nexo Mod — see `Mod/docs/PAPER-SERVER-REGISTRY.md`.
+    pub fn paper_servers(&self) -> PathBuf {
+        self.root.join("paper-servers")
+    }
+
+    pub fn paper_server(&self, id: &str) -> PathBuf {
+        self.paper_servers().join(id)
     }
 
     /// Runtimes we downloaded ourselves, when no suitable system JDK exists.

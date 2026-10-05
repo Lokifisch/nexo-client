@@ -104,9 +104,7 @@ async fn exchange(host: &str, port: u16) -> Result<Response> {
     let mut cursor = Cursor::new(&payload);
     let id = cursor.varint()?;
     if id != 0x00 {
-        return Err(Error::invalid(format!(
-            "unexpected reply (packet {id:#x})"
-        )));
+        return Err(Error::invalid(format!("unexpected reply (packet {id:#x})")));
     }
 
     let json = cursor.string()?;
@@ -186,16 +184,18 @@ fn resolver() -> Option<&'static hickory_resolver::TokioResolver> {
         std::sync::OnceLock::new();
 
     RESOLVER
-        .get_or_init(|| match hickory_resolver::TokioResolver::builder_tokio()
-            .and_then(|builder| builder.build())
-        {
-            Ok(resolver) => Some(resolver),
-            // A machine with no readable resolver config is unusual but not
-            // fatal here: every lookup then falls through to the address as
-            // written, which is what this did before SRV existed.
-            Err(err) => {
-                tracing::warn!("no system DNS config, SRV lookups disabled: {err}");
-                None
+        .get_or_init(|| {
+            match hickory_resolver::TokioResolver::builder_tokio()
+                .and_then(|builder| builder.build())
+            {
+                Ok(resolver) => Some(resolver),
+                // A machine with no readable resolver config is unusual but not
+                // fatal here: every lookup then falls through to the address as
+                // written, which is what this did before SRV existed.
+                Err(err) => {
+                    tracing::warn!("no system DNS config, SRV lookups disabled: {err}");
+                    None
+                }
             }
         })
         .as_ref()
@@ -404,7 +404,10 @@ mod tests {
             split_address("mc.example.com:25577"),
             ("mc.example.com".to_string(), Some(25577))
         );
-        assert_eq!(split_address("127.0.0.1:80"), ("127.0.0.1".to_string(), Some(80)));
+        assert_eq!(
+            split_address("127.0.0.1:80"),
+            ("127.0.0.1".to_string(), Some(80))
+        );
         assert_eq!(
             split_address(" trimmed.example "),
             ("trimmed.example".to_string(), None)
@@ -414,7 +417,10 @@ mod tests {
     #[test]
     fn ipv6_keeps_its_colons() {
         // Bracketed, with and without a port.
-        assert_eq!(split_address("[::1]:25565"), ("::1".to_string(), Some(25565)));
+        assert_eq!(
+            split_address("[::1]:25565"),
+            ("::1".to_string(), Some(25565))
+        );
         assert_eq!(split_address("[fe80::1]"), ("fe80::1".to_string(), None));
         // Bare: every colon belongs to the address, so none of them is a port.
         assert_eq!(split_address("fe80::1"), ("fe80::1".to_string(), None));
@@ -479,7 +485,10 @@ mod tests {
     #[test]
     fn formatting_codes_and_second_lines_are_folded_away() {
         assert_eq!(strip_formatting("§aGreen §lBold"), "Green Bold");
-        assert_eq!(strip_formatting("line one\nline two"), "line one · line two");
+        assert_eq!(
+            strip_formatting("line one\nline two"),
+            "line one · line two"
+        );
         // An unknown code still costs exactly one character.
         assert_eq!(strip_formatting("§#custom"), "custom");
     }

@@ -16,6 +16,27 @@ pub const VERSION_MANIFEST_URL: &str =
 /// Asset objects hang off this host, addressed by hash.
 pub const RESOURCES_BASE: &str = "https://resources.download.minecraft.net";
 
+/// Hosts a library download may come from. Version JSON (Fabric's especially)
+/// is a third-party document, and a library URL is otherwise an arbitrary
+/// fetch whose result lands on the classpath.
+pub const LIBRARY_HOSTS: &[&str] = &[
+    "libraries.minecraft.net",
+    "maven.fabricmc.net",
+    "piston-data.mojang.com",
+];
+
+/// True if `path` is a non-empty relative path made only of plain components,
+/// i.e. joining it onto a base can't leave that base (no `..`, root, or
+/// Windows drive prefix).
+pub fn is_safe_relative(path: &str) -> bool {
+    use std::path::{Component, Path};
+    !path.is_empty()
+        && !path.contains(['\\', ':', '\0'])
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct VersionManifest {
     pub latest: LatestVersions,
@@ -169,6 +190,12 @@ pub struct Library {
     /// to resolve `name` against.
     #[serde(default)]
     pub url: Option<String>,
+    /// Fabric's profile publishes digests next to each Maven library. Absent
+    /// on Mojang's (they carry them inside `downloads`).
+    #[serde(default)]
+    pub sha1: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 impl Library {
@@ -184,11 +211,14 @@ impl Library {
     /// The natives jar to extract, if this library has one for this OS.
     pub fn native_artifact(&self) -> Option<&Artifact> {
         let classifier = self.natives.as_ref()?.get(os_name())?;
-        let classifier = classifier.replace("${arch}", if cfg!(target_pointer_width = "64") {
-            "64"
-        } else {
-            "32"
-        });
+        let classifier = classifier.replace(
+            "${arch}",
+            if cfg!(target_pointer_width = "64") {
+                "64"
+            } else {
+                "32"
+            },
+        );
         self.downloads.as_ref()?.classifiers.get(&classifier)
     }
 
@@ -196,11 +226,25 @@ impl Library {
     /// Mojang and Fabric both use: `group/with/slashes/artifact/version/artifact-version.jar`.
     pub fn maven_path(&self) -> Option<String> {
         let mut parts = self.name.split(':');
-        let group = parts.next()?.replace('.', "/");
+        let group = parts.next()?;
         let artifact = parts.next()?;
         let version = parts.next()?;
         // A 4th segment, when present, is a classifier.
-        let classifier = parts.next().map(|c| format!("-{c}")).unwrap_or_default();
+        let classifier = parts.next();
+        // `name` is third-party text that becomes a path: every piece must be
+        // a bare name (`..` would otherwise survive, and a group like `../x`
+        // turns into an absolute path once its dots become slashes).
+        use crate::util::is_bare_basename as bare;
+        if !group.split('.').all(bare)
+            || !bare(artifact)
+            || !bare(version)
+            || !classifier.is_none_or(bare)
+            || parts.next().is_some()
+        {
+            return None;
+        }
+        let group = group.replace('.', "/");
+        let classifier = classifier.map(|c| format!("-{c}")).unwrap_or_default();
         Some(format!(
             "{group}/{artifact}/{version}/{artifact}-{version}{classifier}.jar"
         ))
@@ -209,7 +253,8 @@ impl Library {
     /// Where to fetch this library from when it has no `downloads` block.
     pub fn maven_url(&self) -> Option<String> {
         let base = self.url.as_deref()?.trim_end_matches('/').to_string();
-        Some(format!("{base}/{}", self.maven_path()?))
+        let url = format!("{base}/{}", self.maven_path()?);
+        crate::util::https_host_allowed(&url, LIBRARY_HOSTS).then_some(url)
     }
 
     /// True for the separate `:natives-linux`-style entries modern versions
@@ -417,7 +462,17 @@ impl AssetObject {
     /// Assets are stored under the first two characters of their hash, both
     /// remotely and in our cache.
     pub fn relative_path(&self) -> String {
-        format!("{}/{}", &self.hash[..2], self.hash)
+        format!("{}/{}", self.hash.get(..2).unwrap_or(""), self.hash)
+    }
+
+    /// A SHA-1 as 40 lowercase hex digits. The hash becomes a path and a URL,
+    /// so anything else (`../`, short strings) is refused rather than joined.
+    pub fn is_valid(&self) -> bool {
+        self.hash.len() == 40
+            && self
+                .hash
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     }
 
     pub fn url(&self) -> String {
@@ -456,7 +511,11 @@ mod tests {
         let rules = vec![os_rule(os_name(), RuleAction::Allow)];
         assert!(rules_allow(&rules));
 
-        let other = if os_name() == "linux" { "windows" } else { "linux" };
+        let other = if os_name() == "linux" {
+            "windows"
+        } else {
+            "linux"
+        };
         assert!(!rules_allow(&[os_rule(other, RuleAction::Allow)]));
     }
 
@@ -491,6 +550,8 @@ mod tests {
             rules: Vec::new(),
             natives: None,
             url: Some("https://maven.fabricmc.net/".into()),
+            sha1: None,
+            sha256: None,
         };
         assert_eq!(
             lib.maven_path().unwrap(),
@@ -500,6 +561,68 @@ mod tests {
             lib.maven_url().unwrap(),
             "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.3/fabric-loader-0.19.3.jar"
         );
+    }
+
+    fn lib(name: &str, url: Option<&str>) -> Library {
+        Library {
+            name: name.into(),
+            downloads: None,
+            rules: Vec::new(),
+            natives: None,
+            url: url.map(Into::into),
+            sha1: None,
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn hostile_library_coordinates_and_urls_are_refused() {
+        for name in [
+            "../x:a:1",
+            "a.b:..:1",
+            "a.b:c:../../../etc",
+            "a.b:c:1:../x",
+            "a..b:c:1",
+            "a.b:c/d:1",
+            "a.b:c:1:x:extra",
+            "a.b:c",
+            "C:\\x:a:1",
+        ] {
+            assert_eq!(lib(name, None).maven_path(), None, "{name}");
+        }
+        let ok = "https://maven.fabricmc.net/";
+        assert!(lib("a.b:c:1", Some(ok)).maven_url().is_some());
+        for url in [
+            "http://maven.fabricmc.net/",
+            "https://evil.test/",
+            "https://maven.fabricmc.net.evil.test/",
+            "https://user@evil.test/",
+        ] {
+            assert_eq!(lib("a.b:c:1", Some(url)).maven_url(), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn relative_paths_and_asset_hashes_are_checked() {
+        assert!(is_safe_relative("org/lwjgl/lwjgl/3.3/lwjgl-3.3.jar"));
+        for bad in ["", "../x", "a/../../x", "/abs", "C:/x", "a\\b", "a/b:c"] {
+            assert!(!is_safe_relative(bad), "{bad:?}");
+        }
+        let obj = |h: &str| AssetObject {
+            hash: h.into(),
+            size: 1,
+        };
+        assert!(obj(&"ab".repeat(20)).is_valid());
+        for bad in [
+            "",
+            "a",
+            "../../../../etc/passwd",
+            &"AB".repeat(20),
+            &"é".repeat(20),
+        ] {
+            assert!(!obj(bad).is_valid(), "{bad:?}");
+            let _ = obj(bad).relative_path(); // must not panic
+        }
     }
 
     #[test]
@@ -514,6 +637,8 @@ mod tests {
                 rules: vec![],
                 natives: None,
                 url: None,
+                sha1: None,
+                sha256: None,
             }],
             downloads: HashMap::new(),
             asset_index: None,
@@ -532,6 +657,8 @@ mod tests {
                 rules: vec![],
                 natives: None,
                 url: None,
+                sha1: None,
+                sha256: None,
             }],
             downloads: HashMap::new(),
             asset_index: None,
@@ -543,6 +670,9 @@ mod tests {
 
         let merged = child.merge_onto(parent);
         assert_eq!(merged.libraries[0].name, "fabric:lib:1");
-        assert_eq!(merged.main_class, "net.fabricmc.loader.impl.launch.knot.KnotClient");
+        assert_eq!(
+            merged.main_class,
+            "net.fabricmc.loader.impl.launch.knot.KnotClient"
+        );
     }
 }

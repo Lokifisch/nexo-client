@@ -55,6 +55,24 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// mrpack indexes carry sha512 (and sha1); Modrinth prefers the former.
+pub fn sha512_hex(bytes: &[u8]) -> String {
+    use sha2::Sha512;
+    let mut hasher = Sha512::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// `https://<host>/…` with `host` exactly one of `hosts` (no userinfo, no
+/// port, no suffix tricks like `cdn.modrinth.com.evil.test`).
+pub fn https_host_allowed(url: &str, hosts: &[&str]) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    hosts.iter().any(|h| authority.eq_ignore_ascii_case(h))
+}
+
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Decodes standard base64, as used for the server icons in `servers.dat` and
@@ -146,6 +164,61 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// A Minecraft or loader version as it may appear in a path or URL:
+/// `^[0-9A-Za-z._+-]+$`, and not a pure-dot string like `..`.
+pub fn is_safe_version(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && !s.starts_with(' ')
+        && !s.ends_with(' ')
+        && !s.chars().all(|c| c == '.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '~' | ' '))
+}
+
+/// Reads a response body chunk by chunk, failing as soon as it passes `max`
+/// rather than buffering whatever the server cares to send.
+pub async fn read_capped(
+    mut response: reqwest::Response,
+    max: u64,
+) -> crate::error::Result<Vec<u8>> {
+    if response.content_length().is_some_and(|len| len > max) {
+        return Err(crate::error::Error::invalid(
+            "the download is larger than expected; refusing it",
+        ));
+    }
+    let mut out = Vec::with_capacity(response.content_length().unwrap_or(0).min(max).min(16 << 20) as usize);
+    while let Some(chunk) = response.chunk().await? {
+        if out.len() as u64 + chunk.len() as u64 > max {
+            return Err(crate::error::Error::invalid(
+                "the download is larger than expected; refusing it",
+            ));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// An instance id: `[a-z0-9_-]+`, what [`slugify`] produces.
+pub fn is_safe_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars()
+            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+}
+
+/// A single file name with no directory part. Third-party JSON supplies these
+/// and they are joined onto a trusted directory, so anything that isn't one
+/// plain path component (separators, `..`, a drive prefix, `:`) is refused.
+pub fn is_bare_basename(s: &str) -> bool {
+    use std::path::{Component, Path};
+    if s.is_empty() || s.contains(['/', '\\', ':', '\0']) {
+        return false;
+    }
+    let mut parts = Path::new(s).components();
+    matches!(parts.next(), Some(Component::Normal(n)) if n == s) && parts.next().is_none()
+}
+
 /// Turns a display name into something safe to use as a directory name on
 /// every platform we target. Windows is the strict one: it rejects `<>:"/\|?*`
 /// and trailing dots/spaces.
@@ -186,6 +259,54 @@ pub fn slugify(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untrusted_name_checks() {
+        assert!(is_safe_version("26.1.2") && is_safe_version("0.19.3+build.1"));
+        assert!(is_safe_version("1.14.2 Pre-Release 2") && is_safe_version("13w12~"));
+        for bad in [
+            "", "..", ".", "../x", "a/b", "a\\b", "1.0 ", " 1.0", "C:x", "a\n", "a\0",
+        ] {
+            assert!(!is_safe_version(bad), "{bad:?}");
+        }
+        assert!(is_safe_id("my-pack_2"));
+        for bad in ["", "..", "My", "a/b", "a.b"] {
+            assert!(!is_safe_id(bad), "{bad:?}");
+        }
+        assert!(is_bare_basename("sodium-1.0.jar") && is_bare_basename("a b.jar"));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x.jar",
+            "a/b.jar",
+            "a\\b.jar",
+            "C:evil.jar",
+            "/abs",
+        ] {
+            assert!(!is_bare_basename(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn host_allowlist_is_exact() {
+        let hosts = ["cdn.modrinth.com", "github.com"];
+        assert!(https_host_allowed(
+            "https://cdn.modrinth.com/data/a.jar",
+            &hosts
+        ));
+        for bad in [
+            "http://cdn.modrinth.com/a",
+            "https://cdn.modrinth.com.evil.test/a",
+            "https://evil.test@cdn.modrinth.com/a",
+            "https://cdn.modrinth.com@evil.test/a",
+            "https://cdn.modrinth.com:8443/a",
+            "https://evil.test/cdn.modrinth.com",
+            "ftp://github.com/a",
+        ] {
+            assert!(!https_host_allowed(bad, &hosts), "{bad}");
+        }
+    }
 
     #[test]
     fn slug_collapses_and_lowercases() {

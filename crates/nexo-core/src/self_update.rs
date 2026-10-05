@@ -44,6 +44,26 @@ use std::path::{Path, PathBuf};
 /// see [`crate::nexo_mod`] for that one.
 const REPO: &str = "Lokifisch/nexo-client";
 
+/// Both the binary and `SHA256SUMS` must come from this repo's release
+/// downloads. The URLs originate in the GitHub API response, and a checksum
+/// file fetched from the same untrusted place as the binary proves nothing,
+/// so neither is followed anywhere else.
+const RELEASE_URL_PREFIX: &str = "https://github.com/Lokifisch/nexo-client/releases/download/";
+
+/// Ceiling for the binary when the release doesn't state a size, and the
+/// slack allowed over a stated one. `SHA256SUMS` is a few hundred bytes.
+const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+const SIZE_SLACK: u64 = 1024 * 1024;
+const MAX_CHECKSUMS_BYTES: u64 = 1024 * 1024;
+
+fn release_url_ok(url: &str) -> bool {
+    url.strip_prefix(RELEASE_URL_PREFIX).is_some_and(|rest| {
+        !rest.is_empty() && !rest.contains(['?', '#', '\\']) && !rest.split('/').any(|p| p == "..")
+    })
+}
+
+use crate::util::read_capped;
+
 /// The version this build reports. Shared across the workspace, so it is the
 /// same number `nexo-app` was compiled with.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -287,16 +307,24 @@ impl SelfUpdate {
         let wanted = asset_name()
             .ok_or_else(|| Error::invalid("this platform has no published Nexo build"))?;
 
+        if !release_url_ok(&update.url) || !release_url_ok(&update.checksums_url) {
+            return Err(Error::invalid(format!(
+                "the update isn't hosted on {REPO}'s releases; refusing to download it"
+            )));
+        }
+
         // Fetched before the binary: if the release can't vouch for what's
         // about to be downloaded, there is no reason to download it.
-        let sums = self
-            .http
-            .get(&update.checksums_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
+        let sums = read_capped(
+            self.http
+                .get(&update.checksums_url)
+                .send()
+                .await?
+                .error_for_status()?,
+            MAX_CHECKSUMS_BYTES,
+        )
+        .await?;
+        let sums = String::from_utf8_lossy(&sums);
         let expected = checksum_for(&sums, &wanted).ok_or_else(|| {
             Error::invalid(format!(
                 "{CHECKSUMS} in release {} doesn't list {wanted}",
@@ -304,14 +332,19 @@ impl SelfUpdate {
             ))
         })?;
 
-        let bytes = self
-            .http
-            .get(&update.url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let cap = match update.size {
+            0 => MAX_BINARY_BYTES,
+            size => size.saturating_add(SIZE_SLACK).min(MAX_BINARY_BYTES),
+        };
+        let bytes = read_capped(
+            self.http
+                .get(&update.url)
+                .send()
+                .await?
+                .error_for_status()?,
+            cap,
+        )
+        .await?;
 
         let actual = sha256_hex(&bytes);
         if actual != expected {
@@ -423,6 +456,24 @@ fn swap(staged: &Path, target: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_this_repos_release_downloads_are_trusted() {
+        use super::release_url_ok as ok;
+        let base = "https://github.com/Lokifisch/nexo-client/releases/download/v1.0.0/nexo";
+        assert!(ok(base));
+        for bad in [
+            "http://github.com/Lokifisch/nexo-client/releases/download/v1/nexo",
+            "https://github.com/evil/nexo-client/releases/download/v1/nexo",
+            "https://github.com.evil.test/Lokifisch/nexo-client/releases/download/v1/nexo",
+            "https://github.com/Lokifisch/nexo-client/releases/download/../../../evil",
+            "https://github.com/Lokifisch/nexo-client/releases/download/",
+            "https://evil.test/Lokifisch/nexo-client/releases/download/v1/nexo",
+            "https://github.com/Lokifisch/nexo-client/releases/download/v1/nexo?x=1",
+        ] {
+            assert!(!ok(bad), "{bad}");
+        }
+    }
+
     use super::*;
 
     #[test]

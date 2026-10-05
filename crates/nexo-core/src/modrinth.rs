@@ -25,9 +25,7 @@ pub struct Modrinth {
 
 impl Modrinth {
     pub fn new() -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .build()?;
+        let http = reqwest::Client::builder().user_agent(USER_AGENT).build()?;
         Ok(Self { http })
     }
 
@@ -309,9 +307,7 @@ impl Version {
             .iter()
             .find(|f| f.primary)
             .or_else(|| self.files.first())
-            .ok_or_else(|| {
-                Error::invalid(format!("Modrinth version {} has no files", self.id))
-            })
+            .ok_or_else(|| Error::invalid(format!("Modrinth version {} has no files", self.id)))
     }
 }
 

@@ -158,8 +158,7 @@ impl Skin {
             return SkinModel::Classic;
         }
 
-        let empty = (20..32)
-            .all(|y| (54..56).all(|x| self.texture.get(x, y)[3] == 0));
+        let empty = (20..32).all(|y| (54..56).all(|x| self.texture.get(x, y)[3] == 0));
 
         if empty {
             SkinModel::Slim
@@ -300,7 +299,13 @@ pub async fn fetch(http: &reqwest::Client, url: &str, model: SkinModel) -> Resul
 /// later, so it has to survive the round trip byte for byte rather than being
 /// re-encoded from pixels.
 pub async fn fetch_png(http: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+    let bytes = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     Ok(bytes.to_vec())
 }
 
@@ -332,7 +337,13 @@ pub fn cape_panel(texture: &Rgba, scale: u32) -> Rgba {
 /// icons, which are variously PNG, WebP or JPEG — hence sniffing the format
 /// from the bytes rather than assuming one.
 pub async fn fetch_texture(http: &reqwest::Client, url: &str) -> Result<Rgba> {
-    let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+    let bytes = http
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     let decoded = image::load_from_memory(&bytes)
         .map_err(|err| Error::invalid(format!("could not read texture: {err}")))?
         .to_rgba8();
@@ -411,12 +422,7 @@ pub fn placeholder_face(scale: u32) -> Rgba {
 fn gradient(y: u32, height: u32) -> [u8; 4] {
     let t = y as f32 / (height.max(1) - 1).max(1) as f32;
     let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    [
-        lerp(0x7b, 0xff),
-        lerp(0x3c, 0x3c),
-        lerp(0xff, 0xac),
-        0xff,
-    ]
+    [lerp(0x7b, 0xff), lerp(0x3c, 0x3c), lerp(0xff, 0xac), 0xff]
 }
 
 #[cfg(test)]

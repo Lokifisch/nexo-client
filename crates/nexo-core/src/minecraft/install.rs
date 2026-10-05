@@ -72,9 +72,9 @@ impl Installer {
         }
 
         let manifest = self.version_manifest().await?;
-        let entry = manifest.find(game_version).ok_or_else(|| {
-            Error::invalid(format!("Minecraft {game_version} does not exist"))
-        })?;
+        let entry = manifest
+            .find(game_version)
+            .ok_or_else(|| Error::invalid(format!("Minecraft {game_version} does not exist")))?;
 
         let raw = self
             .http
@@ -118,6 +118,7 @@ impl Installer {
                 url: client.url.clone(),
                 dest: self.client_jar(&instance.game_version),
                 sha1: non_empty(&client.sha1),
+                sha256: None,
                 size: client.size,
             });
         }
@@ -136,7 +137,8 @@ impl Installer {
         self.downloader.run(tasks, progress).await?;
 
         stage("Unpacking natives");
-        self.extract_natives(&version, &instance.game_version).await?;
+        self.extract_natives(&version, &instance.game_version)
+            .await?;
 
         // Deliberately no `Progress::Done` here — install is a step inside a
         // larger play flow, and the caller owns announcing the terminal state.
@@ -164,7 +166,22 @@ impl Installer {
             // coordinates.
             _ => library.maven_path()?,
         };
-        Some(self.paths.libraries().join(relative))
+        self.checked_library_path(&relative)
+    }
+
+    /// `relative` is third-party text; refuse anything but plain components.
+    fn checked_library_path(&self, relative: &str) -> Option<PathBuf> {
+        meta::is_safe_relative(relative).then(|| self.paths.libraries().join(relative))
+    }
+
+    fn download_url_ok(url: &str) -> Result<()> {
+        if crate::util::https_host_allowed(url, meta::LIBRARY_HOSTS) {
+            Ok(())
+        } else {
+            Err(Error::invalid(format!(
+                "refusing to download a library from {url}"
+            )))
+        }
     }
 
     fn library_tasks(&self, version: &VersionData) -> Result<Vec<DownloadTask>> {
@@ -172,22 +189,32 @@ impl Installer {
 
         for library in version.active_libraries() {
             if let Some(artifact) = library.artifact() {
-                if let Some(dest) = self.library_path(library) {
-                    tasks.push(DownloadTask {
-                        url: artifact.url.clone(),
-                        dest,
-                        sha1: non_empty(&artifact.sha1),
-                        size: artifact.size,
-                    });
-                }
-            } else if let (Some(url), Some(dest)) =
-                (library.maven_url(), self.library_path(library))
-            {
-                // No checksum published for Maven-resolved libraries.
+                Self::download_url_ok(&artifact.url)?;
+                let dest = self.library_path(library).ok_or_else(|| {
+                    Error::invalid(format!("library {} has an unsafe path", library.name))
+                })?;
+                tasks.push(DownloadTask {
+                    url: artifact.url.clone(),
+                    dest,
+                    sha1: non_empty(&artifact.sha1),
+                    sha256: None,
+                    size: artifact.size,
+                });
+            } else if library.url.is_some() {
+                let (Some(url), Some(dest)) = (library.maven_url(), self.library_path(library))
+                else {
+                    return Err(Error::invalid(format!(
+                        "library {} has an unsafe name or download host",
+                        library.name
+                    )));
+                };
+                // Fabric's profile publishes digests; Mojang-style entries
+                // without any are downloaded unchecked, as before.
                 tasks.push(DownloadTask {
                     url,
                     dest,
-                    sha1: None,
+                    sha1: library.sha1.clone().filter(|h| !h.is_empty()),
+                    sha256: library.sha256.clone().filter(|h| !h.is_empty()),
                     size: 0,
                 });
             }
@@ -195,10 +222,15 @@ impl Installer {
             // Legacy classifier-style natives are a second jar for the same
             // library entry.
             if let Some(native) = library.native_artifact() {
+                Self::download_url_ok(&native.url)?;
+                let dest = self.checked_library_path(&native.path).ok_or_else(|| {
+                    Error::invalid(format!("native {} has an unsafe path", native.path))
+                })?;
                 tasks.push(DownloadTask {
                     url: native.url.clone(),
-                    dest: self.paths.libraries().join(&native.path),
+                    dest,
                     sha1: non_empty(&native.sha1),
+                    sha256: None,
                     size: native.size,
                 });
             }
@@ -231,7 +263,9 @@ impl Installer {
             if let Some(parent) = index_path.parent() {
                 tokio::fs::create_dir_all(parent).await.ctx(parent)?;
             }
-            tokio::fs::write(&index_path, &bytes).await.ctx(&index_path)?;
+            tokio::fs::write(&index_path, &bytes)
+                .await
+                .ctx(&index_path)?;
             bytes.to_vec()
         };
 
@@ -242,6 +276,12 @@ impl Installer {
         let mut seen = std::collections::HashSet::new();
         let mut tasks = Vec::new();
         for object in index.objects.values() {
+            if !object.is_valid() {
+                return Err(Error::invalid(format!(
+                    "asset index has a malformed hash '{}'",
+                    object.hash
+                )));
+            }
             if !seen.insert(object.hash.clone()) {
                 continue;
             }
@@ -249,6 +289,7 @@ impl Installer {
                 url: object.url(),
                 dest: self.paths.asset_objects().join(object.relative_path()),
                 sha1: Some(object.hash.clone()),
+                sha256: None,
                 size: object.size,
             });
         }
@@ -268,7 +309,9 @@ impl Installer {
         let mut jars = Vec::new();
         for library in version.active_libraries() {
             if let Some(native) = library.native_artifact() {
-                jars.push(self.paths.libraries().join(&native.path));
+                jars.push(self.checked_library_path(&native.path).ok_or_else(|| {
+                    Error::invalid(format!("native {} has an unsafe path", native.path))
+                })?);
             } else if library.is_modern_native()
                 && let Some(path) = self.library_path(library)
             {

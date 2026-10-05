@@ -10,5 +10,5 @@ pub mod meta;
 
 pub use download::{DownloadTask, Downloader, Progress};
 pub use install::Installer;
-pub use launch::{LaunchOptions, Launcher, DEFAULT_MEMORY_MB};
+pub use launch::{DEFAULT_MEMORY_MB, LaunchOptions, Launcher};
 pub use meta::{ManifestVersion, VersionData, VersionManifest};

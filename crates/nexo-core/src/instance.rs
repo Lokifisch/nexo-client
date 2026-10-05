@@ -7,13 +7,13 @@
 //! list down with it.
 
 use crate::error::{Error, IoContext, Result};
-use crate::util::slugify;
+use crate::util::{is_safe_id, is_safe_version, slugify};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Filename of the per-instance metadata document.
-const MANIFEST: &str = "nexo-instance.json";
+pub(crate) const MANIFEST: &str = "nexo-instance.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -79,6 +79,27 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Rejects values that end up in paths or URLs: an instance's manifest is
+    /// a hand-editable file, so none of this can be assumed well-formed.
+    /// `dir_name` is the directory the manifest was read from, when known.
+    pub fn validate(&self, dir_name: Option<&str>) -> Result<()> {
+        if !is_safe_id(&self.id) || dir_name.is_some_and(|d| d != self.id) {
+            return Err(Error::invalid(format!("invalid instance id '{}'", self.id)));
+        }
+        if !is_safe_version(&self.game_version)
+            || self
+                .loader_version
+                .as_deref()
+                .is_some_and(|v| !is_safe_version(v))
+        {
+            return Err(Error::invalid(format!(
+                "instance '{}' has an invalid game or loader version",
+                self.id
+            )));
+        }
+        Ok(())
+    }
+
     pub fn new(name: impl Into<String>, game_version: impl Into<String>, loader: Loader) -> Self {
         let name = name.into();
         Self {
@@ -195,10 +216,19 @@ impl InstanceStore {
 
     async fn read_manifest(&self, path: &std::path::Path) -> Result<Instance> {
         let raw = tokio::fs::read(path).await.ctx(path)?;
-        Ok(serde_json::from_slice(&raw)?)
+        let instance: Instance = serde_json::from_slice(&raw)?;
+        let dir_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        instance.validate(dir_name)?;
+        Ok(instance)
     }
 
     pub async fn get(&self, id: &str) -> Result<Instance> {
+        if !is_safe_id(id) {
+            return Err(Error::invalid(format!("no instance named '{id}'")));
+        }
         let manifest = self.paths.instance(id).join(MANIFEST);
         if !manifest.exists() {
             return Err(Error::invalid(format!("no instance named '{id}'")));
@@ -208,6 +238,7 @@ impl InstanceStore {
 
     /// Writes the manifest, creating the instance directory tree if needed.
     pub async fn save(&self, instance: &Instance) -> Result<()> {
+        instance.validate(None)?;
         let dir = self.paths.instance(&instance.id);
         let mods = self.paths.instance_mods(&instance.id);
         tokio::fs::create_dir_all(&mods).await.ctx(&mods)?;
@@ -224,12 +255,12 @@ impl InstanceStore {
 
     /// Reserves a unique id for `name`, suffixing `-2`, `-3`, … if the
     /// obvious slug is taken.
-    pub async fn create(
-        &self,
-        name: &str,
-        game_version: &str,
-        loader: Loader,
-    ) -> Result<Instance> {
+    pub async fn create(&self, name: &str, game_version: &str, loader: Loader) -> Result<Instance> {
+        if !is_safe_version(game_version) {
+            return Err(Error::invalid(format!(
+                "invalid Minecraft version '{game_version}'"
+            )));
+        }
         let mut instance = Instance::new(name, game_version, loader);
         let base = instance.id.clone();
         let mut n = 2;
@@ -243,6 +274,9 @@ impl InstanceStore {
 
     /// Deletes the instance directory and everything in it, including saves.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        if !is_safe_id(id) {
+            return Err(Error::invalid(format!("invalid instance id '{id}'")));
+        }
         let dir = self.paths.instance(id);
         if dir.exists() {
             tokio::fs::remove_dir_all(&dir).await.ctx(&dir)?;
@@ -269,12 +303,55 @@ mod tests {
         paths.ensure().await.unwrap();
         let store = InstanceStore::new(paths);
 
-        let a = store.create("My Pack", "26.1.2", Loader::Fabric).await.unwrap();
-        let b = store.create("My Pack", "26.1.2", Loader::Fabric).await.unwrap();
+        let a = store
+            .create("My Pack", "26.1.2", Loader::Fabric)
+            .await
+            .unwrap();
+        let b = store
+            .create("My Pack", "26.1.2", Loader::Fabric)
+            .await
+            .unwrap();
 
         assert_eq!(a.id, "my-pack");
         assert_eq!(b.id, "my-pack-2");
         assert_eq!(store.list().await.unwrap().len(), 2);
+
+        tokio::fs::remove_dir_all(&temp).await.ok();
+    }
+
+    #[tokio::test]
+    async fn hostile_ids_and_versions_are_refused() {
+        let temp = std::env::temp_dir().join(format!("nexo-test-{}", uuid::Uuid::new_v4()));
+        let paths = crate::paths::Paths::with_root(&temp);
+        paths.ensure().await.unwrap();
+        let store = InstanceStore::new(paths);
+
+        assert!(
+            store
+                .create("x", "../../etc", Loader::Fabric)
+                .await
+                .is_err()
+        );
+        assert!(store.get("../..").await.is_err());
+        assert!(store.delete("..").await.is_err());
+
+        // A manifest whose id disagrees with its directory is skipped.
+        let ok = store
+            .create("Real", "26.1.2", Loader::Fabric)
+            .await
+            .unwrap();
+        let mut forged = ok.clone();
+        forged.id = "other".into();
+        let json = serde_json::to_vec(&forged).unwrap();
+        tokio::fs::write(temp.join("instances/real").join(MANIFEST), json)
+            .await
+            .unwrap();
+        assert!(store.get("real").await.is_err());
+        assert!(store.list().await.unwrap().is_empty());
+
+        let mut bad = ok.clone();
+        bad.loader_version = Some("1/../2".into());
+        assert!(store.save(&bad).await.is_err());
 
         tokio::fs::remove_dir_all(&temp).await.ok();
     }
@@ -286,7 +363,10 @@ mod tests {
         paths.ensure().await.unwrap();
         let store = InstanceStore::new(paths);
 
-        let mut instance = store.create("Roundtrip", "26.1.2", Loader::Fabric).await.unwrap();
+        let mut instance = store
+            .create("Roundtrip", "26.1.2", Loader::Fabric)
+            .await
+            .unwrap();
         instance.loader_version = Some("0.19.3".into());
         instance.memory_mb = Some(4096);
         store.save(&instance).await.unwrap();

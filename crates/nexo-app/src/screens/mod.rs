@@ -2,6 +2,8 @@ pub mod accounts;
 pub mod home;
 pub mod instance;
 pub mod instances;
+pub mod paper_console;
+pub mod paper_servers;
 pub mod skins;
 
 use crate::theme;
@@ -29,6 +31,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
             nav_entry("Instances", Screen::Instances),
             nav_entry("Accounts", Screen::Accounts),
             nav_entry("Skin & capes", Screen::Skins),
+            nav_entry("Paper Servers", Screen::Servers),
             Space::new().height(Fill),
             rule::horizontal(1),
             Space::new().height(12),

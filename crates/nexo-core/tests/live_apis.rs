@@ -105,6 +105,33 @@ async fn fabric_profile_merges_onto_vanilla() {
         );
     }
 
+    // Every library must survive the download-host and path checks, and
+    // Fabric's Maven libraries should publish digests.
+    for lib in &active {
+        if let Some(a) = lib.artifact() {
+            assert!(
+                nexo_core::util::https_host_allowed(
+                    &a.url,
+                    nexo_core::minecraft::meta::LIBRARY_HOSTS
+                ),
+                "{}: host not allowed: {}",
+                lib.name,
+                a.url
+            );
+            assert!(
+                nexo_core::minecraft::meta::is_safe_relative(&a.path),
+                "{}",
+                a.path
+            );
+        } else if lib.url.is_some() {
+            assert!(lib.maven_url().is_some(), "{} rejected", lib.name);
+            // Digests are published for most Maven libraries but not all
+            // (fabric-loader itself had none), so they are verified only
+            // when present.
+            println!("{}: sha1 published = {}", lib.name, lib.sha1.is_some());
+        }
+    }
+
     println!(
         "merged: main_class={} libraries={} assets={}",
         version.main_class,
@@ -382,7 +409,9 @@ async fn adoptium_publishes_a_runtime_for_this_platform() {
     let first = assets
         .as_array()
         .and_then(|a| a.first())
-        .unwrap_or_else(|| panic!("Adoptium publishes no Java {MIN_JAVA_MAJOR} JRE for {os}-{arch}"));
+        .unwrap_or_else(|| {
+            panic!("Adoptium publishes no Java {MIN_JAVA_MAJOR} JRE for {os}-{arch}")
+        });
 
     let package = &first["binary"]["package"];
     for field in ["name", "link", "checksum"] {
@@ -392,7 +421,9 @@ async fn adoptium_publishes_a_runtime_for_this_platform() {
         );
     }
     assert!(
-        first["release_name"].as_str().is_some_and(|v| !v.is_empty()),
+        first["release_name"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()),
         "release_name is missing; it names the install directory"
     );
 
@@ -476,7 +507,9 @@ async fn srv_only_servers_answer_a_ping() {
 #[ignore = "hits the network"]
 async fn an_explicit_port_bypasses_srv() {
     assert!(
-        nexo_core::server_ping::ping("hypixel.net:25565").await.is_err(),
+        nexo_core::server_ping::ping("hypixel.net:25565")
+            .await
+            .is_err(),
         "an explicit port should have gone straight to a closed port"
     );
 }

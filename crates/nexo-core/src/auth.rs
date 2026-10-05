@@ -34,8 +34,7 @@ const REDIRECT_URI: &str = "http://localhost:25585/callback";
 
 /// `consumers` (not `common`) because Minecraft accounts are personal
 /// Microsoft accounts; the tenant endpoints reject them.
-const AUTHORIZE_URL: &str =
-    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+const AUTHORIZE_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
 const XBL_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
@@ -63,7 +62,7 @@ const SCOPE: &str = "XboxLive.signin offline_access";
 /// nobody notices until they hit it in-game.
 const PROMPT: &str = "select_account";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     /// Minecraft profile UUID, dashless as the game expects it.
     pub uuid: String,
@@ -224,7 +223,9 @@ impl Auth {
             .await?;
 
         if !response.status().is_success() {
-            return Err(Error::auth("this account's sign-in expired — sign in again"));
+            return Err(Error::auth(
+                "this account's sign-in expired — sign in again",
+            ));
         }
 
         let msa: MsaToken = response.json().await?;
@@ -334,7 +335,9 @@ impl Auth {
         // A 404 means the account authenticated fine but owns no copy of the
         // game — worth saying plainly rather than "profile missing".
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(Error::auth("this account doesn't own Minecraft: Java Edition"));
+            return Err(Error::auth(
+                "this account doesn't own Minecraft: Java Edition",
+            ));
         }
         if !response.status().is_success() {
             return Err(Error::auth("could not read the Minecraft profile"));
@@ -631,7 +634,10 @@ mod tests {
     #[test]
     fn decodes_percent_escapes_in_callback() {
         let params = query_params("/callback?error_description=Bad+thing%20happened");
-        assert_eq!(params.get("error_description").unwrap(), "Bad thing happened");
+        assert_eq!(
+            params.get("error_description").unwrap(),
+            "Bad thing happened"
+        );
     }
 
     #[test]

@@ -196,10 +196,7 @@ impl Launcher {
                 self.paths.libraries().to_string_lossy().to_string(),
             ),
             ("launcher_name".to_string(), LAUNCHER_NAME.to_string()),
-            (
-                "launcher_version".to_string(),
-                LAUNCHER_VERSION.to_string(),
-            ),
+            ("launcher_version".to_string(), LAUNCHER_VERSION.to_string()),
             (
                 "classpath_separator".to_string(),
                 classpath_separator().to_string(),

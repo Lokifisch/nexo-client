@@ -219,6 +219,11 @@ pub struct EditionInfo {
     /// carry its own copy to drift out of date.
     #[serde(default)]
     pub description: Option<String>,
+    /// Hex SHA-256 of the jar. Optional because releases up to 0.6.5 were
+    /// published without it; when present it is enforced, see
+    /// [`NexoMod::place`].
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// What a published release declares about itself.
@@ -308,6 +313,8 @@ pub struct ReleaseEdition {
     /// Fabric mod id that will end up in the instance.
     pub mod_id: String,
     pub jar_name: String,
+    /// The manifest's SHA-256 for the jar, if it published one.
+    pub sha256: Option<String>,
     url: String,
 }
 
@@ -382,6 +389,12 @@ fn assemble(tag: String, manifest: Manifest, assets: &[GithubAsset]) -> Result<R
             let Some(info) = manifest.edition(edition) else {
                 continue;
             };
+            if !crate::util::is_bare_basename(&info.file) {
+                return Err(Error::invalid(format!(
+                    "release {tag} declares an unsafe file name '{}'",
+                    info.file
+                )));
+            }
             let asset = assets.iter().find(|a| a.name == info.file).ok_or_else(|| {
                 Error::invalid(format!(
                     "release {tag} declares its {edition} edition as '{}', but publishes no asset by that name",
@@ -398,6 +411,7 @@ fn assemble(tag: String, manifest: Manifest, assets: &[GithubAsset]) -> Result<R
                     .clone()
                     .unwrap_or_else(|| edition.default_mod_id().to_string()),
                 jar_name: asset.name.clone(),
+                sha256: info.sha256.clone(),
                 url: asset.browser_download_url.clone(),
             });
         }
@@ -414,6 +428,7 @@ fn assemble(tag: String, manifest: Manifest, assets: &[GithubAsset]) -> Result<R
             description: None,
             mod_id: TACTICAL_MOD_ID.to_string(),
             jar_name: jar.name.clone(),
+            sha256: None,
             url: jar.browser_download_url.clone(),
         }]
     };
@@ -539,14 +554,19 @@ impl NexoMod {
             ))
         })?;
 
-        let bytes = self
-            .http
-            .get(&build.url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        // Asset URLs come from the GitHub API response.
+        const JAR_URL_PREFIX: &str = "https://github.com/Lokifisch/nexo-mod/releases/download/";
+        if !build.url.strip_prefix(JAR_URL_PREFIX).is_some_and(|r| {
+            !r.is_empty() && !r.contains(['?', '#', '\\']) && !r.split('/').any(|p| p == "..")
+        }) {
+            return Err(Error::invalid(format!(
+                "refusing to download Nexo Mod from {}",
+                build.url
+            )));
+        }
+
+        let response = self.http.get(&build.url).send().await?.error_for_status()?;
+        let bytes = crate::util::read_capped(response, 128 * 1024 * 1024).await?;
 
         self.place(instance, release, build, &bytes).await
     }
@@ -560,6 +580,36 @@ impl NexoMod {
         build: &ReleaseEdition,
         bytes: &[u8],
     ) -> Result<()> {
+        if !crate::util::is_bare_basename(&build.jar_name) {
+            return Err(Error::invalid(format!(
+                "unsafe jar name '{}'",
+                build.jar_name
+            )));
+        }
+
+        // Fail closed when the release publishes a hash: a mismatch (or a
+        // malformed hash) means these aren't the bytes the maintainer
+        // released, and nothing is touched. Releases without one — every
+        // release up to 0.6.5 — still install, with a warning, because
+        // refusing them would break installing anything already published.
+        match build.sha256.as_deref() {
+            Some(expected) => {
+                let actual = crate::util::sha256_hex(bytes);
+                if !expected.eq_ignore_ascii_case(&actual) {
+                    return Err(Error::invalid(format!(
+                        "{} failed its SHA-256 check (expected {expected}, got {actual}). \
+                         Nothing was installed.",
+                        build.jar_name
+                    )));
+                }
+            }
+            None => tracing::warn!(
+                jar = %build.jar_name,
+                release = %release.tag,
+                "release publishes no sha256 for this jar; installing it unverified"
+            ),
+        }
+
         let mods = self.paths.instance_mods(&instance.id);
         tokio::fs::create_dir_all(&mods).await.ctx(&mods)?;
 
@@ -568,10 +618,20 @@ impl NexoMod {
         // won't start.
         self.remove(instance).await?;
 
+        // Temp file + rename, so a crash can't leave a truncated jar that
+        // Fabric would then try to load. The `.part` suffix keeps it from
+        // being picked up as a mod in the meantime.
         let destination = mods.join(&build.jar_name);
-        tokio::fs::write(&destination, bytes)
-            .await
-            .ctx(&destination)?;
+        let temp = mods.join(format!(
+            ".{}.{}.part",
+            build.jar_name,
+            uuid::Uuid::new_v4().simple()
+        ));
+        tokio::fs::write(&temp, bytes).await.ctx(&temp)?;
+        if let Err(err) = tokio::fs::rename(&temp, &destination).await {
+            tokio::fs::remove_file(&temp).await.ok();
+            return Err(err).ctx(&destination);
+        }
 
         instance.mods.push(InstalledMod {
             project_id: PROJECT_ID.to_string(),
@@ -602,6 +662,8 @@ impl NexoMod {
             .mods
             .iter()
             .filter(|m| m.source == ModSource::NexoMod)
+            // The list is read from a hand-editable manifest.
+            .filter(|m| crate::util::is_bare_basename(&m.file_name))
             .map(|m| m.file_name.clone())
             .collect();
 
@@ -915,6 +977,65 @@ mod tests {
         );
 
         tokio::fs::remove_dir_all(paths.root()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_published_sha256_is_enforced_and_an_absent_one_is_not() {
+        let (paths, mut instance) = temp_instance().await;
+        let nexo = NexoMod::new(reqwest::Client::new(), paths.clone());
+        let good = crate::util::sha256_hex(b"jar bytes");
+        let manifest = EDITION_MANIFEST.replacen(
+            r#""mod_id": "nexomod","#,
+            &format!(r#""mod_id": "nexomod", "sha256": "{good}","#),
+            1,
+        );
+        let release = assemble(
+            "v0.5.0".into(),
+            manifest_from(&manifest),
+            &assets(&[
+                "manifest.json",
+                "nexomod-0.5.0.jar",
+                "nexomod-legit-0.5.0.jar",
+            ]),
+        )
+        .unwrap();
+
+        let tactical = release.edition(Edition::Tactical).unwrap();
+        assert!(
+            nexo.place(&mut instance, &release, tactical, b"tampered")
+                .await
+                .is_err()
+        );
+        assert!(
+            jars_in(&paths, &instance).is_empty(),
+            "nothing may be written on mismatch"
+        );
+        nexo.place(&mut instance, &release, tactical, b"jar bytes")
+            .await
+            .unwrap();
+        assert_eq!(jars_in(&paths, &instance), vec!["nexomod-0.5.0.jar"]);
+
+        // No hash published for Legit: installs (unverified), no stray temp file.
+        let legit = release.edition(Edition::Legit).unwrap();
+        nexo.place(&mut instance, &release, legit, b"anything")
+            .await
+            .unwrap();
+        assert_eq!(jars_in(&paths, &instance), vec!["nexomod-legit-0.5.0.jar"]);
+
+        tokio::fs::remove_dir_all(paths.root()).await.ok();
+    }
+
+    #[test]
+    fn a_manifest_cannot_name_a_path_as_its_jar() {
+        let manifest = EDITION_MANIFEST.replace("nexomod-0.5.0.jar", "../../evil.jar");
+        assert!(
+            assemble(
+                "v0.5.0".into(),
+                manifest_from(&manifest),
+                &assets(&["manifest.json", "../../evil.jar", "nexomod-legit-0.5.0.jar"]),
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

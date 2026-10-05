@@ -201,7 +201,10 @@ async fn read_level_dat(world: &Path) -> Option<Level> {
     let data = root.get("Data")?;
 
     Some(Level {
-        name: data.get("LevelName").and_then(nbt::Value::as_str).map(str::to_string),
+        name: data
+            .get("LevelName")
+            .and_then(nbt::Value::as_str)
+            .map(str::to_string),
         // Stored in milliseconds. Divided rather than shown raw so the whole
         // app can treat one unit as "a timestamp".
         last_played: data
@@ -214,7 +217,10 @@ async fn read_level_dat(world: &Path) -> Option<Level> {
             .and_then(|v| v.get("Name"))
             .and_then(nbt::Value::as_str)
             .map(str::to_string),
-        mode: data.get("GameType").and_then(nbt::Value::as_i64).and_then(game_mode),
+        mode: data
+            .get("GameType")
+            .and_then(nbt::Value::as_i64)
+            .and_then(game_mode),
         hardcore: data.get("hardcore").and_then(nbt::Value::as_i64) == Some(1),
     })
 }
@@ -346,23 +352,13 @@ pub async fn add_server(instance: &Path, name: &str, address: &str) -> Result<()
 ///
 /// Carries the same warning as [`add_server`]: the game owns this file while
 /// it is running.
-pub async fn update_server(
-    instance: &Path,
-    index: usize,
-    name: &str,
-    address: &str,
-) -> Result<()> {
+pub async fn update_server(instance: &Path, index: usize, name: &str, address: &str) -> Result<()> {
     edit_list(instance, Some(index), name, address).await
 }
 
 /// The one place `servers.dat` is written. `at` selects an existing entry to
 /// overwrite; `None` appends.
-async fn edit_list(
-    instance: &Path,
-    at: Option<usize>,
-    name: &str,
-    address: &str,
-) -> Result<()> {
+async fn edit_list(instance: &Path, at: Option<usize>, name: &str, address: &str) -> Result<()> {
     let name = name.trim();
     let address = address.trim();
     if address.is_empty() {
@@ -456,7 +452,10 @@ pub struct LogFile {
 pub async fn logs(instance: &Path) -> Vec<LogFile> {
     let mut out = Vec::new();
 
-    for (dir, crash) in [(instance.join("logs"), false), (instance.join("crash-reports"), true)] {
+    for (dir, crash) in [
+        (instance.join("logs"), false),
+        (instance.join("crash-reports"), true),
+    ] {
         let Ok(mut read) = tokio::fs::read_dir(&dir).await else {
             continue;
         };
@@ -663,7 +662,11 @@ mod nbt {
         /// Element counts are attacker-controlled, so every array allocates
         /// against what is actually left in the buffer rather than against the
         /// declared length — otherwise a four-byte count reserves gigabytes.
-        fn array<T>(&mut self, width: usize, mut read: impl FnMut(&mut Self) -> Option<T>) -> Option<Vec<T>> {
+        fn array<T>(
+            &mut self,
+            width: usize,
+            mut read: impl FnMut(&mut Self) -> Option<T>,
+        ) -> Option<Vec<T>> {
             let len = self.i32()?;
             if len < 0 || (len as usize).checked_mul(width)? > self.buf.len() - self.pos {
                 return None;
@@ -940,8 +943,7 @@ mod tests {
 
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         use std::io::Write;
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(bytes).unwrap();
         encoder.finish().unwrap()
     }
@@ -1170,7 +1172,11 @@ mod tests {
         assert_eq!(found[0].icon.as_deref(), Some(&b"\x89PNG\r\n\x1a\n"[..]));
 
         // An index past the end is a stale click, not a reason to append.
-        assert!(update_server(&root, 9, "Ghost", "ghost.example").await.is_err());
+        assert!(
+            update_server(&root, 9, "Ghost", "ghost.example")
+                .await
+                .is_err()
+        );
         assert_eq!(servers(&root).await.len(), 1);
 
         std::fs::remove_dir_all(&root).unwrap();
@@ -1261,7 +1267,11 @@ mod tests {
         std::fs::create_dir_all(root.join("logs")).unwrap();
         std::fs::create_dir_all(root.join("crash-reports")).unwrap();
         std::fs::write(root.join("logs").join("latest.log"), b"newest line\n").unwrap();
-        std::fs::write(root.join("logs").join("2026-08-01-1.log.gz"), gzip(b"old\n")).unwrap();
+        std::fs::write(
+            root.join("logs").join("2026-08-01-1.log.gz"),
+            gzip(b"old\n"),
+        )
+        .unwrap();
         std::fs::write(root.join("logs").join("ignore-me.json"), b"{}").unwrap();
         std::fs::write(root.join("crash-reports").join("crash-2026.txt"), b"boom\n").unwrap();
 

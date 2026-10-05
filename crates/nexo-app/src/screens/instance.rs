@@ -59,7 +59,7 @@ impl Tab {
 /// and stay true whichever tab is open. Filing them under a tab would mean
 /// leaving the file you are looking at to check what version it belongs to.
 pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let running = app.running.contains(&instance.id);
+    let running = app.instance_running(&instance.id);
 
     let back = button(text("‹ Instances").size(13))
         .padding([5, 10])
@@ -164,24 +164,41 @@ fn content_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message>
     .into()
 }
 
-/// Play, or Stop while the game is up. Red and relabelled rather than a
-/// separate control, so there's one obvious thing to press either way.
+/// Play, plus a Stop per running session. Play stays available while games
+/// run so another account can be launched into the same instance; with more
+/// than one account signed in a picker chooses which.
 fn launch_control<'a>(
     app: &'a App,
     instance: &'a Instance,
-    running: bool,
+    _running: bool,
 ) -> Element<'a, Message> {
     let signed_in = app.active_account().is_some();
 
-    if running {
-        return button(text("Stop").size(15))
-            .padding([10, 26])
-            .style(theme::stop_button)
-            .on_press(Message::Stop(instance.id.clone()))
-            .into();
+    let mut col = column![].spacing(8).align_x(iced::Alignment::End);
+
+    for (key, name) in app.instance_sessions(&instance.id) {
+        col = col.push(
+            row![
+                text(name).size(12).color(theme::MINT),
+                button(text("Stop").size(13))
+                    .padding([6, 16])
+                    .style(theme::stop_button)
+                    .on_press(Message::Stop(key)),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        );
     }
 
     let label = if app.is_busy() { "Preparing…" } else { "Play" };
+
+    // The picked account, falling back to the active one if it was signed out.
+    let chosen = app
+        .launch_account
+        .get(&instance.id)
+        .and_then(|u| app.accounts.iter().find(|a| &a.uuid == u))
+        .or_else(|| app.active_account());
+    let chosen_uuid = chosen.map(|a| a.uuid.clone());
 
     let play = button(text(label).size(15))
         .padding([10, 26])
@@ -190,20 +207,37 @@ fn launch_control<'a>(
         // Launching without an account fails deep in the pipeline, so the
         // button is disabled until there is one.
         .on_press_maybe(
-            (!app.is_busy() && signed_in).then(|| Message::Launch(instance.id.clone())),
+            (!app.is_busy() && signed_in)
+                .then(|| Message::Launch(instance.id.clone(), chosen_uuid)),
         );
 
-    if signed_in {
-        play.into()
+    if app.accounts.len() > 1 {
+        let id = instance.id.clone();
+        let names: Vec<String> = app.accounts.iter().map(|a| a.username.clone()).collect();
+        let picker = pick_list(names, chosen.map(|a| a.username.clone()), move |name| {
+            let uuid = app
+                .accounts
+                .iter()
+                .find(|a| a.username == name)
+                .map(|a| a.uuid.clone())
+                .unwrap_or_default();
+            Message::PickLaunchAccount(id.clone(), uuid)
+        })
+        .text_size(13);
+        col = col.push(row![picker, play].spacing(10).align_y(iced::Center));
+    } else if signed_in {
+        col = col.push(play);
     } else {
-        column![
-            play,
-            text("Sign in first").size(11).color(theme::MUTED),
-        ]
-        .spacing(4)
-        .align_x(iced::Center)
-        .into()
+        col = col.push(
+            column![
+                play,
+                text("Sign in first").size(11).color(theme::MUTED),
+            ]
+            .spacing(4)
+            .align_x(iced::Center),
+        );
     }
+    col.into()
 }
 
 /// The injector. Compatibility is decided by the release's own manifest, so
@@ -818,7 +852,7 @@ fn breadcrumb(app: &App) -> Element<'_, Message> {
 /// can I go* — and splitting it would mean knowing whether a place is a folder
 /// or an address before you can look for it.
 fn worlds_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let running = app.running.contains(&instance.id);
+    let running = app.instance_running(&instance.id);
 
     let mut list = column![section_heading(
         "Singleplayer",
@@ -1127,8 +1161,9 @@ fn world_row<'a>(
     }
     details = details.push(tags);
 
-    // Two steps, like the saved-skin grid: this is the only control in the
-    // launcher that can destroy a world, and the folder is gone for good.
+    // Three states: normal, "delete for good?", and "agree to the EULA?" —
+    // the last one doubles as Paper's EULA consent (see Mod/ROADMAP.md
+    // Phase 7), so hosting never starts on an implicit agreement.
     let actions: Element<'a, Message> = if app.confirm_delete_world.as_deref() == Some(&world.folder)
     {
         row![
@@ -1145,12 +1180,45 @@ fn world_row<'a>(
         .spacing(8)
         .align_y(iced::Center)
         .into()
+    } else if app
+        .confirm_convert_world
+        .as_ref()
+        .is_some_and(|(pending_instance, folder)| pending_instance == &instance.id && folder == &world.folder)
+    {
+        row![
+            text("Agree to Mojang's EULA (aka.ms/MinecraftEULA) to host this?")
+                .size(12)
+                .color(theme::MUTED),
+            button(text("Cancel").size(12))
+                .padding([6, 12])
+                .style(theme::ghost_button)
+                .on_press(Message::AskConvertToPaperServer(None)),
+            button(text("Agree & convert").size(12))
+                .padding([6, 12])
+                .style(theme::primary_button)
+                .on_press_maybe((!app.is_busy()).then(|| Message::ConvertToPaperServer {
+                    world_folder: world.folder.clone(),
+                    world_path: world.path.clone(),
+                    game_version: instance.game_version.clone(),
+                    world_mode: world.mode,
+                })),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
     } else {
         row![
             button(text("Open folder").size(12))
                 .padding([6, 12])
                 .style(theme::ghost_button)
                 .on_press(Message::OpenPath(world.path.clone())),
+            button(text("Host as Paper Server").size(12))
+                .padding([6, 12])
+                .style(theme::ghost_button)
+                .on_press_maybe((!app.is_busy()).then(|| Message::AskConvertToPaperServer(Some((
+                    instance.id.clone(),
+                    world.folder.clone()
+                ))))),
             button(text("Delete").size(12))
                 .padding([6, 12])
                 .style(theme::ghost_button)
@@ -1178,7 +1246,7 @@ fn world_row<'a>(
 
 /// `logs/` and `crash-reports/`, with the selected file's tail beside them.
 fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let running = app.running.contains(&instance.id);
+    let running = app.instance_running(&instance.id);
     let mut list = column![].spacing(2).width(Fill);
 
     if app.logs.is_empty() {
@@ -1550,6 +1618,15 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
                         .style(theme::ghost_button)
                         .on_press_maybe(
                             (!app.is_busy()).then(|| Message::ExportPack(instance.id.clone()))
+                        ),
+                    // Copies this instance's options.txt over every other
+                    // one's. Stays live for this session if it's running —
+                    // see `nexo_core::options_sync`.
+                    button(text("Sync options to all").size(13))
+                        .padding([7, 13])
+                        .style(theme::ghost_button)
+                        .on_press_maybe(
+                            (!app.is_busy()).then(|| Message::SyncOptions(instance.id.clone()))
                         ),
                     // Rehomed here when the tabs took over the card stack the
                     // danger card used to sit in. It belongs with the other

@@ -132,6 +132,13 @@ impl Content {
         version: &Version,
     ) -> Result<()> {
         let file = version.primary_file()?;
+        // Modrinth's JSON picks the name that gets joined onto `mods/`.
+        if !crate::util::is_bare_basename(&file.filename) {
+            return Err(Error::invalid(format!(
+                "refusing unsafe file name '{}'",
+                file.filename
+            )));
+        }
         // Checksum-verified inside `download`, so a corrupt transfer can't
         // land in the instance.
         let bytes = self.modrinth.download(file).await?;
@@ -226,6 +233,14 @@ impl Content {
             return Ok(());
         };
 
+        // The name comes from the hand-editable instance manifest.
+        if !crate::util::is_bare_basename(&installed.file_name) {
+            return Err(Error::invalid(format!(
+                "unsafe file name '{}'",
+                installed.file_name
+            )));
+        }
+
         // The kind isn't recorded, so every folder is checked — cheaper and
         // more robust than guessing from the extension.
         for kind in ProjectKind::ALL {
@@ -278,6 +293,9 @@ impl Content {
         instance: &Instance,
         file_name: &str,
     ) -> Option<crate::skin::Rgba> {
+        if !crate::util::is_bare_basename(file_name) {
+            return None;
+        }
         // Which folder a mod landed in isn't recorded, and this is three
         // cheap existence checks.
         let path = ProjectKind::ALL
@@ -367,11 +385,12 @@ mod tests {
         paths.ensure().await.unwrap();
 
         let source = temp.join("example.jar");
-        tokio::fs::write(&source, b"not really a jar").await.unwrap();
+        tokio::fs::write(&source, b"not really a jar")
+            .await
+            .unwrap();
 
         let content = Content::new(reqwest::Client::new(), paths.clone());
-        let mut instance =
-            Instance::new("local-test", "26.1.2", crate::instance::Loader::Fabric);
+        let mut instance = Instance::new("local-test", "26.1.2", crate::instance::Loader::Fabric);
 
         content
             .install_file(&mut instance, &source, None)
@@ -381,20 +400,43 @@ mod tests {
         assert_eq!(instance.mods.len(), 1);
         let installed = &instance.mods[0];
         assert_eq!(installed.source, ModSource::Local);
-        assert!(paths
-            .instance_mods(&instance.id)
-            .join("example.jar")
-            .exists());
+        assert!(
+            paths
+                .instance_mods(&instance.id)
+                .join("example.jar")
+                .exists()
+        );
 
         let id = installed.project_id.clone();
         content.remove(&mut instance, &id).await.unwrap();
         assert!(instance.mods.is_empty());
-        assert!(!paths
-            .instance_mods(&instance.id)
-            .join("example.jar")
-            .exists());
+        assert!(
+            !paths
+                .instance_mods(&instance.id)
+                .join("example.jar")
+                .exists()
+        );
 
         tokio::fs::remove_dir_all(&temp).await.ok();
+    }
+
+    #[tokio::test]
+    async fn remove_refuses_a_traversing_file_name() {
+        let temp = std::env::temp_dir().join(format!("nexo-content-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_root(&temp);
+        let content = Content::new(reqwest::Client::new(), paths);
+        let mut instance = Instance::new("t", "26.1.2", crate::instance::Loader::Fabric);
+        instance.mods.push(InstalledMod {
+            project_id: "x".into(),
+            name: "x".into(),
+            version_id: String::new(),
+            version_number: String::new(),
+            file_name: "../../../victim".into(),
+            source: ModSource::Local,
+            enabled: true,
+            edition: None,
+        });
+        assert!(content.remove(&mut instance, "x").await.is_err());
     }
 
     #[tokio::test]
@@ -404,8 +446,7 @@ mod tests {
         paths.ensure().await.unwrap();
 
         let content = Content::new(reqwest::Client::new(), paths);
-        let mut instance =
-            Instance::new("vanilla", "26.1.2", crate::instance::Loader::Vanilla);
+        let mut instance = Instance::new("vanilla", "26.1.2", crate::instance::Loader::Vanilla);
 
         // Returns without touching the network, which is why this test can
         // run offline.

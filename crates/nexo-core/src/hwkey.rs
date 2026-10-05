@@ -173,7 +173,9 @@ fn collect_linux(parts: &mut Vec<String>) {
 
     if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
         for line in cpuinfo.lines() {
-            let Some(colon) = line.find(':') else { continue };
+            let Some(colon) = line.find(':') else {
+                continue;
+            };
             let field = line[..colon].trim();
             let value = line[colon + 1..].trim();
 

@@ -22,6 +22,10 @@ pub struct DownloadTask {
     pub dest: PathBuf,
     /// Verified after download when present.
     pub sha1: Option<String>,
+    /// Verified after download when present. Mojang's own manifests only
+    /// ever give sha1; this exists for sources that publish sha256 instead
+    /// (PaperMC's Fill API, Hangar) — see `paper_server::paper_api`.
+    pub sha256: Option<String>,
     /// Used to decide whether an existing file can be skipped.
     pub size: u64,
 }
@@ -73,7 +77,10 @@ impl Downloader {
         let completed = Arc::new(AtomicUsize::new(0));
 
         if let Some(tx) = progress {
-            let _ = tx.send(Progress::Advanced { completed: 0, total });
+            let _ = tx.send(Progress::Advanced {
+                completed: 0,
+                total,
+            });
         }
 
         let results = stream::iter(tasks)
@@ -104,6 +111,8 @@ impl Downloader {
     }
 }
 
+const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
+
 async fn download_one(http: &reqwest::Client, task: &DownloadTask) -> Result<()> {
     if is_present(task).await {
         return Ok(());
@@ -113,16 +122,26 @@ async fn download_one(http: &reqwest::Client, task: &DownloadTask) -> Result<()>
         tokio::fs::create_dir_all(parent).await.ctx(parent)?;
     }
 
-    let bytes = http
-        .get(&task.url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+    // Declared size plus slack; unknown (0) falls back to the absolute cap.
+    let cap = if task.size > 0 {
+        (task.size + (1 << 20)).min(MAX_DOWNLOAD)
+    } else {
+        MAX_DOWNLOAD
+    };
+    let response = http.get(&task.url).send().await?.error_for_status()?;
+    let bytes = crate::util::read_capped(response, cap).await?;
 
     if let Some(expected) = &task.sha1 {
         let actual = crate::util::sha1_hex(&bytes);
+        if &actual != expected {
+            return Err(Error::invalid(format!(
+                "{} failed its checksum (got {actual}, expected {expected})",
+                task.url
+            )));
+        }
+    }
+    if let Some(expected) = &task.sha256 {
+        let actual = crate::util::sha256_hex(&bytes);
         if &actual != expected {
             return Err(Error::invalid(format!(
                 "{} failed its checksum (got {actual}, expected {expected})",

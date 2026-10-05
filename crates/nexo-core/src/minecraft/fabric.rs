@@ -29,8 +29,16 @@ pub struct LoaderVersion {
 
 /// Every loader build compatible with `game_version`, newest first.
 pub async fn loaders(http: &reqwest::Client, game_version: &str) -> Result<Vec<LoaderVersion>> {
+    if !crate::util::is_safe_version(game_version) {
+        return Err(Error::invalid(format!(
+            "invalid Minecraft version '{game_version}'"
+        )));
+    }
     let response = http
-        .get(format!("{META_BASE}/versions/loader/{game_version}"))
+        .get(format!(
+            "{META_BASE}/versions/loader/{}",
+            game_version.replace(' ', "%20")
+        ))
         .send()
         .await?;
 
@@ -67,8 +75,15 @@ pub async fn profile(
     game_version: &str,
     loader_version: &str,
 ) -> Result<super::meta::VersionData> {
-    let url =
-        format!("{META_BASE}/versions/loader/{game_version}/{loader_version}/profile/json");
+    if !crate::util::is_safe_version(game_version) || !crate::util::is_safe_version(loader_version)
+    {
+        return Err(Error::invalid("invalid game or loader version"));
+    }
+    let url = format!(
+        "{META_BASE}/versions/loader/{}/{}/profile/json",
+        game_version.replace(' ', "%20"),
+        loader_version.replace(' ', "%20")
+    );
 
     let response = http.get(&url).send().await?;
     if !response.status().is_success() {
