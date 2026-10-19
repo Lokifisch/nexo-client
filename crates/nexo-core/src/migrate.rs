@@ -197,15 +197,13 @@ impl crate::Nexo {
                 Ok(Outcome::Skipped) => {}
                 Ok(Outcome::NoBuild) => {
                     let _ = self
-                        .content
-                        .set_enabled(&mut instance, &installed.project_id, false)
+                        .disable_by_file(&mut instance, &installed.file_name)
                         .await;
                     report.disabled.push(name);
                 }
                 Err(e) => {
                     let _ = self
-                        .content
-                        .set_enabled(&mut instance, &installed.project_id, false)
+                        .disable_by_file(&mut instance, &installed.file_name)
                         .await;
                     report.failed.push(format!("{name} ({e})"));
                 }
@@ -235,6 +233,20 @@ impl crate::Nexo {
 }
 
 impl crate::Nexo {
+    /// Disables a tracked file by name. The id it was tracked under can change
+    /// mid-migration (modpack imports get their real project id), the name can't.
+    async fn disable_by_file(&self, instance: &mut Instance, file_name: &str) -> Result<()> {
+        if let Some(id) = instance
+            .mods
+            .iter()
+            .find(|m| m.file_name == file_name)
+            .map(|m| m.project_id.clone())
+        {
+            self.content.set_enabled(instance, &id, false).await?;
+        }
+        Ok(())
+    }
+
     /// Modrinth project id for a tracked file, via its SHA-1.
     async fn identify(
         &self,
