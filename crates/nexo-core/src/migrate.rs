@@ -137,6 +137,24 @@ impl crate::Nexo {
                         Ok(Outcome::Updated)
                     }
                     ModSource::Modrinth => {
+                        // Modpack imports are filed under a path-derived id
+                        // Modrinth has never heard of; the file's hash says
+                        // which project it really is.
+                        let mut installed = installed.clone();
+                        if installed.project_id.starts_with("mrpack:") {
+                            let backup = report.backup.clone().unwrap_or_else(|| dir.clone());
+                            if let Some(project) = self.identify(&dir, &backup, &installed).await {
+                                instance.mods.retain(|m| m.project_id != project);
+                                if let Some(entry) = instance
+                                    .mods
+                                    .iter_mut()
+                                    .find(|m| m.project_id == installed.project_id)
+                                {
+                                    entry.project_id = project.clone();
+                                }
+                                installed.project_id = project;
+                            }
+                        }
                         let kind = ProjectKind::ALL
                             .into_iter()
                             .find(|k| {
@@ -213,6 +231,36 @@ impl crate::Nexo {
 
         self.instances.save(&instance).await?;
         Ok(report)
+    }
+}
+
+impl crate::Nexo {
+    /// Modrinth project id for a tracked file, via its SHA-1.
+    async fn identify(
+        &self,
+        dir: &std::path::Path,
+        backup: &std::path::Path,
+        installed: &crate::instance::InstalledMod,
+    ) -> Option<String> {
+        for kind in ProjectKind::ALL {
+            for root in [dir, backup] {
+                for name in [
+                    installed.file_name.clone(),
+                    format!("{}.disabled", installed.file_name),
+                ] {
+                    let Ok(bytes) = tokio::fs::read(root.join(kind.folder()).join(name)).await
+                    else {
+                        continue;
+                    };
+                    let hash = crate::util::sha1_hex(&bytes);
+                    return match self.content.modrinth().version_from_sha1(&hash).await {
+                        Ok(Some(version)) => Some(version.project_id),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        None
     }
 }
 

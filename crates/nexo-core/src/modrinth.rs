@@ -88,6 +88,21 @@ impl Modrinth {
         Ok(response.json().await?)
     }
 
+    /// The Modrinth version a file belongs to, found by its SHA-1. `None` when
+    /// Modrinth has never seen that file (a hand-built jar).
+    pub async fn version_from_sha1(&self, sha1: &str) -> Result<Option<Version>> {
+        let response = self
+            .http
+            .get(format!("{API_BASE}/version_file/{sha1}"))
+            .query(&[("algorithm", "sha1")])
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(response.error_for_status()?.json().await?)
+    }
+
     /// The version a fresh install should get: Modrinth returns versions
     /// newest-first, so this is the first entry, preferring a stable release
     /// over an alpha/beta when both are offered.
