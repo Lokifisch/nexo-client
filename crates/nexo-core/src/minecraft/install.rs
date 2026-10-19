@@ -161,12 +161,18 @@ impl Installer {
     /// Where natives are unpacked and `-Djava.library.path` points: the
     /// version's own `java.library.path` argument if it declares one (26.3+
     /// says `${natives_directory}/java`, splitting the root into per-consumer
-    /// subdirectories), otherwise the natives root.
+    /// subdirectories), otherwise the natives root. Only a plain
+    /// subdirectory of the root is honoured: native libraries get written
+    /// there, so a version JSON must not be able to point them anywhere else.
     pub fn native_library_dir(&self, version: &VersionData, game_version: &str) -> PathBuf {
         let root = self.natives_dir(game_version);
-        declared_library_path(version)
-            .map(|path| PathBuf::from(path.replace("${natives_directory}", &root.to_string_lossy())))
-            .unwrap_or(root)
+        match declared_library_path(version)
+            .as_deref()
+            .and_then(|p| p.strip_prefix("${natives_directory}/"))
+        {
+            Some(sub) if meta::is_safe_relative(sub) => root.join(sub),
+            _ => root,
+        }
     }
 
     /// Where a library's jar belongs in the shared library tree.
@@ -350,8 +356,6 @@ impl Installer {
     }
 }
 
-/// Extracts the shared libraries from one natives jar, ignoring metadata and
-/// anything that would escape `dest`.
 /// The raw value of the version's `-Djava.library.path=` JVM argument, if any.
 pub(crate) fn declared_library_path(version: &VersionData) -> Option<String> {
     version
@@ -363,6 +367,8 @@ pub(crate) fn declared_library_path(version: &VersionData) -> Option<String> {
         .find_map(|t| t.strip_prefix("-Djava.library.path=").map(str::to_string))
 }
 
+/// Extracts the shared libraries from one natives jar, ignoring metadata and
+/// anything that would escape `dest`.
 fn extract_jar(jar: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(jar).ctx(jar)?;
     let mut archive = zip::ZipArchive::new(file)?;

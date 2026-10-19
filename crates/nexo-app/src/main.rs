@@ -166,6 +166,8 @@ pub struct App {
 
     /// Minecraft releases offered when creating an instance.
     game_versions: Vec<String>,
+    /// Instance whose Migrate button has been clicked once.
+    migrate_armed: Option<String>,
 
     status: Status,
 
@@ -575,6 +577,7 @@ impl App {
             accounts: Vec::new(),
             active_account: None,
             game_versions: vec![DEFAULT_GAME_VERSION.to_string()],
+            migrate_armed: None,
             status: Status::Busy("Starting up".into()),
             new_name: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
@@ -1077,8 +1080,11 @@ impl App {
                 self.nexo_release = Some(release);
                 self.nexo_release_error = None;
                 let behind = self.instances.iter().filter(|i| self.nexo_mod_outdated(i)).count();
-                if behind > 0 && matches!(self.status, Status::Idle) {
-                    let version = &self.nexo_release.as_ref().unwrap().manifest.mod_version;
+                if let Some(release) = &self.nexo_release
+                    && behind > 0
+                    && matches!(self.status, Status::Idle)
+                {
+                    let version = &release.manifest.mod_version;
                     self.status = Status::Notice(match behind {
                         1 => format!("Nexo Mod {version} is out — 1 instance can update"),
                         n => format!("Nexo Mod {version} is out — {n} instances can update"),
@@ -2072,6 +2078,12 @@ impl App {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
+                // One-way for the worlds: the first click only arms the button.
+                if self.migrate_armed.as_ref() != Some(&id) {
+                    self.migrate_armed = Some(id);
+                    return Task::none();
+                }
+                self.migrate_armed = None;
                 self.status = Status::Busy(format!("Migrating to {to}"));
                 Task::perform(
                     async move {
@@ -2089,11 +2101,20 @@ impl App {
                                 report.disabled.join(", ")
                             );
                         }
+                        if !report.failed.is_empty() {
+                            summary += &format!(
+                                "; couldn't check, disabled: {}",
+                                report.failed.join(", ")
+                            );
+                        }
                         if !report.untouched.is_empty() {
                             summary += &format!("; left as-is: {}", report.untouched.join(", "));
                         }
                         if let Some(backup) = report.backup.as_ref().and_then(|b| b.file_name()) {
-                            summary += &format!(". Worlds backed up to {}", backup.to_string_lossy());
+                            summary += &format!(
+                                ". Old worlds and mods are in {}",
+                                backup.to_string_lossy()
+                            );
                         }
                         Ok(summary)
                     },
@@ -2737,6 +2758,13 @@ impl App {
             (Some(release), Some(installed)) => installed.version_number != release.manifest.mod_version,
             _ => false,
         }
+    }
+
+    /// `target` is a later release than `current`, by Mojang's own ordering
+    /// (the list is newest first). Unknown versions count as not newer.
+    fn is_newer_version(&self, target: &str, current: &str) -> bool {
+        let position = |id: &str| self.game_versions.iter().position(|v| v == id);
+        matches!((position(target), position(current)), (Some(t), Some(c)) if t < c)
     }
 
     fn instance_running(&self, id: &str) -> bool {

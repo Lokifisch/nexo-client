@@ -384,10 +384,10 @@ fn release_section<'a>(
         // updates Nexo Mod along with everything else.
         let target = &release.manifest.minecraft_version;
         if release.manifest.loader.eq_ignore_ascii_case(instance.loader.as_str())
-            && &instance.game_version != target
+            && app.is_newer_version(target, &instance.game_version)
         {
             section = section.push(
-                button(text(format!("Migrate to {target} & update")).size(14))
+                button(text(migrate_label(app, instance, target, " & update")).size(14))
                     .padding([8, 17])
                     .style(theme::primary_button)
                     .on_press_maybe((!app.is_busy() && !app.instance_running(&instance.id)).then(|| {
@@ -1657,11 +1657,13 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
                     // see `nexo_core::options_sync`.
                     // Only offered while the instance is behind the version
                     // Nexo Mod targets. See `nexo_core::migrate`.
-                    button(text(format!("Migrate to {}", crate::DEFAULT_GAME_VERSION)).size(13))
+                    button(text(migrate_label(app, instance, crate::DEFAULT_GAME_VERSION, "")).size(13))
                         .padding([7, 13])
                         .style(theme::ghost_button)
                         .on_press_maybe(
-                            (!running && !app.is_busy() && instance.game_version != crate::DEFAULT_GAME_VERSION)
+                            (!running
+                                && !app.is_busy()
+                                && app.is_newer_version(crate::DEFAULT_GAME_VERSION, &instance.game_version))
                                 .then(|| Message::MigrateInstance(
                                     instance.id.clone(),
                                     crate::DEFAULT_GAME_VERSION.to_string(),
@@ -1697,4 +1699,13 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
     .width(Fill)
     .style(theme::card)
     .into()
+}
+
+/// First click arms, second migrates — worlds only go one way.
+fn migrate_label(app: &App, instance: &Instance, target: &str, suffix: &str) -> String {
+    if app.migrate_armed.as_deref() == Some(instance.id.as_str()) {
+        "Click again to migrate — worlds and mods get backed up".to_string()
+    } else {
+        format!("Migrate to {target}{suffix}")
+    }
 }
