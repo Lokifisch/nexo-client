@@ -183,7 +183,7 @@ pub fn status_bar(status: &Status) -> Element<'_, Message> {
             .width(Fill)
             .style(theme::banner(false))
             .into(),
-        Status::Error(message) => container(
+        Status::Error(message) | Status::Notice(message) => container(
             row![
                 text(message).size(14).width(Fill),
                 button(text("Dismiss").size(13))
@@ -196,7 +196,7 @@ pub fn status_bar(status: &Status) -> Element<'_, Message> {
         )
         .padding([8, 14])
         .width(Fill)
-        .style(theme::banner(true))
+        .style(theme::banner(matches!(status, Status::Error(_))))
         .into(),
     }
 }

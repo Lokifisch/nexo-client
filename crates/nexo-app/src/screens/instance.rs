@@ -1,7 +1,7 @@
 use crate::{pulse, theme};
 use crate::{App, Message, Screen};
 use iced::widget::{
-    button, column, container, image, pick_list, row, scrollable, text, text_input, Space,
+    button, column, container, image, pick_list, row, scrollable, text, text_input, toggler, Space,
 };
 use iced::{Element, Fill, Font};
 use nexo_core::browse;
@@ -380,6 +380,21 @@ fn release_section<'a>(
     // card that looks broken.
     if let Some(reason) = release.manifest.incompatibility(instance) {
         section = section.push(text(reason).size(11).color(theme::MUTED));
+        // The usual cause is a release for a newer Minecraft; migrating
+        // updates Nexo Mod along with everything else.
+        let target = &release.manifest.minecraft_version;
+        if release.manifest.loader.eq_ignore_ascii_case(instance.loader.as_str())
+            && &instance.game_version != target
+        {
+            section = section.push(
+                button(text(format!("Migrate to {target} & update")).size(14))
+                    .padding([8, 17])
+                    .style(theme::primary_button)
+                    .on_press_maybe((!app.is_busy() && !app.instance_running(&instance.id)).then(|| {
+                        Message::MigrateInstance(instance.id.clone(), target.clone())
+                    })),
+            );
+        }
     }
 
     // Only worth a picker when the release actually publishes more than one
@@ -558,11 +573,29 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
                 row![
                     icon_or_placeholder(app, &installed.project_id, 32.0),
                     column![
-                        text(&installed.name).size(14).color(theme::TEXT),
+                        text(&installed.name).size(14).color(if installed.enabled {
+                            theme::TEXT
+                        } else {
+                            theme::MUTED
+                        }),
                         text(&installed.file_name).size(11).color(theme::MUTED),
                     ]
                     .spacing(2)
                     .width(Fill),
+                    toggler(installed.enabled)
+                        .size(18)
+                        .style(theme::toggle)
+                        .on_toggle_maybe(
+                        (!app.is_busy()).then(|| {
+                            let (instance_id, project) =
+                                (instance.id.clone(), installed.project_id.clone());
+                            move |enabled| Message::SetContentEnabled {
+                                instance: instance_id.clone(),
+                                project: project.clone(),
+                                enabled,
+                            }
+                        })
+                    ),
                     text(&installed.version_number).size(12).color(theme::MUTED),
                     button(text("Remove").size(12))
                         .padding([5, 10])
@@ -1622,6 +1655,18 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
                     // Copies this instance's options.txt over every other
                     // one's. Stays live for this session if it's running —
                     // see `nexo_core::options_sync`.
+                    // Only offered while the instance is behind the version
+                    // Nexo Mod targets. See `nexo_core::migrate`.
+                    button(text(format!("Migrate to {}", crate::DEFAULT_GAME_VERSION)).size(13))
+                        .padding([7, 13])
+                        .style(theme::ghost_button)
+                        .on_press_maybe(
+                            (!running && !app.is_busy() && instance.game_version != crate::DEFAULT_GAME_VERSION)
+                                .then(|| Message::MigrateInstance(
+                                    instance.id.clone(),
+                                    crate::DEFAULT_GAME_VERSION.to_string(),
+                                ))
+                        ),
                     button(text("Sync options to all").size(13))
                         .padding([7, 13])
                         .style(theme::ghost_button)

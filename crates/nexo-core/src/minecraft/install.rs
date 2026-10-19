@@ -158,6 +158,17 @@ impl Installer {
         self.paths.versions().join(game_version).join("natives")
     }
 
+    /// Where natives are unpacked and `-Djava.library.path` points: the
+    /// version's own `java.library.path` argument if it declares one (26.3+
+    /// says `${natives_directory}/java`, splitting the root into per-consumer
+    /// subdirectories), otherwise the natives root.
+    pub fn native_library_dir(&self, version: &VersionData, game_version: &str) -> PathBuf {
+        let root = self.natives_dir(game_version);
+        declared_library_path(version)
+            .map(|path| PathBuf::from(path.replace("${natives_directory}", &root.to_string_lossy())))
+            .unwrap_or(root)
+    }
+
     /// Where a library's jar belongs in the shared library tree.
     pub fn library_path(&self, library: &Library) -> Option<PathBuf> {
         let relative = match library.artifact() {
@@ -303,7 +314,7 @@ impl Installer {
         // Keyed on the vanilla game version, not `version.id`: after a Fabric
         // merge the id reads `fabric-loader-<x>-<mc>`, and natives are
         // identical across loaders anyway.
-        let dest = self.natives_dir(game_version);
+        let dest = self.native_library_dir(version, game_version);
         tokio::fs::create_dir_all(&dest).await.ctx(&dest)?;
 
         let mut jars = Vec::new();
@@ -341,6 +352,17 @@ impl Installer {
 
 /// Extracts the shared libraries from one natives jar, ignoring metadata and
 /// anything that would escape `dest`.
+/// The raw value of the version's `-Djava.library.path=` JVM argument, if any.
+pub(crate) fn declared_library_path(version: &VersionData) -> Option<String> {
+    version
+        .arguments
+        .as_ref()?
+        .jvm
+        .iter()
+        .flat_map(|a| a.resolve())
+        .find_map(|t| t.strip_prefix("-Djava.library.path=").map(str::to_string))
+}
+
 fn extract_jar(jar: &Path, dest: &Path) -> Result<()> {
     let file = std::fs::File::open(jar).ctx(jar)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -380,4 +402,25 @@ fn extract_jar(jar: &Path, dest: &Path) -> Result<()> {
 
 fn non_empty(sha1: &str) -> Option<String> {
     (!sha1.is_empty()).then(|| sha1.to_string())
+}
+
+#[cfg(test)]
+mod library_path_tests {
+    use super::*;
+
+    fn version(jvm: &str) -> VersionData {
+        serde_json::from_str(&format!(
+            r#"{{"id":"x","mainClass":"M","arguments":{{"game":[],"jvm":{jvm}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn follows_the_versions_own_library_path() {
+        // 26.3 form.
+        let v = version(r#"["-Djava.library.path=${natives_directory}/java","-cp","${classpath}"]"#);
+        assert_eq!(declared_library_path(&v).as_deref(), Some("${natives_directory}/java"));
+        // 26.1.2 form: none declared, the launcher supplies the root.
+        assert_eq!(declared_library_path(&version(r#"["-cp","${classpath}"]"#)), None);
+    }
 }

@@ -59,7 +59,11 @@ impl Launcher {
 
         // Heap first so a version-supplied -Xmx can still override it.
         command.arg(format!("-Xmx{}M", options.memory_mb));
-        command.arg(format!("-Djava.library.path={}", vars["natives_directory"]));
+        // Only when the version doesn't set it itself: a later duplicate
+        // wins, and 26.3+ points it at a subdirectory of natives_directory.
+        if super::install::declared_library_path(version).is_none() {
+            command.arg(format!("-Djava.library.path={}", vars["natives_directory"]));
+        }
 
         for token in self.jvm_arguments(version) {
             command.arg(substitute(&token, &vars));

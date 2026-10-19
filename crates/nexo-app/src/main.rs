@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 /// Minecraft version new instances default to — the single version `Mod/`
 /// targets for v1.
-const DEFAULT_GAME_VERSION: &str = "26.1.2";
+const DEFAULT_GAME_VERSION: &str = "26.3";
 
 /// Where `App::clock` wraps, in seconds.
 ///
@@ -150,6 +150,8 @@ pub enum Status {
     /// A long-running operation with a human-readable stage.
     Busy(String),
     Error(String),
+    /// A finished operation with something worth reading, e.g. a migration report.
+    Notice(String),
 }
 
 pub struct App {
@@ -497,6 +499,11 @@ pub enum Message {
         instance: String,
         project: String,
     },
+    SetContentEnabled {
+        instance: String,
+        project: String,
+        enabled: bool,
+    },
 
     // Skins and capes
     LoadCapes,
@@ -533,6 +540,9 @@ pub enum Message {
 
     // Options sync — copies options.txt from one instance to every other.
     SyncOptions(String),
+    /// Instance id, target Minecraft version.
+    MigrateInstance(String, String),
+    InstanceMigrated(Result<String, String>),
     OptionsSynced(Result<(String, usize), String>),
     /// The live watch loop for a since-closed instance has returned; nothing
     /// to show for it, but `Task::perform` needs a message to land on.
@@ -645,6 +655,8 @@ impl App {
                     load_versions(core),
                     // Quietly: see `Message::CheckForUpdate`.
                     Task::done(Message::CheckForUpdate { announce: false }),
+                    // Also quietly: lets the instance list flag outdated Nexo Mod.
+                    Task::done(Message::FetchNexoRelease),
                 ])
             }
             Message::Booted(Err(err)) => {
@@ -1064,6 +1076,14 @@ impl App {
             Message::NexoReleaseLoaded(Ok(release)) => {
                 self.nexo_release = Some(release);
                 self.nexo_release_error = None;
+                let behind = self.instances.iter().filter(|i| self.nexo_mod_outdated(i)).count();
+                if behind > 0 && matches!(self.status, Status::Idle) {
+                    let version = &self.nexo_release.as_ref().unwrap().manifest.mod_version;
+                    self.status = Status::Notice(match behind {
+                        1 => format!("Nexo Mod {version} is out — 1 instance can update"),
+                        n => format!("Nexo Mod {version} is out — {n} instances can update"),
+                    });
+                }
                 Task::none()
             }
             Message::NexoReleaseLoaded(Err(err)) => {
@@ -1905,6 +1925,34 @@ impl App {
                 )
             }
 
+            Message::SetContentEnabled {
+                instance,
+                project,
+                enabled,
+            } => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        let mut target = core
+                            .instances
+                            .get(&instance)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.content
+                            .set_enabled(&mut target, &project, enabled)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        core.instances
+                            .save(&target)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    Message::NexoModDone,
+                )
+            }
+
             Message::OpenFolder(id) => {
                 if let Some(core) = &self.core {
                     let folder = core.paths.instance(&id);
@@ -2020,6 +2068,45 @@ impl App {
                 Task::none()
             }
 
+            Message::MigrateInstance(id, to) => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                self.status = Status::Busy(format!("Migrating to {to}"));
+                Task::perform(
+                    async move {
+                        let report = core
+                            .migrate_instance(&id, &to)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let mut summary = format!(
+                            "Migrated to {to}: {} updated",
+                            report.updated.len()
+                        );
+                        if !report.disabled.is_empty() {
+                            summary += &format!(
+                                "; disabled, no {to} build yet: {}",
+                                report.disabled.join(", ")
+                            );
+                        }
+                        if !report.untouched.is_empty() {
+                            summary += &format!("; left as-is: {}", report.untouched.join(", "));
+                        }
+                        if let Some(backup) = report.backup.as_ref().and_then(|b| b.file_name()) {
+                            summary += &format!(". Worlds backed up to {}", backup.to_string_lossy());
+                        }
+                        Ok(summary)
+                    },
+                    Message::InstanceMigrated,
+                )
+            }
+            Message::InstanceMigrated(result) => {
+                self.status = match result {
+                    Ok(summary) => Status::Notice(summary),
+                    Err(err) => Status::Error(format!("Migration failed: {err}")),
+                };
+                self.core.clone().map(reload).unwrap_or_else(Task::none)
+            }
             Message::SyncOptions(id) => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
@@ -2644,6 +2731,14 @@ impl App {
     }
 
     /// Whether any session of the instance is running.
+    /// Has Nexo Mod installed, older than the newest release.
+    fn nexo_mod_outdated(&self, instance: &Instance) -> bool {
+        match (&self.nexo_release, nexo_core::nexo_mod::installed(instance)) {
+            (Some(release), Some(installed)) => installed.version_number != release.manifest.mod_version,
+            _ => false,
+        }
+    }
+
     fn instance_running(&self, id: &str) -> bool {
         !self.instance_sessions(id).is_empty()
     }

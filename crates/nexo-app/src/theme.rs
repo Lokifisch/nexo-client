@@ -9,7 +9,7 @@
 //! ordinary Rust that the compiler checks, and hover/press/disabled states
 //! can't be silently forgotten.
 
-use iced::widget::{button, container, text_input};
+use iced::widget::{button, container, text_input, toggler};
 use iced::{border, gradient, Background, Border, Color, Shadow, Theme, Vector};
 
 /// Logo violet — the primary accent.
@@ -587,3 +587,32 @@ fn lighten(color: Color, amount: f32) -> Color {
     }
 }
 
+
+/// An on/off switch whose knob keeps one colour in every state. iced's default
+/// recolours the whole switch when it is disabled, and the launcher disables
+/// these while it is busy — so the knob flashed dark and white as that came
+/// and went. A disabled switch is now the same switch, only dimmer.
+pub fn toggle(theme: &Theme, status: toggler::Status) -> toggler::Style {
+    let (on, dim) = match status {
+        toggler::Status::Active { is_toggled } | toggler::Status::Hovered { is_toggled } => {
+            (is_toggled, 1.0)
+        }
+        toggler::Status::Disabled { is_toggled } => (is_toggled, 0.6),
+    };
+    let track = if on {
+        accent(theme)
+    } else {
+        Color::from_rgb8(0x2a, 0x2a, 0x3a)
+    };
+    toggler::Style {
+        background: Background::Color(alpha(track, dim)),
+        background_border_width: 0.0,
+        background_border_color: Color::TRANSPARENT,
+        foreground: Background::Color(alpha(TEXT, dim)),
+        foreground_border_width: 0.0,
+        foreground_border_color: Color::TRANSPARENT,
+        text_color: None,
+        border_radius: None,
+        padding_ratio: 0.1,
+    }
+}

@@ -130,6 +130,10 @@ impl Instance {
     }
 }
 
+fn enabled_by_default() -> bool {
+    true
+}
+
 /// One jar in the instance's `mods/` folder, plus where it came from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledMod {
@@ -144,7 +148,7 @@ pub struct InstalledMod {
     pub source: ModSource,
     /// Disabled mods keep their jar but get a `.disabled` suffix, the
     /// convention every Fabric-aware launcher uses.
-    #[serde(default)]
+    #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     /// Which Nexo Mod edition this jar is, for [`ModSource::NexoMod`] entries.
     /// `None` on everything else, and on entries written before the editions

@@ -17,6 +17,7 @@ pub mod instance;
 pub mod java;
 pub mod minecraft;
 pub mod modrinth;
+pub mod migrate;
 pub mod mrpack;
 pub mod nexo_mod;
 pub mod options_sync;

@@ -99,7 +99,7 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// crate for a bounded recursive directory walk isn't earning its keep.
 /// Boxed because an `async fn` can't call itself directly (its own future
 /// would have infinite size).
-fn copy_tree<'a>(
+pub(crate) fn copy_tree<'a>(
     source: &'a Path,
     dest: &'a Path,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {

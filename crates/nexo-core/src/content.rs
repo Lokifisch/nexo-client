@@ -259,6 +259,50 @@ impl Content {
         Ok(())
     }
 
+    /// Enables or disables an installed project by renaming its file to or from
+    /// `<name>.disabled` — the loader skips anything not ending in `.jar`, so no
+    /// launch-time logic is needed. Does nothing for an unknown project or one
+    /// already in the requested state.
+    pub async fn set_enabled(
+        &self,
+        instance: &mut Instance,
+        project_id: &str,
+        enabled: bool,
+    ) -> Result<()> {
+        let Some(file_name) = instance
+            .mods
+            .iter()
+            .find(|m| m.project_id == project_id)
+            .map(|m| m.file_name.clone())
+        else {
+            return Ok(());
+        };
+        // The name comes from the hand-editable instance manifest.
+        if !crate::util::is_bare_basename(&file_name) {
+            return Err(Error::invalid(format!("unsafe file name '{file_name}'")));
+        }
+
+        let disabled = format!("{file_name}.disabled");
+        let (from, to) = if enabled {
+            (disabled, file_name)
+        } else {
+            (file_name, disabled)
+        };
+        // The kind isn't recorded, so every folder is checked, as in `remove`.
+        for kind in ProjectKind::ALL {
+            let dir = self.folder(instance, kind);
+            let (src, dst) = (dir.join(&from), dir.join(&to));
+            if src.exists() {
+                tokio::fs::rename(&src, &dst).await.ctx(&src)?;
+            }
+        }
+
+        if let Some(m) = instance.mods.iter_mut().find(|m| m.project_id == project_id) {
+            m.enabled = enabled;
+        }
+        Ok(())
+    }
+
     /// Installs Fabric API if the instance is on Fabric and doesn't have it.
     ///
     /// Nearly every Fabric mod depends on it, and its absence shows up as a
@@ -416,6 +460,31 @@ mod tests {
                 .join("example.jar")
                 .exists()
         );
+
+        tokio::fs::remove_dir_all(&temp).await.ok();
+    }
+
+    #[tokio::test]
+    async fn disabling_renames_the_jar_and_enabling_restores_it() {
+        let temp = std::env::temp_dir().join(format!("nexo-content-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_root(&temp);
+        paths.ensure().await.unwrap();
+        let source = temp.join("example.jar");
+        tokio::fs::write(&source, b"x").await.unwrap();
+
+        let content = Content::new(reqwest::Client::new(), paths.clone());
+        let mut instance = Instance::new("toggle-test", "26.1.2", crate::instance::Loader::Fabric);
+        content.install_file(&mut instance, &source, None).await.unwrap();
+        let id = instance.mods[0].project_id.clone();
+        let mods = paths.instance_mods(&instance.id);
+
+        content.set_enabled(&mut instance, &id, false).await.unwrap();
+        assert!(!instance.mods[0].enabled);
+        assert!(!mods.join("example.jar").exists() && mods.join("example.jar.disabled").exists());
+
+        content.set_enabled(&mut instance, &id, true).await.unwrap();
+        assert!(instance.mods[0].enabled);
+        assert!(mods.join("example.jar").exists() && !mods.join("example.jar.disabled").exists());
 
         tokio::fs::remove_dir_all(&temp).await.ok();
     }

@@ -92,8 +92,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
 
     // The whole card is the way into the details screen; a plain text button
     // keeps it looking like a card rather than a control.
-    let details = button(
-        column![
+    let mut info = column![
             text(&instance.name).size(17).color(theme::TEXT),
             text(loader_line).size(12).color(theme::MUTED),
             // Owned, not borrowed: the widget outlives this function.
@@ -104,7 +103,12 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             })
             .size(11)
             .color(if running { theme::MINT } else { theme::MUTED }),
-        ]
+        ];
+    if app.nexo_mod_outdated(instance) {
+        info = info.push(text("Nexo Mod update available").size(11).color(theme::MINT));
+    }
+    let details = button(
+        info
         .spacing(3)
         .width(Fill),
     )
