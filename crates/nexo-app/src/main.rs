@@ -152,6 +152,16 @@ pub enum Status {
     Notice(String),
 }
 
+/// A one-way action that needs a second click, and the instance it is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Armed {
+    /// Migrating rewrites the worlds for a newer Minecraft; there is no going
+    /// back to the old version with them.
+    Migrate(String),
+    /// Deleting removes the whole instance folder.
+    Delete(String),
+}
+
 pub struct App {
     /// `None` until [`Message::Booted`] lands; every screen renders a
     /// loading state until then rather than unwrapping.
@@ -164,13 +174,22 @@ pub struct App {
 
     /// Minecraft releases offered when creating an instance.
     game_versions: Vec<String>,
-    /// Instance whose Migrate button has been clicked once.
-    migrate_armed: Option<String>,
+    /// The one-way action whose button has been clicked once, waiting for
+    /// the confirming second click. See [`Armed`].
+    armed: Option<Armed>,
+    /// Bumped on every arm, so a timeout only disarms the arm that started
+    /// it and not a later one.
+    armed_generation: u64,
 
     status: Status,
 
     // New-instance form.
     new_name: String,
+    /// Whether "+ New instance" has opened the create form. The form is
+    /// also shown, regardless, while there are no instances at all.
+    creating: bool,
+    /// Filter over the instance list, by name.
+    instance_query: String,
     new_version: String,
 
     /// True while the browser sign-in is outstanding, so the button can't be
@@ -345,10 +364,14 @@ pub enum Message {
 
     // Instances
     NewNameChanged(String),
+    ToggleCreateForm,
+    InstanceQueryChanged(String),
     NewVersionChanged(String),
     CreateInstance,
     InstanceCreated(Result<(), String>),
     DeleteInstance(String),
+    /// An arm's timeout ran out; carries the generation it was started for.
+    Disarm(u64),
     OpenInstance(String),
     /// Instance id, account uuid (`None` = the active account).
     Launch(String, Option<String>),
@@ -577,9 +600,12 @@ impl App {
             accounts: Vec::new(),
             active_account: None,
             game_versions: vec![DEFAULT_GAME_VERSION.to_string()],
-            migrate_armed: None,
+            armed: None,
+            armed_generation: 0,
             status: Status::Busy("Starting up".into()),
             new_name: String::new(),
+            creating: false,
+            instance_query: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
             signing_in: false,
             faces: std::collections::HashMap::new(),
@@ -726,6 +752,7 @@ impl App {
             }
 
             Message::Navigate(screen) => {
+                self.armed = None;
                 let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
                 let opening_servers = screen == Screen::Servers && self.screen != Screen::Servers;
                 let opening_console = matches!(&screen, Screen::PaperConsole(_)) && screen != self.screen;
@@ -765,6 +792,16 @@ impl App {
                 Task::none()
             }
 
+            Message::ToggleCreateForm => {
+                self.creating = !self.creating;
+                Task::none()
+            }
+
+            Message::InstanceQueryChanged(query) => {
+                self.instance_query = query;
+                Task::none()
+            }
+
             Message::NewVersionChanged(version) => {
                 self.new_version = version;
                 Task::none()
@@ -782,6 +819,7 @@ impl App {
 
                 let version = self.new_version.clone();
                 self.new_name.clear();
+                self.creating = false;
                 self.status = Status::Busy(format!("Creating {name}"));
 
                 Task::perform(
@@ -809,6 +847,13 @@ impl App {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
+                // The whole instance folder goes, so the first click only
+                // arms the button — the same two-step Migrate uses.
+                let armed = Armed::Delete(id.clone());
+                if self.armed.as_ref() != Some(&armed) {
+                    return self.arm(armed);
+                }
+                self.armed = None;
                 Task::perform(
                     async move {
                         core.instances
@@ -867,6 +912,7 @@ impl App {
             }
 
             Message::OpenInstance(id) => {
+                self.armed = None;
                 let icons = Task::done(Message::LoadJarIcons(id.clone()));
                 self.screen = Screen::Instance(id);
                 // The edition picker starts from this instance's own state,
@@ -1178,9 +1224,9 @@ impl App {
 
             Message::SelectTab(tab) => {
                 self.tab = tab;
-                // Migrate lives under Overview now, so an armed click could
-                // otherwise sit out of sight and fire on the next visit.
-                self.migrate_armed = None;
+                // The armed buttons live under Overview, so an armed click
+                // could otherwise sit out of sight and fire on the next visit.
+                self.armed = None;
                 // Re-read on every visit rather than caching. The game writes
                 // into this directory while it runs, so a cached listing is
                 // stale the moment it matters — and a directory read is
@@ -2079,16 +2125,23 @@ impl App {
                 Task::none()
             }
 
+            Message::Disarm(generation) => {
+                if generation == self.armed_generation {
+                    self.armed = None;
+                }
+                Task::none()
+            }
+
             Message::MigrateInstance(id, to) => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
                 // One-way for the worlds: the first click only arms the button.
-                if self.migrate_armed.as_ref() != Some(&id) {
-                    self.migrate_armed = Some(id);
-                    return Task::none();
+                let armed = Armed::Migrate(id.clone());
+                if self.armed.as_ref() != Some(&armed) {
+                    return self.arm(armed);
                 }
-                self.migrate_armed = None;
+                self.armed = None;
                 self.status = Status::Busy(format!("Migrating to {to}"));
                 Task::perform(
                     async move {
@@ -2753,6 +2806,26 @@ impl App {
         iced::widget::row![screens::sidebar(self), content]
             .height(Fill)
             .into()
+    }
+
+    /// Arms a one-way button and schedules its disarm. Five seconds is long
+    /// enough to read the relabelled button and click again, short enough
+    /// that an arm forgotten about is gone before it can surprise anyone.
+    fn arm(&mut self, armed: Armed) -> Task<Message> {
+        // Replacing the previous arm is the point: arming Delete disarms a
+        // pending Migrate, so only one confirmation is ever live.
+        self.armed = Some(armed);
+        self.armed_generation = self.armed_generation.wrapping_add(1);
+        let generation = self.armed_generation;
+        Task::perform(
+            tokio::time::sleep(std::time::Duration::from_secs(5)),
+            move |_| Message::Disarm(generation),
+        )
+    }
+
+    /// Whether `armed` is the one waiting for its second click.
+    pub fn is_armed(&self, armed: &Armed) -> bool {
+        self.armed.as_ref() == Some(armed)
     }
 
     /// The accent, for the handful of places that colour a piece of text

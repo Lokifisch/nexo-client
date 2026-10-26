@@ -1518,7 +1518,7 @@ fn centered_note(message: &str) -> Element<'_, Message> {
 /// Clamped at zero rather than going negative: a file's mtime can sit slightly
 /// in the future after a clock correction or on a network share, and "in 3
 /// seconds" would be a strange thing for a log to say.
-fn ago(when: u64) -> String {
+pub fn ago(when: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1774,7 +1774,14 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
                     // danger card used to sit in. It belongs with the other
                     // whole-instance actions anyway — the tabs are all about
                     // what is *inside* the instance.
-                    button(text("Delete").size(13))
+                    button(
+                        text(if app.is_armed(&crate::Armed::Delete(instance.id.clone())) {
+                            "Click again to delete"
+                        } else {
+                            "Delete"
+                        })
+                        .size(13),
+                    )
                         .padding([7, 13])
                         .style(theme::danger_button)
                         // Deleting the folder out from under a running game
@@ -1798,7 +1805,7 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
 
 /// First click arms, second migrates — worlds only go one way.
 fn migrate_label(app: &App, instance: &Instance, target: &str, suffix: &str) -> String {
-    if app.migrate_armed.as_deref() == Some(instance.id.as_str()) {
+    if app.is_armed(&crate::Armed::Migrate(instance.id.clone())) {
         "Click again to migrate — worlds and mods get backed up".to_string()
     } else {
         format!("Migrate to {target}{suffix}")

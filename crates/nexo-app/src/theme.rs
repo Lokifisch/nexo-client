@@ -240,6 +240,30 @@ pub fn stop_button(theme: &Theme, status: button::Status) -> button::Style {
     style
 }
 
+/// A secondary action that still has to be found — "+ New instance". Lit
+/// at rest (accent edge, faint accent fill, soft glow) but with a white label
+/// and no rainbow, so it never competes with a Play beside it.
+pub fn lit_button(theme: &Theme, status: button::Status) -> button::Style {
+    let accent = accent(theme);
+    let (fill, glow) = match status {
+        button::Status::Active => (0.14, 16.0),
+        button::Status::Hovered => (0.2, 22.0),
+        button::Status::Pressed => (0.24, 8.0),
+        button::Status::Disabled => return outline(None, theme, status),
+    };
+    button::Style {
+        background: Some(Background::Color(blend(INK, accent, fill))),
+        text_color: TEXT,
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: accent,
+        },
+        shadow: halo(alpha(accent, 0.35), glow),
+        ..Default::default()
+    }
+}
+
 /// Destructive actions. Red label, dark until touched: a Delete that glows on
 /// its own draws the eye to exactly the button nobody should press by
 /// accident.
@@ -550,6 +574,21 @@ pub fn initial_tile(running: bool) -> impl Fn(&Theme) -> container::Style {
         text_color: Some(if running { INK } else { TEXT }),
         border: Border {
             radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// The small state pill beside an instance's name. Mint only for RUNNING —
+/// the one state worth spotting from across the list; everything else is a
+/// flat grey chip.
+pub fn tag(lit: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(Background::Color(if lit { alpha(MINT, 0.14) } else { LINE })),
+        text_color: Some(if lit { MINT } else { MUTED }),
+        border: Border {
+            radius: 4.0.into(),
             ..Default::default()
         },
         ..Default::default()
