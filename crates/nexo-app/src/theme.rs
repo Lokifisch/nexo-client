@@ -10,7 +10,7 @@
 //! ordinary Rust that the compiler checks, and hover/press/disabled states
 //! can't be silently forgotten.
 
-use iced::widget::{button, container, svg, text_input, toggler};
+use iced::widget::{button, checkbox, container, svg, text_input, toggler};
 use iced::{border, gradient, Background, Border, Color, Font, Shadow, Theme, Vector};
 
 /// Logo violet — the primary accent.
@@ -59,8 +59,6 @@ pub fn alpha(color: Color, a: f32) -> Color {
 /// Gradient angles. iced measures radians clockwise from straight up, which
 /// is easy to get backwards — these are named so a style never has to.
 pub mod angle {
-    /// Left to right.
-    pub const ACROSS: f32 = std::f32::consts::FRAC_PI_2;
     /// Top to bottom.
     pub const DOWN: f32 = std::f32::consts::PI;
     /// Top-left to bottom-right, the way the logo's ramp runs.
@@ -175,61 +173,6 @@ fn outline(tone: Option<Color>, theme: &Theme, status: button::Status) -> button
 /// (Named for the accent's old 12s trip round the colour wheel; the accent no
 /// longer moves.)
 pub const RAINBOW_PERIOD: f32 = 12.0;
-
-/// A fully saturated neon at `turns` around the colour wheel; wraps. Used for
-/// the hue ramp along the selected tab's underline.
-///
-/// Lightness sits at 0.66 rather than full: a pure hue at maximum lightness
-/// goes white at yellow and cyan, so a cycling accent would visibly flatten
-/// twice per revolution.
-pub fn spectrum(turns: f32) -> Color {
-    let hue = turns.rem_euclid(1.0) * 6.0;
-    let sector = hue.floor();
-    let f = hue - sector;
-
-    // HSL at S = 1, L = 0.66, expanded by hand: the general conversion is
-    // mostly branches that fall away once saturation is fixed.
-    const L: f32 = 0.66;
-    const C: f32 = (1.0 - 2.0 * L + 1.0) * 1.0; // chroma at S=1 → 2(1-L)
-    let (min, max) = (L - C / 2.0, L + C / 2.0);
-    let rise = min + (max - min) * f;
-    let fall = max - (max - min) * f;
-
-    let (r, g, b) = match sector as u32 % 6 {
-        0 => (max, rise, min),
-        1 => (fall, max, min),
-        2 => (min, max, rise),
-        3 => (min, fall, max),
-        4 => (rise, min, max),
-        _ => (max, min, fall),
-    };
-    Color { r, g, b, a: 1.0 }
-}
-
-/// Where a colour sits on the wheel, in turns.
-///
-/// Lets a style build a *ramp* around the accent it was handed — the tab bar
-/// needs three hues spaced across the spectrum, and the only thing it receives
-/// is the one colour in the palette. Deriving the neighbours instead of
-/// threading the animation clock through every style function is what keeps
-/// [`nexo`] the single place the animation exists.
-fn hue_of(color: Color) -> f32 {
-    let max = color.r.max(color.g).max(color.b);
-    let min = color.r.min(color.g).min(color.b);
-    let span = max - min;
-    if span <= f32::EPSILON {
-        return 0.0;
-    }
-
-    let hue = if max == color.r {
-        (color.g - color.b) / span
-    } else if max == color.g {
-        2.0 + (color.b - color.r) / span
-    } else {
-        4.0 + (color.r - color.g) / span
-    };
-    (hue / 6.0).rem_euclid(1.0)
-}
 
 /// The one accent: glows, outlines and the selected state. A violet-pink
 /// between the logo's magenta and violet, so the glow matches the rainbow
@@ -418,37 +361,31 @@ pub fn selected_tile(_theme: &Theme, _status: button::Status) -> button::Style {
 /// One tab on the instance screen.
 ///
 /// Flat rather than a tile: the rail already uses lit tiles for "where you
-/// are", and reusing that shape one level down would make the two compete. The selected tab is lit from below instead — a wash that fades
-/// upward out of its underline, so the two read as one lamp rather than as a
-/// panel with a line under it. See [`tab_underline`].
+/// are", and reusing that shape one level down would make the two compete.
+/// The selected tab is white over a faint wash rising from its underline —
+/// the mockup's glow is a text-shadow, which iced cannot draw, and this is
+/// the nearest light that stays behind the label. See [`tab_underline`].
 pub fn tab_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        let lit_accent = accent(theme);
-
-        // The light from the bar below, spilling up onto the tab and falling
-        // off. Transparent at the top so the tab itself stays black — the
-        // colour is in the glow, not in the surface.
-        let spill = |strength: f32| {
-            Background::from(
-                gradient::Linear::new(angle::DOWN)
-                    .add_stop(0.0, Color::TRANSPARENT)
-                    .add_stop(0.6, alpha(lit_accent, strength * 0.25))
-                    .add_stop(1.0, alpha(lit_accent, strength)),
-            )
-        };
 
         button::Style {
-            background: Some(match (selected, hovered) {
-                (true, _) => spill(0.2),
-                (false, true) => spill(0.1),
-                (false, false) => Background::Color(Color::TRANSPARENT),
+            background: Some(if selected {
+                Background::from(
+                    gradient::Linear::new(angle::DOWN)
+                        .add_stop(0.0, Color::TRANSPARENT)
+                        .add_stop(1.0, alpha(accent(theme), 0.12)),
+                )
+            } else {
+                Background::Color(Color::TRANSPARENT)
             }),
+            // Hover only brightens the label: an unselected tab that lit up
+            // under the cursor would read as a second selection.
             text_color: if selected || hovered { TEXT } else { MUTED },
             border: Border {
                 // Square at the bottom so the button sits flush on its
                 // underline instead of floating above a detached bar.
-                radius: border::Radius::default().top(8.0),
+                radius: border::Radius::default().top(6.0),
                 ..Default::default()
             },
             shadow: Shadow::default(),
@@ -457,44 +394,21 @@ pub fn tab_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
-/// The bar under a tab. Every tab draws one, so the unselected ones join into
-/// a continuous rule and the selected one reads as a break in it.
-///
-/// The selected bar runs violet → magenta along the logo's own gradient and
-/// carries a glow beneath it, which is what makes the strip look lit rather
-/// than merely coloured in.
+/// The bar under a tab: the logo ramp with a glow beneath it for the selected
+/// one, nothing for the rest — the 1px [`divider`] under the whole strip is
+/// the rule they sit on.
 pub fn tab_underline(selected: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         if !selected {
-            return container::Style {
-                background: Some(Background::Color(alpha(MUTED, 0.15))),
-                ..Default::default()
-            };
+            return container::Style::default();
         }
 
-        // Left to right, so a row of tabs reads as one ramp rather than each
-        // tab restarting the gradient. This is the only place a full three-hue
-        // ramp is spent: it is a 3px sliver, which is exactly why it can carry
-        // the whole spectrum without the screen turning into a paint chart.
-        let base = hue_of(accent(theme));
-
         container::Style {
-            background: Some(Background::from(
-                gradient::Linear::new(angle::ACROSS)
-                    .add_stop(0.0, spectrum(base))
-                    .add_stop(0.5, spectrum(base + 0.1))
-                    .add_stop(1.0, spectrum(base + 0.2)),
-            )),
-            border: Border {
-                radius: 2.0.into(),
-                ..Default::default()
-            },
+            background: Some(rainbow(theme)),
             shadow: Shadow {
-                // Cast from the middle of the ramp, so the spill under the bar
-                // matches the bar rather than naming one of its ends.
-                color: alpha(spectrum(base + 0.1), 0.75),
+                color: alpha(accent(theme), 0.6),
                 offset: Vector::new(0.0, 1.0),
-                blur_radius: 11.0,
+                blur_radius: 10.0,
             },
             ..Default::default()
         }
@@ -578,6 +492,48 @@ pub fn card(_theme: &Theme) -> container::Style {
             color: LINE,
         },
         ..Default::default()
+    }
+}
+
+/// A side panel beside a list — the Modrinth browser's filters. One step
+/// darker than [`card`], so the panel reads as furniture next to the results
+/// rather than as one more result.
+pub fn panel(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(SURFACE)),
+        ..card(theme)
+    }
+}
+
+/// A filter checkbox. Checked is the "on" state STYLE.md allows neon for:
+/// rainbow fill inside an accent edge. A disabled-but-checked box is a filter
+/// the instance imposes (its Minecraft version, its loader) — shown so the
+/// list explains itself, dimmed because it cannot be switched off.
+pub fn check(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let (checked, hovered, enabled) = match status {
+        checkbox::Status::Active { is_checked } => (is_checked, false, true),
+        checkbox::Status::Hovered { is_checked } => (is_checked, true, true),
+        checkbox::Status::Disabled { is_checked } => (is_checked, false, false),
+    };
+    let dim = if enabled { 1.0 } else { 0.55 };
+
+    checkbox::Style {
+        background: if checked {
+            rainbow(theme).scale_alpha(dim)
+        } else {
+            Background::Color(Color::TRANSPARENT)
+        },
+        icon_color: INK,
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: match (checked, hovered) {
+                (true, _) => alpha(accent(theme), dim),
+                (false, true) => alpha(accent(theme), 0.7),
+                (false, false) => rgb(0x2a, 0x2a, 0x34),
+            },
+        },
+        text_color: Some(if checked && enabled { TEXT } else { MUTED }),
     }
 }
 

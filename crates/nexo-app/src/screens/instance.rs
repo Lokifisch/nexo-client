@@ -1,5 +1,5 @@
 use crate::{pulse, theme};
-use crate::{App, Message, Screen};
+use crate::{App, Message};
 use iced::widget::{
     button, column, container, image, pick_list, row, scrollable, text, text_input, toggler, Space,
 };
@@ -11,7 +11,7 @@ use nexo_core::util::human_bytes;
 use nexo_core::Instance;
 use std::path::PathBuf;
 
-/// The four views onto an instance.
+/// The views onto an instance.
 ///
 /// Deliberately the same set the other launchers offer, in the same order:
 /// this is the one screen where someone arrives already knowing what they are
@@ -19,72 +19,74 @@ use std::path::PathBuf;
 /// them hunt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Tab {
+    Overview,
     #[default]
     Content,
-    Files,
     Worlds,
     Logs,
+    Files,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Content, Tab::Files, Tab::Worlds, Tab::Logs];
+    pub const ALL: [Tab; 5] = [Tab::Overview, Tab::Content, Tab::Worlds, Tab::Logs, Tab::Files];
 
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Overview => "Overview",
             Tab::Content => "Content",
-            Tab::Files => "Files",
             Tab::Worlds => "Worlds",
             Tab::Logs => "Logs",
-        }
-    }
-
-    /// A glyph rather than an icon font: these are all in the fonts every
-    /// target already ships, so the tab strip needs no asset and cannot come
-    /// up as tofu on a machine missing one.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Tab::Content => "◈",
-            Tab::Files => "▤",
-            Tab::Worlds => "◍",
-            Tab::Logs => "≡",
+            Tab::Files => "Files",
         }
     }
 }
 
-/// Details for a single instance: what it is, how to launch it, and the four
-/// tabs onto what is inside it.
+/// Details for a single instance: what it is, how to launch it, and the tabs
+/// onto what is inside it.
 ///
-/// The details sit above the tabs rather than inside one of them because they
-/// describe the instance itself — which Minecraft, which loader, which JVM —
-/// and stay true whichever tab is open. Filing them under a tab would mean
-/// leaving the file you are looking at to check what version it belongs to.
+/// The header names the Minecraft and loader versions, so they stay in view
+/// whichever tab is open — that is the fact someone checks while looking at a
+/// file or a log. The rest of the details (memory, Java, whole-instance
+/// actions) live under Overview, where they no longer push every other tab
+/// down the screen.
 pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let running = app.instance_running(&instance.id);
 
-    let back = button(text("‹ Instances").size(13))
-        .padding([5, 10])
-        .style(theme::ghost_button)
-        .on_press(Message::Navigate(Screen::Instances));
+    // First letter of the name, as on the instance list. Always lit here:
+    // this is the instance that is open, the one the list would highlight.
+    let initial = instance
+        .name
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    let tile = container(text(initial).size(16).font(theme::BOLD))
+        .width(44)
+        .height(44)
+        .center_x(44)
+        .center_y(44)
+        .style(theme::initial_tile(true));
 
     let heading = column![
-        text(&instance.name).size(28).color(theme::TEXT),
+        text(&instance.name).size(20).font(theme::BOLD).color(theme::TEXT),
         text(format!(
-            "{} {}{}",
-            instance.loader,
+            "Minecraft {} · {}{}",
             instance.game_version,
+            instance.loader,
             instance
                 .loader_version
                 .as_deref()
-                .map(|v| format!(" · loader {v}"))
+                .map(|v| format!(" {v}"))
                 .unwrap_or_default()
         ))
-        .size(13)
+        .size(12)
         .color(theme::MUTED),
     ]
-    .spacing(4)
+    .spacing(2)
     .width(Fill);
 
     let body = match app.tab {
+        Tab::Overview => column![details_card(app, instance, running)].height(Fill).into(),
         Tab::Content => content_tab(app, instance),
         Tab::Files => files_tab(app, instance),
         Tab::Worlds => worlds_tab(app, instance),
@@ -92,11 +94,9 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     };
 
     column![
-        back,
-        row![heading, launch_control(app, instance, running)]
-            .spacing(16)
+        row![tile, heading, launch_control(app, instance, running)]
+            .spacing(14)
             .align_y(iced::Center),
-        details_card(app, instance, running),
         tab_bar(app, instance),
         body,
     ]
@@ -105,22 +105,17 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     .into()
 }
 
-/// The tab strip. Every tab carries its own underline, so the unselected ones
-/// join into one rule and the selected one breaks it.
+/// The tab strip: compact tabs on one 1px rule, the selected one standing on
+/// a lit bar of its own.
 fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let mut bar = row![].spacing(2).align_y(iced::Bottom);
+    let mut bar = row![].spacing(4).align_y(iced::Bottom);
 
     for tab in Tab::ALL {
         let selected = app.tab == tab;
 
-        let mut label = row![
-            text(tab.glyph())
-                .size(13)
-                .color(if selected { app.accent() } else { theme::MUTED }),
-            text(tab.label()).size(14),
-        ]
-        .spacing(8)
-        .align_y(iced::Center);
+        let mut label = row![text(tab.label()).size(13).font(theme::BOLD)]
+            .spacing(8)
+            .align_y(iced::Center);
 
         // Only for a tab that has actually counted. A badge reading 0 on a
         // directory nobody has opened yet would be a claim, not a number.
@@ -132,34 +127,38 @@ fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             );
         }
 
+        // Shrink, so each tab is as wide as its label; the underline fills
+        // that width and no more.
         bar = bar.push(
             column![
                 button(label)
                     .padding([9, 16])
                     .style(theme::tab_button(selected))
                     .on_press(Message::SelectTab(tab)),
-                container(Space::new().width(Fill).height(if selected { 3 } else { 2 }))
+                container(Space::new().width(Fill).height(2))
                     .style(theme::tab_underline(selected)),
             ]
-            .spacing(0),
+            .width(iced::Shrink),
         );
     }
 
-    // Carries the rule out to the edge of the screen, so the strip reads as a
-    // divider the content hangs from rather than as four floating buttons.
-    bar.push(container(Space::new().width(Fill).height(2)).style(theme::tab_underline(false)))
-        .into()
+    column![
+        bar,
+        container(Space::new().width(Fill).height(1)).style(theme::divider),
+    ]
+    .into()
 }
 
 /// What is installed, and the two ways to install more.
 fn content_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    scrollable(if app.browsing {
-        column![browser_card(app, instance)].spacing(14).width(Fill)
-    } else {
+    if app.browsing {
+        return browser(app, instance);
+    }
+    scrollable(
         column![nexo_mod_card(app, instance), installed_card(app, instance)]
             .spacing(14)
-            .width(Fill)
-    })
+            .width(Fill),
+    )
     .height(Fill)
     .into()
 }
@@ -180,8 +179,9 @@ fn launch_control<'a>(
         col = col.push(
             row![
                 text(name).size(12).color(theme::MINT),
-                button(text("Stop").size(13))
-                    .padding([6, 16])
+                button(text("STOP").size(12).font(theme::BOLD).center())
+                    .width(96)
+                    .padding([10, 0])
                     .style(theme::stop_button)
                     .on_press(Message::Stop(key)),
             ]
@@ -190,7 +190,7 @@ fn launch_control<'a>(
         );
     }
 
-    let label = if app.is_busy() { "Preparing…" } else { "Play" };
+    let label = if app.is_busy() { "PREPARING…" } else { "PLAY" };
 
     // The picked account, falling back to the active one if it was signed out.
     let chosen = app
@@ -200,8 +200,10 @@ fn launch_control<'a>(
         .or_else(|| app.active_account());
     let chosen_uuid = chosen.map(|a| a.uuid.clone());
 
-    let play = button(text(label).size(15))
-        .padding([10, 26])
+    // Padded rather than fixed-width: "PREPARING…" must fit the same button,
+    // and at this padding "PLAY" comes out at the mockup's 96px.
+    let play = button(text(label).size(12).font(theme::BOLD).center())
+        .padding([11, 32])
         // The one place the full ramp is spent — see `theme::hero_button`.
         .style(theme::hero_button)
         // Launching without an account fails deep in the pipeline, so the
@@ -618,122 +620,191 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
         .into()
 }
 
-/// The Modrinth browser, shown in place of the instance's own content view.
-fn browser_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    use nexo_core::content::ProjectKind;
-
-    let search = text_input("Search Modrinth…", &app.modrinth_query)
-        .on_input(Message::ModrinthQueryChanged)
-        .on_submit(Message::SearchContent)
-        .padding(10)
-        .style(theme::input)
-        .width(Fill);
-
-    let mut filters = row![].spacing(8);
-    for kind in ProjectKind::ALL {
-        filters = filters.push(
-            button(text(kind.label()).size(13))
-                .padding([6, 12])
-                // Selected filter is filled, so the current scope is obvious
-                // without a separate label.
-                .style(theme::nav_button(app.content_kind == kind))
-                .on_press(Message::ContentKindChanged(kind)),
-        );
-    }
-
-    let mut body = column![
-        row![
-            text("Install from Modrinth")
-                .size(16)
-                .color(theme::TEXT)
-                .width(Fill),
-            button(text("Search").size(13))
-                .padding([7, 13])
-                .style(theme::primary_button)
-                .on_press(Message::SearchContent),
-            button(text("Done").size(13))
-                .padding([7, 13])
-                .style(theme::ghost_button)
-                .on_press(Message::CloseModrinthBrowser),
-        ]
-        .spacing(10)
-        .align_y(iced::Center),
-        search,
-        filters,
+/// The Modrinth browser, shown in place of the instance's own content view:
+/// filters on the left, search and results on the right.
+fn browser<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let search = row![
+        text_input("Search Modrinth", &app.modrinth_query)
+            .on_input(Message::ModrinthQueryChanged)
+            .on_submit(Message::SearchContent)
+            .padding([10, 12])
+            .size(13)
+            .style(theme::input)
+            .width(Fill),
+        // Enter searches too; the button is for whoever reaches for the mouse.
+        button(text("Search").size(13))
+            .padding([9, 14])
+            .style(theme::ghost_button)
+            .on_press(Message::SearchContent),
+        button(text("Done").size(13))
+            .padding([9, 14])
+            .style(theme::ghost_button)
+            .on_press(Message::CloseModrinthBrowser),
     ]
-    .spacing(12);
+    .spacing(8)
+    .align_y(iced::Center);
 
+    let mut results = column![].spacing(8).width(Fill);
     if app.content_searching {
-        body = body.push(text("Searching…").size(12).color(theme::MUTED));
+        results = results.push(text("Searching…").size(12).color(theme::MUTED));
     } else if app.content_results.is_empty() {
-        body = body.push(
+        results = results.push(
             text("Nothing found for this instance's version and loader.")
                 .size(12)
                 .color(theme::MUTED),
         );
     } else {
         for hit in &app.content_results {
-            let installed = instance.mods.iter().any(|m| m.project_id == hit.project_id);
-
-            body = body.push(
-                container(
-                    row![
-                        icon_or_placeholder(app, &hit.project_id, 48.0),
-                        column![
-                            text(&hit.title).size(14).color(theme::TEXT),
-                            text(&hit.description).size(11).color(theme::MUTED),
-                            row![
-                                // Downloads are the quickest signal of whether
-                                // a project is the well-known one, so they get
-                                // their own emphasis rather than being buried
-                                // in a grey byline.
-                                text(format!("↓ {}", compact(hit.downloads)))
-                                    .size(11)
-                                    .color(theme::MINT),
-                                text(
-                                    hit.author
-                                        .as_deref()
-                                        .map(|a| format!("by {a}"))
-                                        .unwrap_or_default()
-                                )
-                                .size(11)
-                                .color(theme::MUTED),
-                            ]
-                            .spacing(10),
-                        ]
-                        .spacing(3)
-                        .width(Fill),
-                        if installed {
-                            button(text("Installed").size(12))
-                                .padding([6, 12])
-                                .style(theme::ghost_button)
-                        } else {
-                            button(text("Install").size(12))
-                                .padding([6, 12])
-                                .style(theme::primary_button)
-                                .on_press_maybe((!app.is_busy()).then(|| {
-                                    Message::InstallProject {
-                                        instance: instance.id.clone(),
-                                        project: hit.project_id.clone(),
-                                    }
-                                }))
-                        },
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Center),
-                )
-                .padding(12)
-                .width(Fill)
-                .style(theme::card),
-            );
+            results = results.push(result_row(app, instance, hit));
         }
     }
 
-    container(body)
-        .padding(18)
+    row![
+        filter_panel(app, instance),
+        column![
+            search,
+            // Room on the right for the overlay scrollbar, which otherwise
+            // sits on top of each row's Install button.
+            scrollable(container(results).padding(iced::Padding {
+                right: 12.0,
+                ..iced::Padding::ZERO
+            }))
+            .height(Fill),
+        ]
+        .spacing(8)
         .width(Fill)
-        .style(theme::card)
+        .height(Fill),
+    ]
+    .spacing(16)
+    .height(Fill)
+    .into()
+}
+
+/// Only what the search actually filters on. The project type is the user's
+/// choice; the Minecraft version and (for mods) the loader are the
+/// instance's, so they show as checked but locked — the list is narrowed by
+/// them whether or not they are drawn, and drawing them says why a project
+/// someone expected is missing.
+fn filter_panel<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    use nexo_core::content::ProjectKind;
+
+    let row_of = |item: iced::widget::Checkbox<'a, Message>| {
+        container(item.size(16).spacing(10).text_size(13).style(theme::check))
+            .height(30)
+            .align_y(iced::Center)
+    };
+
+    let mut list = column![text("FILTERS").size(11).font(theme::BOLD).color(theme::MUTED)]
+        .spacing(0)
+        .width(Fill);
+    list = list.push(Space::new().height(6));
+
+    // One kind at a time — Modrinth installs each into its own folder — so
+    // checking one moves the check rather than adding to it.
+    for kind in ProjectKind::ALL {
+        list = list.push(row_of(
+            iced::widget::checkbox(app.content_kind == kind)
+                .label(kind.label())
+                .on_toggle(move |_| Message::ContentKindChanged(kind)),
+        ));
+    }
+
+    list = list.push(Space::new().height(8));
+    list = list.push(container(Space::new().width(Fill).height(1)).style(theme::divider));
+    list = list.push(Space::new().height(8));
+
+    list = list.push(row_of(
+        iced::widget::checkbox(true).label(format!("Minecraft {}", instance.game_version)),
+    ));
+    // Mirrors `Message::SearchContent`, which only narrows mods by loader —
+    // packs and shaders are loader-agnostic.
+    if app.content_kind == ProjectKind::Mod && instance.loader.modrinth_facet().is_some() {
+        list = list.push(row_of(
+            iced::widget::checkbox(true).label(instance.loader.to_string()),
+        ));
+    }
+
+    container(list)
+        .padding(14)
+        .width(210)
+        .style(theme::panel)
         .into()
+}
+
+/// One search hit: icon, name and author, one line of description, the
+/// download count, and the button that installs it.
+fn result_row<'a>(
+    app: &'a App,
+    instance: &'a Instance,
+    hit: &'a nexo_core::modrinth::SearchHit,
+) -> Element<'a, Message> {
+    let installed = instance.mods.iter().any(|m| m.project_id == hit.project_id);
+
+    let mut name = row![text(&hit.title)
+        .size(15)
+        .font(theme::BOLD)
+        .color(theme::TEXT)
+        .wrapping(iced::widget::text::Wrapping::None)]
+        .spacing(6)
+        .align_y(iced::Center);
+    if let Some(author) = &hit.author {
+        name = name.push(
+            text(format!("by {author}"))
+                .size(12)
+                .color(theme::MUTED)
+                .wrapping(iced::widget::text::Wrapping::None),
+        );
+    }
+
+    // One line, cut at the edge: the row's height is fixed so the list scans
+    // as a column of equal rows, and a wrapped description would break that.
+    let about = container(
+        column![
+            name,
+            text(&hit.description)
+                .size(12)
+                .color(theme::MUTED)
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(3),
+    )
+    .width(Fill)
+    .clip(true);
+
+    let action = if installed {
+        button(text("INSTALLED").size(11).font(theme::BOLD).center())
+            .width(104)
+            .padding([10, 0])
+            .style(theme::ghost_button)
+    } else {
+        button(text("INSTALL").size(11).font(theme::BOLD).center())
+            .width(104)
+            .padding([10, 0])
+            .style(theme::primary_button)
+            .on_press_maybe((!app.is_busy()).then(|| Message::InstallProject {
+                instance: instance.id.clone(),
+                project: hit.project_id.clone(),
+            }))
+    };
+
+    container(
+        row![
+            icon_or_initial(app, &hit.project_id, &hit.title, 46.0),
+            about,
+            text(format!("{} downloads", compact(hit.downloads)))
+                .size(12)
+                .color(theme::MUTED),
+            action,
+        ]
+        .spacing(14)
+        .align_y(iced::Center),
+    )
+    .padding([0, 14])
+    .height(76)
+    .align_y(iced::Center)
+    .width(Fill)
+    .style(theme::card)
+    .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,6 +1543,30 @@ fn icon_or_placeholder<'a>(app: &'a App, project: &str, size: f32) -> Element<'a
             .height(size)
             .into(),
         None => Space::new().width(size).height(size).into(),
+    }
+}
+
+/// The same, for the browser: rounded like the mockup's tiles, and the
+/// project's initial on a flat tile while the icon loads (or when it has
+/// none), so a row is never a hole at its left edge.
+fn icon_or_initial<'a>(app: &'a App, project: &str, title: &str, size: f32) -> Element<'a, Message> {
+    match app.icons.get(project) {
+        Some(handle) => image(handle.clone())
+            .width(size)
+            .height(size)
+            .border_radius(8.0)
+            .into(),
+        None => container(
+            text(title.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default())
+                .size(16)
+                .font(theme::BOLD),
+        )
+        .width(size)
+        .height(size)
+        .center_x(size)
+        .center_y(size)
+        .style(theme::initial_tile(false))
+        .into(),
     }
 }
 

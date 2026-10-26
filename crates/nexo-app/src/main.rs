@@ -1178,12 +1178,17 @@ impl App {
 
             Message::SelectTab(tab) => {
                 self.tab = tab;
+                // Migrate lives under Overview now, so an armed click could
+                // otherwise sit out of sight and fire on the next visit.
+                self.migrate_armed = None;
                 // Re-read on every visit rather than caching. The game writes
                 // into this directory while it runs, so a cached listing is
                 // stale the moment it matters — and a directory read is
                 // cheap next to being wrong about what is on disk.
                 match tab {
-                    screens::instance::Tab::Content => Task::none(),
+                    screens::instance::Tab::Overview | screens::instance::Tab::Content => {
+                        Task::none()
+                    }
                     screens::instance::Tab::Files => {
                         Task::done(Message::BrowseFiles(self.files_at.clone()))
                     }
@@ -2816,7 +2821,7 @@ impl App {
         Some(self.core.as_ref()?.paths.instance(id))
     }
 
-    /// Drops everything the four tabs hold. Called when an instance is opened,
+    /// Drops everything the tabs hold. Called when an instance is opened,
     /// since all of it describes one instance's directory.
     fn reset_tabs(&mut self) {
         self.tab = screens::instance::Tab::Content;
@@ -2849,6 +2854,8 @@ impl App {
     fn tab_count(&self, tab: screens::instance::Tab, instance: &Instance) -> Option<usize> {
         use screens::instance::Tab;
         match tab {
+            // Facts about the instance, not a list — nothing to count.
+            Tab::Overview => None,
             Tab::Content => Some(instance.mods.len()),
             Tab::Files => self.tabs_loaded.contains(&tab).then_some(self.files.len()),
             // Both lists, since both live behind this one tab.
