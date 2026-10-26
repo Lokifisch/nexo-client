@@ -13,6 +13,13 @@ launcher installs into instances.
 > **Status:** early. Instances, Microsoft sign-in and Modrinth mod browsing work
 > end to end — see [Scope](#scope).
 
+![Nexo launcher — home](docs/screenshots/home.png)
+
+<p>
+  <img src="docs/screenshots/instances.png" width="49%" alt="Instances list">
+  <img src="docs/screenshots/browse.png" width="49%" alt="Modrinth browser inside an instance">
+</p>
+
 ## Why
 
 An earlier version of this was a fork of Modrinth's desktop app. That worked,
