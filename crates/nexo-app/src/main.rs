@@ -69,9 +69,7 @@ fn main() -> iced::Result {
         // breaks the higher-ranked lifetime resolution for `view` across the
         // whole builder chain, with an error that points at the chain rather
         // than at this line.
-        // The accent colour is a function of the clock, so the whole app
-        // drifts through the spectrum from this one line. See `theme::nexo`.
-        .theme(|state: &App| theme::nexo(state.clock))
+        .theme(|_state: &App| theme::nexo())
         // Stops entirely when the window loses focus — see `App::subscription`.
         .subscription(App::subscription)
         // Sets the Wayland `app_id` / X11 `WM_CLASS`. It has to match the
@@ -561,6 +559,8 @@ pub enum Message {
         handle: image::Handle,
     },
     SkinLoaded {
+        /// Account this was loaded for; a result for a no-longer-active account is dropped.
+        uuid: Option<String>,
         face: image::Handle,
         skin: Arc<skin::Rgba>,
         cape: Option<Arc<skin::Rgba>>,
@@ -2671,7 +2671,11 @@ impl App {
                     return Task::none();
                 };
                 Task::perform(
-                    async move { core.accounts.remove(&uuid).await.map_err(|e| e.to_string()) },
+                    async move {
+                        write_skin_cache(&core, &uuid, "png", None).await;
+                        write_skin_cache(&core, &uuid, "cape.png", None).await;
+                        core.accounts.remove(&uuid).await.map_err(|e| e.to_string())
+                    },
                     Message::AccountActionDone,
                 )
             }
@@ -2685,11 +2689,15 @@ impl App {
             }
 
             Message::SkinLoaded {
+                uuid,
                 face,
                 skin,
                 cape,
                 model,
             } => {
+                if uuid.is_some() && uuid != self.active_account {
+                    return Task::none();
+                }
                 if let Some(uuid) = self.active_account.clone() {
                     self.faces.insert(uuid, face);
                 }
@@ -2742,13 +2750,10 @@ impl App {
             .into()
     }
 
-    /// The accent as it stands this frame.
-    ///
-    /// Widget *styles* get this from the theme they are handed; this is for
-    /// the handful of places that colour a piece of text directly, where
-    /// there is no style function to read it out of.
+    /// The accent, for the handful of places that colour a piece of text
+    /// directly, where there is no style function to read it out of.
     pub fn accent(&self) -> iced::Color {
-        theme::spectrum(self.clock / theme::RAINBOW_PERIOD)
+        theme::ACCENT
     }
 
     /// Whether any session of the instance is running.
@@ -2878,7 +2883,7 @@ impl App {
     ///
     /// Gated on focus, which is the whole reason this is a method and not a
     /// constant. A launcher left open behind a game would otherwise repaint 30
-    /// times a second forever to animate colours nobody is looking at — on a
+    /// times a second forever to animate a pulse nobody is looking at — on a
     /// laptop that is battery spent on an empty room. Returning an empty
     /// subscription lets iced park the event loop until something happens.
     fn subscription(&self) -> iced::Subscription<Message> {
@@ -2901,10 +2906,16 @@ impl App {
             return focus;
         }
 
-        let mut feeds = vec![
-            focus,
-            iced::time::every(FRAME).map(|_| Message::Tick(FRAME.as_secs_f32())),
-        ];
+        let mut feeds = vec![focus];
+
+        // The live-log pulse is the only animation left, and it only moves on
+        // the Logs tab of a running instance. Anywhere else a 30 Hz repaint
+        // would redraw a screen that never changes.
+        let pulse_on_screen = matches!(&self.screen, Screen::Instance(id)
+            if self.tab == screens::instance::Tab::Logs && self.instance_running(id));
+        if pulse_on_screen {
+            feeds.push(iced::time::every(FRAME).map(|_| Message::Tick(FRAME.as_secs_f32())));
+        }
 
         if self.following_live_log() {
             // Slower than the animation on purpose. The pulse has to be smooth
@@ -2966,10 +2977,75 @@ fn load_versions(core: Nexo) -> Task<Message> {
 /// a signed-out state, an account with no skin, or a failed download — none
 /// of which is worth surfacing as an error.
 fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
+    // Paint the last-known skin from disk straight away, then refresh from the
+    // network. Chained, not batched, so the older cached copy can never land
+    // after the fresh one; and the refresh knows whether to keep what is shown
+    // when Mojang is unreachable.
+    let Some(uuid) = account.as_ref().map(|a| a.uuid.clone()) else {
+        return fetch_skin(core, account, false);
+    };
+    Task::perform(cached_skin(core.clone(), uuid), |m| m).then(move |cached| {
+        let had_cache = cached.is_some();
+        let show = cached.map(Task::done).unwrap_or_else(Task::none);
+        show.chain(fetch_skin(core.clone(), account.clone(), had_cache))
+    })
+}
+
+/// Per-account copy of the worn skin and cape, kept so the next launch does
+/// not wait on Mojang before drawing them. The uuid comes from the account
+/// store, never from user input, but is checked anyway before touching a path.
+fn skin_cache_path(core: &Nexo, uuid: &str, ext: &str) -> Option<std::path::PathBuf> {
+    (!uuid.is_empty() && uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .then(|| core.paths.root().join("skin-cache").join(format!("{uuid}.{ext}")))
+}
+
+async fn cached_skin(core: Nexo, uuid: String) -> Option<Message> {
+    let raw = tokio::fs::read(skin_cache_path(&core, &uuid, "png")?).await.ok()?;
+    let mut decoded = skin::Skin::decode(&raw, nexo_core::SkinModel::Classic).ok()?;
+    let model = decoded.use_detected_model();
+    let cape = match tokio::fs::read(skin_cache_path(&core, &uuid, "cape.png")?).await {
+        Ok(bytes) => skin::decode_texture(&bytes).ok().map(Arc::new),
+        Err(_) => None,
+    };
+    Some(Message::SkinLoaded {
+        uuid: Some(uuid),
+        face: to_handle(decoded.face(FACE_SCALE)),
+        skin: Arc::new(decoded.texture().clone()),
+        cape,
+        model,
+    })
+}
+
+async fn write_skin_cache(core: &Nexo, uuid: &str, ext: &str, bytes: Option<&[u8]>) {
+    let Some(path) = skin_cache_path(core, uuid, ext) else {
+        return;
+    };
+    let result = match bytes {
+        Some(bytes) => match path.parent() {
+            Some(dir) => match tokio::fs::create_dir_all(dir).await {
+                Ok(()) => tokio::fs::write(&path, bytes).await,
+                Err(err) => Err(err),
+            },
+            None => Ok(()),
+        },
+        // Cape unequipped: drop the stale copy so it doesn't come back next launch.
+        None => match tokio::fs::remove_file(&path).await {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        },
+    };
+    if let Err(err) = result {
+        tracing::warn!(%err, "could not update the skin cache");
+    }
+}
+
+/// `keep_shown`: a cached skin is already on screen, so a transient failure
+/// (offline, Mojang outage) leaves it there instead of swapping in the placeholder.
+fn fetch_skin(core: Nexo, account: Option<Account>, keep_shown: bool) -> Task<Message> {
     Task::perform(
         async move {
             let Some(account) = account else {
-                return placeholder_skin();
+                return Some(placeholder_skin());
             };
 
             // Bring cosmetics up to date before drawing them. Skins and capes
@@ -2987,7 +3063,10 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
             };
 
             let Some(url) = account.skin_url.clone() else {
-                return placeholder_skin();
+                // The account has no skin (removed or reset): forget the old copy.
+                write_skin_cache(&core, &account.uuid, "png", None).await;
+                write_skin_cache(&core, &account.uuid, "cape.png", None).await;
+                return Some(placeholder_skin_for(Some(account.uuid)));
             };
 
             // Fetched undecoded so the exact PNG can be kept and re-uploaded
@@ -2996,28 +3075,41 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
                 Ok(raw) => raw,
                 Err(err) => {
                     tracing::warn!(%err, "could not load skin, using the placeholder");
-                    return placeholder_skin();
+                    return (!keep_shown).then(|| placeholder_skin_for(Some(account.uuid)));
                 }
             };
             let mut decoded = match skin::Skin::decode(&raw, account.skin_model) {
                 Ok(decoded) => decoded,
                 Err(err) => {
                     tracing::warn!(%err, "skin texture is not usable, using the placeholder");
-                    return placeholder_skin();
+                    return (!keep_shown).then(|| placeholder_skin_for(Some(account.uuid)));
                 }
             };
+            write_skin_cache(&core, &account.uuid, "png", Some(&raw)).await;
 
             // A cape is genuinely optional, and a failure to fetch one should
             // not cost the user their skin.
             let cape = match &account.cape_url {
-                Some(cape_url) => match skin::fetch_texture(core.http(), cape_url).await {
-                    Ok(cape) => Some(Arc::new(cape)),
+                Some(cape_url) => match skin::fetch_png(core.http(), cape_url).await {
+                    Ok(bytes) => match skin::decode_texture(&bytes) {
+                        Ok(cape) => {
+                            write_skin_cache(&core, &account.uuid, "cape.png", Some(&bytes)).await;
+                            Some(Arc::new(cape))
+                        }
+                        Err(err) => {
+                            tracing::warn!(%err, "could not load cape");
+                            None
+                        }
+                    },
                     Err(err) => {
                         tracing::warn!(%err, "could not load cape");
                         None
                     }
                 },
-                None => None,
+                None => {
+                    write_skin_cache(&core, &account.uuid, "cape.png", None).await;
+                    None
+                }
             };
 
             // The texture is authoritative, not the profile's `variant`,
@@ -3033,21 +3125,28 @@ fn load_skin(core: Nexo, account: Option<Account>) -> Task<Message> {
                 tracing::warn!(%err, "could not add this skin to the library");
             }
 
-            Message::SkinLoaded {
+            Some(Message::SkinLoaded {
+                uuid: Some(account.uuid.clone()),
                 face: to_handle(decoded.face(FACE_SCALE)),
                 skin: Arc::new(decoded.texture().clone()),
                 cape,
                 model,
-            }
+            })
         },
         |message| message,
     )
+    .then(|m| m.map(Task::done).unwrap_or_else(Task::none))
 }
 
 /// Signed-out stand-in. A real 64x64 texture rather than a special case, so
 /// the 3D renderer always has exactly one path.
 fn placeholder_skin() -> Message {
+    placeholder_skin_for(None)
+}
+
+fn placeholder_skin_for(uuid: Option<String>) -> Message {
     Message::SkinLoaded {
+        uuid,
         face: to_handle(skin::placeholder_face(FACE_SCALE)),
         skin: Arc::new(skin::placeholder_texture()),
         cape: None,

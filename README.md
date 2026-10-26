@@ -10,8 +10,8 @@ This is the install/launch half of Nexo. The other half is
 [Nexo Mod](https://github.com/Lokifisch/nexo-mod), a Fabric mod that this
 launcher installs into instances.
 
-> **Status:** early. Instances and Microsoft sign-in work end to end.
-> Mod browsing is groundwork only — see [Scope](#scope).
+> **Status:** early. Instances, Microsoft sign-in and Modrinth mod browsing work
+> end to end — see [Scope](#scope).
 
 ## Why
 
@@ -59,14 +59,11 @@ Working today:
   Fabric's profile on top, downloads the client jar, libraries, and assets in
   parallel, unpacks natives, and builds the JVM command.
 
-Groundwork, no UI yet:
+Also working: a Modrinth mod browser in each instance's Content tab,
+`.mrpack` import/export, a Logs tab, per-instance "Install Nexo Mod", skins,
+instance migration and Paper server hosting.
 
-- **Modrinth** — `nexo-core::modrinth` is written and tested (search, version
-  resolution, checksum-verified downloads) but nothing calls it from the
-  frontend.
-
-Not started: CurseForge, modpack import, mod updating, an in-app log console,
-and auto-installing Nexo Mod into an instance.
+Not started: CurseForge and updating installed mods.
 
 ## Installing
 

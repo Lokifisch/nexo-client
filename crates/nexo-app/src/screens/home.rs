@@ -51,13 +51,24 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .size(12)
                 .color(theme::MUTED),
         );
-    } else {
+    } else if app.instances.is_empty() {
+        // Nothing to start yet, so the way forward is making one.
         content = content.push(Space::new().height(16));
         content = content.push(
             button(text("Go to instances").size(14))
                 .padding([8, 18])
                 .style(theme::ghost_button)
                 .on_press(Message::Navigate(Screen::Instances)),
+        );
+    } else {
+        // Straight back into the last game, named so it's clear which one.
+        let (label, launch) = crate::screens::last_instance_launch(app);
+        content = content.push(Space::new().height(16));
+        content = content.push(
+            button(text(label).size(15).font(theme::BOLD))
+                .padding([10, 22])
+                .style(theme::hero_button)
+                .on_press_maybe(launch),
         );
     }
 

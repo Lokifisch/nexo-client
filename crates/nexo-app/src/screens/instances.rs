@@ -93,7 +93,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     // The whole card is the way into the details screen; a plain text button
     // keeps it looking like a card rather than a control.
     let mut info = column![
-            text(&instance.name).size(17).color(theme::TEXT),
+            text(&instance.name).size(17).font(theme::BOLD).color(theme::TEXT),
             text(loader_line).size(12).color(theme::MUTED),
             // Owned, not borrowed: the widget outlives this function.
             text(if running {
@@ -120,22 +120,38 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     // Play becomes Stop while the game is up, mirroring the details screen so
     // the same instance never shows two different states.
     let action: iced::Element<'a, Message> = if running {
-        button(text("Stop").size(14))
-            .padding([7, 18])
+        button(text("STOP").size(12).font(theme::BOLD).center())
+            .width(96)
+            .padding([10, 0])
             .style(theme::stop_button)
             .on_press(Message::StopInstance(instance.id.clone()))
             .into()
     } else {
         let can_launch = !app.is_busy() && app.active_account().is_some();
-        button(text("Play").size(14))
-            .padding([7, 18])
+        button(text("PLAY").size(12).font(theme::BOLD).center())
+            .width(96)
+            .padding([10, 0])
             .style(theme::primary_button)
             .on_press_maybe(can_launch.then(|| Message::Launch(instance.id.clone(), None)))
             .into()
     };
 
-    container(row![details, action].spacing(12).align_y(iced::Center))
-        .padding(16)
+    // First letter of the name, in the square at the left of the card.
+    let initial = instance
+        .name
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    let tile = container(text(initial).size(18).font(theme::BOLD))
+        .width(52)
+        .height(52)
+        .center_x(52)
+        .center_y(52)
+        .style(theme::initial_tile(running));
+
+    container(row![tile, details, action].spacing(16).align_y(iced::Center))
+        .padding([14, 16])
         .width(Fill)
         .style(theme::card)
         .into()

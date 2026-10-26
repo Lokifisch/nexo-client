@@ -337,14 +337,12 @@ pub fn cape_panel(texture: &Rgba, scale: u32) -> Rgba {
 /// icons, which are variously PNG, WebP or JPEG — hence sniffing the format
 /// from the bytes rather than assuming one.
 pub async fn fetch_texture(http: &reqwest::Client, url: &str) -> Result<Rgba> {
-    let bytes = http
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let decoded = image::load_from_memory(&bytes)
+    decode_texture(&fetch_png(http, url).await?)
+}
+
+/// Decodes any texture PNG (cape, or a cached copy of one) to RGBA.
+pub fn decode_texture(bytes: &[u8]) -> Result<Rgba> {
+    let decoded = image::load_from_memory(bytes)
         .map_err(|err| Error::invalid(format!("could not read texture: {err}")))?
         .to_rgba8();
     let (width, height) = decoded.dimensions();

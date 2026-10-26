@@ -1,16 +1,17 @@
 //! Neon palette and widget styling.
 //!
-//! Colors are sampled from `nexologo.svg` so the app and the in-game re-skin
-//! read as one product: violet `#7b3cff` as the primary, magenta and mint as
-//! the gradient poles, on the logo's near-black `#0d0d14` ground.
+//! The rules (written down in the umbrella project's `design/STYLE.md`): flat near-black panels separated by
+//! 1px lines, and colour spent only on what is on or primary. Primary buttons
+//! are filled with the logo's rainbow ramp; everything else stays dark until
+//! the cursor reaches it.
 //!
 //! iced has no stylesheet — every style is a function of `(theme, status)`.
 //! That is more verbose than CSS, but it means a widget's appearance is
 //! ordinary Rust that the compiler checks, and hover/press/disabled states
 //! can't be silently forgotten.
 
-use iced::widget::{button, container, text_input, toggler};
-use iced::{border, gradient, Background, Border, Color, Shadow, Theme, Vector};
+use iced::widget::{button, container, svg, text_input, toggler};
+use iced::{border, gradient, Background, Border, Color, Font, Shadow, Theme, Vector};
 
 /// Logo violet — the primary accent.
 pub const VIOLET: Color = rgb(0x7b, 0x3c, 0xff);
@@ -18,16 +19,28 @@ pub const VIOLET: Color = rgb(0x7b, 0x3c, 0xff);
 pub const MAGENTA: Color = rgb(0xff, 0x3c, 0xac);
 /// Logo mint, the cool pole — used for success/ready states.
 pub const MINT: Color = rgb(0x3c, 0xff, 0xb0);
-/// Logo background.
-pub const INK: Color = rgb(0x0d, 0x0d, 0x14);
-/// One step up from [`INK`], for panels that need to separate from the page.
-pub const SURFACE: Color = rgb(0x16, 0x16, 0x22);
-/// Two steps up — cards, inputs.
-pub const RAISED: Color = rgb(0x1f, 0x1f, 0x2e);
-pub const TEXT: Color = rgb(0xe8, 0xe8, 0xf2);
-/// Secondary text; still clears 4.5:1 on [`INK`].
-pub const MUTED: Color = rgb(0x9a, 0x9a, 0xb4);
-pub const DANGER: Color = rgb(0xff, 0x4d, 0x6a);
+/// The page.
+pub const INK: Color = rgb(0x0a, 0x0a, 0x0d);
+/// The nav rail — one step up from [`INK`].
+pub const SURFACE: Color = rgb(0x0d, 0x0d, 0x11);
+/// Cards and list rows.
+pub const RAISED: Color = rgb(0x11, 0x11, 0x16);
+/// Inputs and unlit buttons.
+pub const FIELD: Color = rgb(0x10, 0x10, 0x15);
+/// Lines between panels.
+pub const LINE: Color = rgb(0x1d, 0x1d, 0x25);
+/// The outline of an unlit control — a step brighter than [`LINE`].
+pub const CONTROL: Color = rgb(0x23, 0x23, 0x2c);
+pub const TEXT: Color = rgb(0xf2, 0xf2, 0xf5);
+/// Secondary text; still clears 4.5:1 on [`RAISED`].
+pub const MUTED: Color = rgb(0x8b, 0x8b, 0x99);
+pub const DANGER: Color = rgb(0xff, 0x54, 0x70);
+
+/// Headings and button labels. Weight, not size, carries the hierarchy.
+pub const BOLD: Font = Font {
+    weight: iced::font::Weight::Bold,
+    ..Font::DEFAULT
+};
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color {
@@ -50,6 +63,8 @@ pub mod angle {
     pub const ACROSS: f32 = std::f32::consts::FRAC_PI_2;
     /// Top to bottom.
     pub const DOWN: f32 = std::f32::consts::PI;
+    /// Top-left to bottom-right, the way the logo's ramp runs.
+    pub const DIAGONAL: f32 = std::f32::consts::FRAC_PI_4 * 3.0;
 }
 
 /// Lays `top` over `base` at `amount` opacity.
@@ -67,65 +82,102 @@ fn blend(base: Color, top: Color, amount: f32) -> Color {
     }
 }
 
-/// The neon-sign construction every button in the app is built from: black
-/// glass, a lit outline, and the glow it throws onto the page around it.
-///
-/// The colour is in the *light*, never in the fill. That is what separates a
-/// neon sign from a painted one, and it is why the accent arrives as a border,
-/// a label and a halo while the surface itself stays near-black — a filled
-/// swatch of the same colour reads as plastic no matter how bright it is.
-///
-/// `quiet` holds the glow back until the cursor arrives. A toolbar of six lit
-/// buttons is a toolbar with no emphasis left to give the one that matters, so
-/// only the primary action on a screen glows at rest.
-fn lit(accent: Color, status: button::Status, quiet: bool) -> button::Style {
-    // Neon is a bright line on a dark ground, so the outline and the label
-    // take a lightened accent rather than the raw brand colour: #7b3cff on
-    // near-black sits around 4:1, which is thin for a control label.
-    let bright = lighten(accent, 0.22);
+/// A halo around a control. No offset: a glow that falls to one side reads as
+/// an object lit from elsewhere rather than as one that is lit.
+fn halo(color: Color, blur_radius: f32) -> Shadow {
+    Shadow {
+        color,
+        offset: Vector::new(0.0, 0.0),
+        blur_radius,
+    }
+}
 
-    let (border, glow, wash) = match status {
-        button::Status::Active if quiet => (0.4, 0.0, 0.05),
-        button::Status::Active => (0.9, 15.0, 0.09),
-        button::Status::Hovered => (1.0, 27.0, 0.15),
-        // Dimmer and tighter, not brighter: a neon tube pressed against the
-        // page should look like it moved closer to it.
-        button::Status::Pressed => (1.0, 9.0, 0.22),
-        button::Status::Disabled => (0.16, 0.0, 0.0),
+/// The logo's own ramp — pink, violet, blue, mint — at the logo's own
+/// colours. Fixed, not derived from the spectrum: the spectrum's evenly lit
+/// hues turned a small button into broad flat bands, where the logo's deeper
+/// violet and blue in the middle keep it reading as one gradient.
+pub fn rainbow(_theme: &Theme) -> Background {
+    Background::from(
+        gradient::Linear::new(angle::DIAGONAL)
+            .add_stop(0.0, MAGENTA)
+            // Lighter than the logo's #7b3cff: dark button labels cross this
+            // band, and #7b3cff only gives them ~3.7:1.
+            .add_stop(0.35, rgb(0x9a, 0x6b, 0xff))
+            .add_stop(0.7, rgb(0x22, 0xb8, 0xff))
+            .add_stop(1.0, MINT),
+    )
+}
+
+/// A rainbow-filled button: the one thing on a screen that should be pressed.
+/// Dark label on the bright fill. `glow` scales the halo, so Play can outshine
+/// an ordinary primary beside it.
+fn filled(theme: &Theme, status: button::Status, glow: f32) -> button::Style {
+    let blur = match status {
+        button::Status::Active => 16.0,
+        button::Status::Hovered => 26.0,
+        // Tighter, not brighter: pressed should look closer to the page.
+        button::Status::Pressed => 8.0,
+        button::Status::Disabled => {
+            return button::Style {
+                background: Some(Background::Color(FIELD)),
+                text_color: alpha(MUTED, 0.6),
+                border: Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: CONTROL,
+                },
+                ..Default::default()
+            };
+        }
     };
 
     button::Style {
-        background: Some(Background::Color(blend(INK, accent, wash))),
+        background: Some(rainbow(theme)),
+        text_color: INK,
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        shadow: halo(alpha(accent(theme), 0.5), blur * glow),
+        ..Default::default()
+    }
+}
+
+/// An unlit button: dark field, 1px line, and only the outline reacts to the
+/// cursor. `tone` colours the label and the hovered outline — the accent for
+/// ordinary actions, red for destructive ones.
+fn outline(tone: Option<Color>, theme: &Theme, status: button::Status) -> button::Style {
+    let edge = tone.unwrap_or(accent(theme));
+    let (background, line) = match status {
+        button::Status::Active => (FIELD, CONTROL),
+        button::Status::Hovered => (FIELD, alpha(edge, 0.7)),
+        button::Status::Pressed => (blend(FIELD, edge, 0.12), edge),
+        button::Status::Disabled => (FIELD, alpha(CONTROL, 0.6)),
+    };
+
+    button::Style {
+        background: Some(Background::Color(background)),
         text_color: match status {
-            button::Status::Disabled => alpha(MUTED, 0.45),
-            _ => bright,
+            button::Status::Disabled => alpha(MUTED, 0.6),
+            _ => tone.unwrap_or(TEXT),
         },
         border: Border {
-            radius: 10.0.into(),
-            width: if quiet { 1.0 } else { 1.5 },
-            color: alpha(bright, border),
-        },
-        shadow: Shadow {
-            color: alpha(accent, 0.6),
-            // No offset: a halo, not a drop shadow. A glow that falls to one
-            // side reads as an object lit from elsewhere rather than as one
-            // that is lit.
-            offset: Vector::new(0.0, 0.0),
-            blur_radius: glow,
+            radius: 8.0.into(),
+            width: 1.0,
+            color: line,
         },
         ..Default::default()
     }
 }
 
-/// How long the accent takes to travel once around the colour wheel.
-///
-/// Slow on purpose. The glow should look like it is drifting when you happen
-/// to notice it, not flashing while you are trying to read a log — and a fast
-/// cycle turns every button into a distraction competing with the content.
+/// Where the animation clock wraps, in seconds — a whole multiple of the
+/// live-log pulse's 2.4s ring, so the pulse passes the wrap without a jump.
+/// (Named for the accent's old 12s trip round the colour wheel; the accent no
+/// longer moves.)
 pub const RAINBOW_PERIOD: f32 = 12.0;
 
-/// A fully saturated neon at `turns` around the colour wheel; wraps, so the
-/// caller can hand it a raw elapsed time over [`RAINBOW_PERIOD`].
+/// A fully saturated neon at `turns` around the colour wheel; wraps. Used for
+/// the hue ramp along the selected tab's underline.
 ///
 /// Lightness sits at 0.66 rather than full: a pure hue at maximum lightness
 /// goes white at yellow and cyan, so a cycling accent would visibly flatten
@@ -179,27 +231,26 @@ fn hue_of(color: Color) -> f32 {
     (hue / 6.0).rem_euclid(1.0)
 }
 
+/// The one accent: glows, outlines and the selected state. A violet-pink
+/// between the logo's magenta and violet, so the glow matches the rainbow
+/// fill it sits around.
+///
+/// It used to drift round the whole colour wheel. That made the rail and
+/// every lit control turn green, then yellow, in turn — big blocks of colour
+/// the mockup never had — so it holds still now.
+pub const ACCENT: Color = rgb(0xb1, 0x4c, 0xff);
+
 /// The app-wide theme. Built from a custom palette so iced's generated
 /// component colors (hover shades, contrast text) derive from the brand
-/// rather than being hand-maintained per widget.
-///
-/// `clock` is elapsed seconds, and it is the *whole* animation: the accent is
-/// carried in `primary`, so every style below reads its colour out of the
-/// theme it is already handed and no widget, screen, or call site knows that
-/// the accent moves. Rebuilt each frame, which costs one palette generation —
-/// a handful of colour conversions, against a frame that was going to be
-/// drawn anyway.
-///
-/// `success` and `danger` deliberately do not move. Mint means *ready* and red
-/// means *this destroys something*; a Delete button that drifts through green
-/// is a Delete button that has stopped warning anyone.
-pub fn nexo(clock: f32) -> Theme {
+/// rather than being hand-maintained per widget. Every style below reads the
+/// accent out of `primary`, so this is the one place it is chosen.
+pub fn nexo() -> Theme {
     Theme::custom(
         "Nexo".to_string(),
         iced::theme::Palette {
             background: INK,
             text: TEXT,
-            primary: spectrum(clock / RAINBOW_PERIOD),
+            primary: ACCENT,
             success: MINT,
             warning: rgb(0xff, 0xd9, 0x3c),
             danger: DANGER,
@@ -207,93 +258,103 @@ pub fn nexo(clock: f32) -> Theme {
     )
 }
 
-/// The accent as it stands this frame. Every style takes its colour from here
-/// rather than from [`VIOLET`], which is now only the resting brand colour for
-/// anything that must not move.
+/// The accent ([`ACCENT`]), read out of the theme each style is handed.
 fn accent(theme: &Theme) -> Color {
     theme.palette().primary
 }
 
-/// The main call-to-action: violet neon, lit at rest.
+/// The main call-to-action: rainbow-filled and glowing at rest. One per
+/// screen — a second one leaves the screen with no emphasis left to give.
 pub fn primary_button(theme: &Theme, status: button::Status) -> button::Style {
-    lit(accent(theme), status, false)
+    filled(theme, status, 1.0)
 }
 
-/// Play — the one control that must be found without looking.
-///
-/// Mint rather than violet, and the only mint button in the app. It is the
-/// palette's "ready" signal, so spending it here means *go* is the one word
-/// the colour ever says; a second mint button anywhere would cost that.
-pub fn hero_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let mut style = lit(MINT, status, false);
-
-    // A touch more light than the others carry, so it wins the screen even
-    // sitting beside a lit primary.
-    style.shadow.blur_radius *= 1.35;
-    style
+/// Play — the one control that must be found without looking. The same fill
+/// as a primary, with more light, so it wins the screen even beside one.
+pub fn hero_button(theme: &Theme, status: button::Status) -> button::Style {
+    filled(theme, status, 1.4)
 }
 
-/// Quieter actions that sit next to a primary one. Unlit until the cursor
-/// arrives — see [`lit`] on why they have to be.
+/// Quieter actions that sit next to a primary one, like "Open folder" and
+/// "Browse…". Unlit until the cursor arrives.
 pub fn ghost_button(theme: &Theme, status: button::Status) -> button::Style {
-    let mut style = lit(accent(theme), status, true);
+    outline(None, theme, status)
+}
 
-    // Plain text rather than violet: these are labels like "Open folder" and
-    // "Browse…", and a row of them in accent colour would look like a row of
-    // primary actions.
-    style.text_color = match status {
-        button::Status::Disabled => alpha(MUTED, 0.45),
-        _ => TEXT,
+/// Stop, shown in place of Play while a game is running. Red outline with a
+/// faint red glow at rest: it holds the primary slot, so it needs weight, but
+/// a filled red button would read as an alarm.
+pub fn stop_button(theme: &Theme, status: button::Status) -> button::Style {
+    let mut style = outline(Some(DANGER), theme, status);
+    let glow = match status {
+        button::Status::Active => 12.0,
+        button::Status::Hovered => 22.0,
+        button::Status::Pressed => 8.0,
+        button::Status::Disabled => return style,
     };
+    style.border.color = DANGER;
+    style.shadow = halo(alpha(DANGER, 0.35), glow);
     style
 }
 
-/// Stop, shown in place of Play while a game is running. Lit at rest, since it
-/// occupies the primary action's slot and needs the same weight while clearly
-/// not being "go".
-pub fn stop_button(_theme: &Theme, status: button::Status) -> button::Style {
-    lit(DANGER, status, false)
-}
-
-/// Destructive actions. Red, and dark until touched: a Delete that glows on
+/// Destructive actions. Red label, dark until touched: a Delete that glows on
 /// its own draws the eye to exactly the button nobody should press by
 /// accident.
-pub fn danger_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let mut style = lit(DANGER, status, true);
-    style.text_color = match status {
-        button::Status::Disabled => alpha(MUTED, 0.45),
-        _ => DANGER,
-    };
-    style
+pub fn danger_button(theme: &Theme, status: button::Status) -> button::Style {
+    outline(Some(DANGER), theme, status)
 }
 
-/// Sidebar navigation entries. The selected one is a lit tube; the rest are
-/// unlit glass, which is what makes "where you are" readable at a glance
-/// without a separate indicator.
+/// A square icon entry in the nav rail. The selected one is tinted, outlined
+/// and glowing; the rest are bare until hovered, which is what makes "where
+/// you are" readable at a glance. The icon itself is tinted by [`nav_icon`].
 pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let accent = accent(theme);
 
         if selected {
-            let mut style = lit(accent(theme), status, false);
-            style.border.radius = 8.0.into();
-            return style;
+            return button::Style {
+                background: Some(Background::Color(blend(SURFACE, accent, 0.16))),
+                text_color: accent,
+                border: Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: accent,
+                },
+                shadow: halo(alpha(accent, 0.45), 16.0),
+                ..Default::default()
+            };
         }
 
         button::Style {
-            background: Some(Background::Color(if hovered {
-                blend(INK, accent(theme), 0.1)
-            } else {
-                Color::TRANSPARENT
-            })),
+            background: Some(Background::Color(if hovered { FIELD } else { Color::TRANSPARENT })),
             text_color: if hovered { TEXT } else { MUTED },
             border: Border {
                 radius: 8.0.into(),
                 ..Default::default()
             },
-            shadow: Shadow::default(),
             ..Default::default()
         }
+    }
+}
+
+/// Tints a rail icon to match its [`nav_button`]: accent when selected, text
+/// when hovered, muted otherwise.
+pub fn nav_icon(selected: bool) -> impl Fn(&Theme, svg::Status) -> svg::Style {
+    move |theme, status| svg::Style {
+        color: Some(match (selected, status) {
+            (true, _) => accent(theme),
+            (false, svg::Status::Hovered) => TEXT,
+            (false, svg::Status::Idle) => MUTED,
+        }),
+    }
+}
+
+/// An icon in the label colour of the [`filled`] button it sits on: dark on
+/// the rainbow, muted on the dark field a disabled one falls back to.
+pub fn icon_on_fill(enabled: bool) -> impl Fn(&Theme, svg::Status) -> svg::Style {
+    move |_theme, _status| svg::Style {
+        color: Some(if enabled { INK } else { alpha(MUTED, 0.6) }),
     }
 }
 
@@ -356,9 +417,8 @@ pub fn selected_tile(_theme: &Theme, _status: button::Status) -> button::Style {
 
 /// One tab on the instance screen.
 ///
-/// Flat rather than a pill: the sidebar already uses filled pills for "where
-/// you are", and reusing that shape one level down would make the two rails
-/// compete. The selected tab is lit from below instead — a wash that fades
+/// Flat rather than a tile: the rail already uses lit tiles for "where you
+/// are", and reusing that shape one level down would make the two compete. The selected tab is lit from below instead — a wash that fades
 /// upward out of its underline, so the two read as one lamp rather than as a
 /// panel with a line under it. See [`tab_underline`].
 pub fn tab_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -506,23 +566,67 @@ pub fn well(_theme: &Theme) -> container::Style {
     }
 }
 
-/// A content card — instance tiles, account rows.
-pub fn card(theme: &Theme) -> container::Style {
+/// A content card — instance tiles, account rows. A plain line, no accent:
+/// cards are where content sits, and tinting every one of them is how a
+/// screen ends up glowing all over.
+pub fn card(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(RAISED)),
         border: Border {
-            radius: 12.0.into(),
+            radius: 10.0.into(),
             width: 1.0,
-            color: alpha(accent(theme), 0.18),
+            color: LINE,
         },
         ..Default::default()
     }
 }
 
-/// The sidebar's ground.
+/// The square holding an instance's initial at the left of its card. Rainbow
+/// while that instance is running, so a running game is visible from across
+/// the list; a flat block otherwise.
+pub fn initial_tile(running: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| container::Style {
+        background: Some(if running {
+            rainbow(theme)
+        } else {
+            Background::Color(rgb(0x2a, 0x2a, 0x34))
+        }),
+        text_color: Some(if running { INK } else { TEXT }),
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// The nav rail's ground.
 pub fn sidebar(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(SURFACE)),
+        ..Default::default()
+    }
+}
+
+/// The 1px line down the rail's edge. A container rather than a border on the
+/// rail, because iced borders go all the way round.
+pub fn divider(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(LINE)),
+        ..Default::default()
+    }
+}
+
+/// The label a rail icon shows on hover, since the rail has no text of its own.
+pub fn tooltip(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(RAISED)),
+        text_color: Some(TEXT),
+        border: Border {
+            radius: 6.0.into(),
+            width: 1.0,
+            color: CONTROL,
+        },
         ..Default::default()
     }
 }
@@ -561,13 +665,13 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let border_color = match status {
         text_input::Status::Focused { .. } => accent(theme),
         text_input::Status::Hovered => alpha(accent(theme), 0.5),
-        _ => alpha(MUTED, 0.3),
+        _ => CONTROL,
     };
 
     text_input::Style {
-        background: Background::Color(SURFACE),
+        background: Background::Color(FIELD),
         border: Border {
-            radius: 10.0.into(),
+            radius: 8.0.into(),
             width: 1.0,
             color: border_color,
         },
@@ -599,16 +703,18 @@ pub fn toggle(theme: &Theme, status: toggler::Status) -> toggler::Style {
         }
         toggler::Status::Disabled { is_toggled } => (is_toggled, 0.6),
     };
-    let track = if on {
-        accent(theme)
+    // On: a tinted track inside a lit outline, white knob. Off: a dark track
+    // with a dim knob, so on and off differ in lightness, not only in hue.
+    let (track, edge, knob) = if on {
+        (blend(INK, accent(theme), 0.22), accent(theme), TEXT)
     } else {
-        Color::from_rgb8(0x2a, 0x2a, 0x3a)
+        (rgb(0x16, 0x16, 0x1c), rgb(0x2a, 0x2a, 0x34), rgb(0x5a, 0x5a, 0x68))
     };
     toggler::Style {
         background: Background::Color(alpha(track, dim)),
-        background_border_width: 0.0,
-        background_border_color: Color::TRANSPARENT,
-        foreground: Background::Color(alpha(TEXT, dim)),
+        background_border_width: 1.0,
+        background_border_color: alpha(edge, dim),
+        foreground: Background::Color(alpha(knob, dim)),
         foreground_border_width: 0.0,
         foreground_border_color: Color::TRANSPARENT,
         text_color: None,
