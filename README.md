@@ -83,9 +83,17 @@ yay -S nexo-client-git    # current main branch
 
 ### Debian / Ubuntu
 
+Through the apt repository, so `apt upgrade` keeps it current (amd64 and arm64):
+
 ```sh
-sudo apt install ./nexo-client_0.1.0-1_amd64.deb
+curl -fsSL https://nexomc.dev/apt/key.gpg | sudo tee /usr/share/keyrings/nexo.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/nexo.gpg] https://nexomc.dev/apt stable main" | sudo tee /etc/apt/sources.list.d/nexo.list
+sudo apt update && sudo apt install nexo-client
 ```
+
+New releases reach the repository within about half an hour of being published.
+Each release also carries the `.deb` files directly, for
+`sudo apt install ./nexo-client_<version>_amd64.deb`.
 
 Or build the `.deb` yourself from a source checkout:
 
