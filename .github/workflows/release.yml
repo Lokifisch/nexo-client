@@ -118,8 +118,61 @@ jobs:
           path: out/*
           if-no-files-found: error
 
+  # The Debian/Ubuntu package, built natively for both architectures. It
+  # rides on the GitHub release; the apt repository at nexomc.dev/apt picks it
+  # up from there (a timer on that server pulls new releases — GitHub's runners
+  # cannot reach it, which is also why no credentials for it live here).
+  deb:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debhelper dpkg-dev pkg-config libfontconfig-dev libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: deb-${{ matrix.arch }}
+
+      - name: Build the .deb
+        run: |
+          cp -r packaging/debian debian
+          # The packaging targets an offline Debian builder: it vendors cargo's
+          # registry and forbids network. A release build here has both, so those
+          # two lines go. NEXO_SELF_UPDATE=off stays: apt owns /usr/bin/nexo.
+          sed -i '/^export CARGO_HOME/d;/^export CARGO_NET_OFFLINE/d' debian/rules
+          # 0.7.0-alpha must sort before 0.7.0, which in Debian versions is "~".
+          version="${{ needs.version.outputs.version }}"
+          tilde='~'
+          printf 'nexo-client (%s-1) unstable; urgency=medium\n\n  * Release %s.\n\n -- Lokifisch <lokifisch@lokifisch.dev>  %s\n\n' \
+            "${version/-/$tilde}" "$version" "$(date -R)" | cat - debian/changelog > debian/changelog.new
+          mv debian/changelog.new debian/changelog
+          # -d: rustc and cargo come from rustup here, not from dpkg.
+          dpkg-buildpackage -us -uc -b -d
+          mkdir -p out
+          cp ../nexo-client_*_${{ matrix.arch }}.deb out/
+          dpkg-deb --info out/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: out/*.deb
+          if-no-files-found: error
+
   publish:
-    needs: [version, build]
+    needs: [version, build, deb]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
