@@ -21,6 +21,10 @@ depends=(
 	'hicolor-icon-theme'
 	'gcc-libs'
 )
+# makepkg's default LTO turns ring's C sources into GCC LTO objects, which
+# rust-lld can't link ("undefined symbol: ring_core_..."). Rust packages on
+# Arch switch it off for that reason.
+options=('!lto')
 makedepends=('cargo' 'git')
 optdepends=(
 	'jdk-openjdk: required to actually launch Minecraft (Java 25+)'
@@ -64,6 +68,9 @@ check() {
 	export RUSTUP_TOOLCHAIN=stable
 	# Unit tests only; the `live_apis` contract tests are #[ignore]d because
 	# they need network access, which a clean build chroot does not have.
+	# The tests exercise the updater's own refusal rules, so they build it in:
+	# the packaged binary compiles it out, see build().
+	unset NEXO_SELF_UPDATE
 	cargo test --frozen --release
 }
 

@@ -24,6 +24,7 @@ pkgbase = nexo-client-git
 	optdepends = vulkan-intel: Vulkan driver for Intel GPUs
 	provides = nexo-client
 	conflicts = nexo-client
+	options = !lto
 	source = nexo-client-git::git+https://github.com/Lokifisch/nexo-client.git
 	sha256sums = SKIP
 
