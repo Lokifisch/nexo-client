@@ -8,7 +8,10 @@
 //! Mod's converted worlds) is [`list_view`].
 
 use crate::{App, Message, Screen, Status, empty_state, theme};
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use crate::lively::button;
+use crate::lively::scrollable;
+use crate::lively::Tint;
+use iced::widget::{Space, column, container, row, text};
 use iced::{Element, Fill, Task};
 use nexo_core::hosting::{Created, HostedServer, Players, Sample, ServerKind, ServerSpec, WorldSource};
 use nexo_core::modrinth::SearchHit;
@@ -1352,8 +1355,8 @@ pub fn list_view(app: &App) -> Element<'_, Message> {
         .on_press_maybe(app.core.is_some().then_some(Message::Navigate(Screen::NewServer)));
 
     let mut list = column![].spacing(12).width(Fill);
-    for server in &app.host.servers {
-        list = list.push(server_card(app, server));
+    for (index, server) in app.host.servers.iter().enumerate() {
+        list = list.push(super::arrive(app, index, server_card(app, server)));
     }
     if !app.paper_servers.is_empty() {
         list = list.push(Space::new().height(8)).push(
@@ -1365,8 +1368,8 @@ pub fn list_view(app: &App) -> Element<'_, Message> {
             ]
             .spacing(3),
         );
-        for server in &app.paper_servers {
-            list = list.push(crate::screens::paper_servers::card(app, server));
+        for (index, server) in app.paper_servers.iter().enumerate() {
+            list = list.push(super::arrive(app, index, crate::screens::paper_servers::card(app, server)));
         }
     }
 
@@ -1408,7 +1411,7 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
     let mut details = column![
         row![
             text(&server.name).size(17).font(theme::BOLD).color(theme::TEXT),
-            container(text(label).size(11)).padding([2, 8]).style(theme::pill(color)),
+            container(text(label).size(11)).padding([2, 8]).tinted(theme::pill(color)),
         ]
         .spacing(10)
         .align_y(iced::Center),
@@ -1434,7 +1437,7 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
                 .height(44)
                 .align_x(iced::Center)
                 .align_y(iced::Center)
-                .style(theme::initial_tile(phase == Phase::Online)),
+                .tinted(theme::initial_tile(phase == Phase::Online)),
             details,
             actions,
         ]

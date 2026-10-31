@@ -1,6 +1,8 @@
 use crate::theme;
 use crate::{App, Message};
-use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text, Space};
+use crate::lively::button;
+use crate::lively::scrollable;
+use iced::widget::{column, container, image, mouse_area, row, stack, text, Space};
 use iced::{Element, Fill};
 use nexo_core::SkinModel;
 
@@ -242,8 +244,8 @@ fn library_card(app: &App) -> Element<'_, Message> {
 
     let mut grid = column![].spacing(10);
     let mut current: Vec<Element<'_, Message>> = Vec::with_capacity(COLUMNS);
-    for tile in tiles {
-        current.push(tile);
+    for (index, tile) in tiles.into_iter().enumerate() {
+        current.push(super::arrive(app, index, tile));
         if current.len() == COLUMNS {
             grid = grid.push(row(std::mem::take(&mut current)).spacing(10));
         }
@@ -323,8 +325,8 @@ fn capes_card(app: &App) -> Element<'_, Message> {
 
     let mut grid = column![].spacing(10);
     let mut current: Vec<Element<'_, Message>> = Vec::with_capacity(COLUMNS);
-    for tile in tiles {
-        current.push(tile);
+    for (index, tile) in tiles.into_iter().enumerate() {
+        current.push(super::arrive(app, index, tile));
         if current.len() == COLUMNS {
             grid = grid.push(row(std::mem::take(&mut current)).spacing(10));
         }

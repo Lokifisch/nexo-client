@@ -1,8 +1,12 @@
 use crate::{pulse, theme};
 use crate::{App, Message};
-use iced::widget::{
-    button, column, container, image, pick_list, row, scrollable, text, text_input, toggler, Space,
-};
+use crate::lively::button;
+use crate::dropdown::dropdown;
+use crate::lively::scrollable;
+use crate::lively::text_input;
+use crate::lively::toggler;
+use crate::lively::Tint;
+use iced::widget::{column, container, image, row, text, Space};
 use iced::{Element, Fill, Font};
 use nexo_core::browse;
 use nexo_core::instance::InstalledMod;
@@ -65,7 +69,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .height(44)
         .center_x(44)
         .center_y(44)
-        .style(theme::initial_tile(true));
+        .tinted(theme::initial_tile(true));
 
     let heading = column![
         text(&instance.name).size(20).font(theme::BOLD).color(theme::TEXT),
@@ -124,7 +128,7 @@ fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             label = label.push(
                 container(text(count.to_string()).size(10))
                     .padding([1, 7])
-                    .style(theme::tab_badge(selected)),
+                    .tinted(theme::tab_badge(selected)),
             );
         }
 
@@ -202,7 +206,7 @@ fn launch_control<'a>(
 
     // Padded rather than fixed-width: "PREPARING…" must fit the same button,
     // and at this padding "PLAY" comes out at the mockup's 96px.
-    let play = button(text(label).size(12).font(theme::BOLD).center())
+    let play = button(crate::lively::changed(label, text(label).size(12).font(theme::BOLD).center()))
         .padding([11, 32])
         // The one place the full ramp is spent — see `theme::hero_button`.
         .style(theme::hero_button)
@@ -216,7 +220,7 @@ fn launch_control<'a>(
     if app.accounts.len() > 1 {
         let id = instance.id.clone();
         let names: Vec<String> = app.accounts.iter().map(|a| a.username.clone()).collect();
-        let picker = pick_list(names, chosen.map(|a| a.username.clone()), move |name| {
+        let picker = dropdown(names, chosen.map(|a| a.username.clone()), move |name: String| {
             let uuid = app
                 .accounts
                 .iter()
@@ -570,8 +574,8 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
                 .color(theme::MUTED),
         );
     } else {
-        for installed in matches {
-            body = body.push(
+        for (index, installed) in matches.into_iter().enumerate() {
+            body = body.push(super::arrive(app, index,
                 row![
                     icon_or_placeholder(app, &installed.project_id, 32.0),
                     column![
@@ -609,7 +613,7 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
                 ]
                 .spacing(12)
                 .align_y(iced::Center),
-            );
+            ));
         }
     }
 
@@ -654,8 +658,8 @@ fn browser<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                 .color(theme::MUTED),
         );
     } else {
-        for hit in &app.content_results {
-            results = results.push(result_row(app, instance, hit));
+        for (index, hit) in app.content_results.iter().enumerate() {
+            results = results.push(super::arrive(app, index, result_row(app, instance, hit)));
         }
     }
 
@@ -688,8 +692,9 @@ fn browser<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
 fn filter_panel<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     use nexo_core::content::ProjectKind;
 
-    let row_of = |item: iced::widget::Checkbox<'a, Message>| {
-        container(item.size(16).spacing(10).text_size(13).style(theme::check))
+    let row_of = |item: crate::lively::Check<'a, Message>| {
+        let item: Element<'a, Message> = item.size(16).spacing(10).text_size(13).style(theme::check).into();
+        container(item)
             .height(30)
             .align_y(iced::Center)
     };
@@ -703,7 +708,7 @@ fn filter_panel<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
     // checking one moves the check rather than adding to it.
     for kind in ProjectKind::ALL {
         list = list.push(row_of(
-            iced::widget::checkbox(app.content_kind == kind)
+            crate::lively::checkbox(app.content_kind == kind)
                 .label(kind.label())
                 .on_toggle(move |_| Message::ContentKindChanged(kind)),
         ));
@@ -714,13 +719,13 @@ fn filter_panel<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
     list = list.push(Space::new().height(8));
 
     list = list.push(row_of(
-        iced::widget::checkbox(true).label(format!("Minecraft {}", instance.game_version)),
+        crate::lively::checkbox(true).label(format!("Minecraft {}", instance.game_version)),
     ));
     // Mirrors `Message::SearchContent`, which only narrows mods by loader —
     // packs and shaders are loader-agnostic.
     if app.content_kind == ProjectKind::Mod && instance.loader.modrinth_facet().is_some() {
         list = list.push(row_of(
-            iced::widget::checkbox(true).label(instance.loader.to_string()),
+            crate::lively::checkbox(true).label(instance.loader.to_string()),
         ));
     }
 
@@ -776,12 +781,24 @@ fn result_row<'a>(
             .width(104)
             .padding([10, 0])
             .style(theme::ghost_button)
+    } else if let Some(place) = app
+        .install_queue
+        .iter()
+        .position(|q| q.instance == instance.id && q.project == hit.project_id)
+    {
+        let label = if place == 0 { "INSTALLING…" } else { "QUEUED" };
+        button(crate::lively::changed(label, text(label).size(11).font(theme::BOLD).center()))
+            .width(104)
+            .padding([10, 0])
+            .style(theme::ghost_button)
     } else {
+        // Stays clickable during other installs, so a list can be worked down
+        // as fast as it can be clicked.
         button(text("INSTALL").size(11).font(theme::BOLD).center())
             .width(104)
             .padding([10, 0])
             .style(theme::primary_button)
-            .on_press_maybe((!app.is_busy()).then(|| Message::InstallProject {
+            .on_press_maybe((!app.other_work()).then(|| Message::InstallProject {
                 instance: instance.id.clone(),
                 project: hit.project_id.clone(),
             }))
@@ -844,7 +861,7 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         );
     }
 
-    for entry in &app.files {
+    for (index, entry) in app.files.iter().enumerate() {
         let meta = row![
             text(if entry.is_dir {
                 String::new()
@@ -885,7 +902,7 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         // Directories navigate; files hand off to whatever the OS uses for
         // them. Both are the whole row, since a row-sized target is easier to
         // hit than a word.
-        list = list.push(
+        list = list.push(super::arrive(app, index,
             button(label)
                 .padding([7, 10])
                 .width(Fill)
@@ -895,7 +912,7 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                 } else {
                     Message::OpenPath(entry.path.clone())
                 }),
-        );
+        ));
     }
 
     column![
@@ -972,8 +989,8 @@ fn worlds_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
             "Worlds appear here once this instance has been played.",
         ));
     }
-    for world in &app.worlds {
-        list = list.push(world_row(app, instance, world));
+    for (index, world) in app.worlds.iter().enumerate() {
+        list = list.push(super::arrive(app, index, world_row(app, instance, world)));
     }
 
     // The form is open for a *new* server when it carries no index; an open
@@ -1008,7 +1025,7 @@ fn worlds_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
     ));
 
     if adding && let Some(form) = &app.server_form {
-        list = list.push(server_form(form, running));
+        list = list.push(crate::lively::appear(server_form(form, running)));
     }
 
     if app.servers.is_empty() && !adding {
@@ -1023,9 +1040,9 @@ fn worlds_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
         // the fields sit exactly where the values they replace were.
         match &app.server_form {
             Some(form) if form.editing == Some(server.index) => {
-                list = list.push(server_form(form, running))
+                list = list.push(crate::lively::appear(server_form(form, running)))
             }
-            _ => list = list.push(server_row(app, server)),
+            _ => list = list.push(super::arrive(app, server.index, server_row(app, server))),
         }
     }
 
@@ -1139,7 +1156,7 @@ fn server_row<'a>(app: &'a App, server: &'a browse::Server) -> Element<'a, Messa
     // The icon a server publishes is 64×64, so this is a downscale rather than
     // the blur an upscale would give.
     let icon: Element<'a, Message> = match app.server_icons.get(&server.address) {
-        Some(handle) => image(handle.clone()).width(48).height(48).into(),
+        Some(handle) => crate::lively::appear(image(handle.clone()).width(48).height(48)),
         None => container(Space::new().width(48).height(48))
             .style(theme::well)
             .into(),
@@ -1361,7 +1378,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         );
     }
 
-    for log in &app.logs {
+    for (index, log) in app.logs.iter().enumerate() {
         let selected = app.selected_log.as_deref() == Some(&log.name);
 
         let mut title = row![text(log.name.as_str()).size(12).color(if log.crash {
@@ -1383,7 +1400,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             }));
         }
 
-        list = list.push(
+        list = list.push(super::arrive(app, index,
             button(
                 column![
                     title,
@@ -1402,7 +1419,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             .width(Fill)
             .style(theme::row_button(selected))
             .on_press(Message::SelectLog(log.name.clone())),
-        );
+        ));
     }
 
     let selected = app
@@ -1538,10 +1555,7 @@ pub fn ago(when: u64) -> String {
 /// stops rows from reflowing as icons arrive one by one.
 fn icon_or_placeholder<'a>(app: &'a App, project: &str, size: f32) -> Element<'a, Message> {
     match app.icons.get(project) {
-        Some(handle) => image(handle.clone())
-            .width(size)
-            .height(size)
-            .into(),
+        Some(handle) => crate::lively::appear(image(handle.clone()).width(size).height(size)),
         None => Space::new().width(size).height(size).into(),
     }
 }
@@ -1551,11 +1565,7 @@ fn icon_or_placeholder<'a>(app: &'a App, project: &str, size: f32) -> Element<'a
 /// none), so a row is never a hole at its left edge.
 fn icon_or_initial<'a>(app: &'a App, project: &str, title: &str, size: f32) -> Element<'a, Message> {
     match app.icons.get(project) {
-        Some(handle) => image(handle.clone())
-            .width(size)
-            .height(size)
-            .border_radius(8.0)
-            .into(),
+        Some(handle) => crate::lively::appear(image(handle.clone()).width(size).height(size).border_radius(8.0)),
         None => container(
             text(title.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default())
                 .size(16)
@@ -1565,7 +1575,7 @@ fn icon_or_initial<'a>(app: &'a App, project: &str, title: &str, size: f32) -> E
         .height(size)
         .center_x(size)
         .center_y(size)
-        .style(theme::initial_tile(false))
+        .tinted(theme::initial_tile(false))
         .into(),
     }
 }
@@ -1646,7 +1656,7 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
     };
 
     let id = instance.id.clone();
-    let picker = pick_list(choices, Some(selected), move |choice| {
+    let picker = dropdown(choices, Some(selected), move |choice| {
         Message::SetInstanceJava {
             instance: id.clone(),
             path: match choice {
@@ -1774,14 +1784,14 @@ fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Elem
                     // danger card used to sit in. It belongs with the other
                     // whole-instance actions anyway — the tabs are all about
                     // what is *inside* the instance.
-                    button(
-                        text(if app.is_armed(&crate::Armed::Delete(instance.id.clone())) {
+                    button({
+                        let label = if app.is_armed(&crate::Armed::Delete(instance.id.clone())) {
                             "Click again to delete"
                         } else {
                             "Delete"
-                        })
-                        .size(13),
-                    )
+                        };
+                        crate::lively::changed(label, text(label).size(13))
+                    })
                         .padding([7, 13])
                         .style(theme::danger_button)
                         // Deleting the folder out from under a running game

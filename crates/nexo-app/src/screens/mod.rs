@@ -11,7 +11,8 @@ pub mod skins;
 
 use crate::theme;
 use crate::{App, Message, Screen, Status};
-use iced::widget::{mouse_area, stack, Space, button, column, container, image, row, svg, text, tooltip};
+use crate::lively::button;
+use iced::widget::{mouse_area, stack, Space, column, container, image, row, svg, text, tooltip};
 use iced::{Element, Fill};
 use std::sync::LazyLock;
 
@@ -43,14 +44,22 @@ static PLAY: LazyLock<svg::Handle> = LazyLock::new(|| {
 });
 
 /// A rail entry's hover label, to the right of it.
-fn labelled<'a>(content: impl Into<Element<'a, Message>>, label: String) -> Element<'a, Message> {
+fn labelled<'a>(content: impl Into<Element<'a, Message>>, label: String, shown: f32) -> Element<'a, Message> {
     tooltip(
         content,
-        container(text(label).size(13)).padding([5, 9]).style(theme::tooltip),
+        container(text(label).size(13)).padding([5, 9]).style(theme::tooltip_at(shown)),
         tooltip::Position::Right,
     )
-    .gap(8)
+    // Slides out from the rail as it fades in.
+    .gap(2.0 + 6.0 * shown)
     .into()
+}
+
+/// The `index`th item of a list, arriving a little after the one above it
+/// whenever the page comes in.
+pub fn arrive<'a>(app: &App, index: usize, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let page = app.motion.get(crate::motion_keys::PAGE, 1.0);
+    reveal(content, crate::motion::Motion::stagger(page, index), 8.0)
 }
 
 /// Where a section's highlight sits on the rail. Follows the column in
@@ -127,6 +136,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
             .on_enter(Message::Hover(key, true))
             .on_exit(Message::Hover(key, false)),
             label.to_string(),
+            hover,
         )
     };
 
@@ -202,6 +212,7 @@ fn quick_play(app: &App) -> Element<'_, Message> {
         .on_enter(Message::Hover(key, true))
         .on_exit(Message::Hover(key, false)),
         label,
+        app.motion.get(key, 0.0),
     )
 }
 
@@ -335,14 +346,17 @@ fn account_button(app: &App) -> Element<'_, Message> {
 pub fn status_bar(status: &Status) -> Element<'_, Message> {
     match status {
         Status::Idle => Space::new().height(0).into(),
-        Status::Busy(label) => container(text(label).size(14))
-            .padding([8, 14])
-            .width(Fill)
-            .style(theme::banner(false))
-            .into(),
+        Status::Busy(label) => container(
+            // By stage, not by count: "412 of 3000" changes too fast to fade.
+            column![crate::lively::changed(label.replace(|c: char| c.is_ascii_digit(), ""), text(label).size(14)), crate::lively::working(2.0, theme::ACCENT)].spacing(8),
+        )
+        .padding([8, 14])
+        .width(Fill)
+        .style(theme::banner(false))
+        .into(),
         Status::Error(message) | Status::Notice(message) => container(
             row![
-                text(message).size(14).width(Fill),
+                crate::lively::changed(message, text(message).size(14).width(Fill)),
                 button(text("Dismiss").size(13))
                     .padding([4, 8])
                     .style(theme::ghost_button)

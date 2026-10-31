@@ -1,6 +1,11 @@
 use crate::theme;
 use crate::{empty_state, App, Message};
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
+use crate::lively::button;
+use crate::dropdown::dropdown;
+use crate::lively::scrollable;
+use crate::lively::text_input;
+use crate::lively::Tint;
+use iced::widget::{column, container, row, text};
 use iced::{Element, Fill};
 use nexo_core::{nexo_mod, Instance};
 
@@ -40,7 +45,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .size(13)
             .style(theme::input)
             .width(300),
-        button(text(if app.creating { "CANCEL" } else { "+ NEW INSTANCE" }).size(12).font(theme::BOLD))
+        button(crate::lively::changed(app.creating, text(if app.creating { "CANCEL" } else { "+ NEW INSTANCE" }).size(12).font(theme::BOLD)))
             .padding([11, 16])
             .style(theme::lit_button)
             .on_press(Message::ToggleCreateForm),
@@ -52,7 +57,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Always open with nothing to list: the form is then the only way
     // forward, and hiding it behind a button would leave an empty screen.
     if app.creating || app.instances.is_empty() {
-        page = page.push(create_form(app));
+        page = page.push(crate::lively::appear(create_form(app)));
     }
     page.push(list).into()
 }
@@ -69,7 +74,7 @@ fn create_form(app: &App) -> Element<'_, Message> {
         .style(theme::input)
         .width(Fill);
 
-    let version = pick_list(
+    let version = dropdown(
         app.game_versions.as_slice(),
         Some(&app.new_version),
         Message::NewVersionChanged,
@@ -133,9 +138,9 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
 
     let mut title = row![
         text(&instance.name).size(17).font(theme::BOLD).color(theme::TEXT),
-        container(text(tag).size(10).font(theme::BOLD))
+        container(crate::lively::changed(tag, text(tag).size(10).font(theme::BOLD)))
             .padding([3, 7])
-            .style(theme::tag(lit)),
+            .tinted(theme::tag(lit)),
     ]
     .spacing(10)
     .align_y(iced::Center);
@@ -143,7 +148,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         title = title.push(
             container(text("NEXO UPDATE").size(10).font(theme::BOLD))
                 .padding([3, 7])
-                .style(theme::tag(true)),
+                .tinted(theme::tag(true)),
         );
     }
 
@@ -210,7 +215,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .height(52)
         .center_x(52)
         .center_y(52)
-        .style(theme::initial_tile(running));
+        .tinted(theme::initial_tile(running));
 
     container(row![tile, details, stats, action].spacing(16).align_y(iced::Center))
         .padding([0, 16])

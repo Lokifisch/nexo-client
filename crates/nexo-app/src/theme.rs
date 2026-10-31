@@ -203,6 +203,10 @@ pub fn nexo() -> Theme {
     )
 }
 
+/// The launcher's one theme, for widgets working out their next look outside
+/// `draw`, the one place iced hands them a theme.
+pub static CURRENT: std::sync::LazyLock<Theme> = std::sync::LazyLock::new(nexo);
+
 /// The accent ([`ACCENT`]), read out of the theme each style is handed.
 fn accent(theme: &Theme) -> Color {
     theme.palette().primary
@@ -666,6 +670,19 @@ pub fn tooltip(_theme: &Theme) -> container::Style {
             color: CONTROL,
         },
         ..Default::default()
+    }
+}
+
+/// The same, at `amount` of its full strength, for fading it in.
+pub fn tooltip_at(amount: f32) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let full = tooltip(theme);
+        container::Style {
+            background: Some(Background::Color(alpha(RAISED, amount))),
+            text_color: Some(alpha(TEXT, amount)),
+            border: Border { color: alpha(CONTROL, amount), ..full.border },
+            ..full
+        }
     }
 }
 

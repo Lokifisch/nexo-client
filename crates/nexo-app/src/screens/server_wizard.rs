@@ -4,10 +4,13 @@
 
 use super::hosting::{self, DIFFICULTIES, Essential, GAME_MODES, Msg, Phase, Probe, Setup, Step, WORLD_TYPES, Wizard};
 use crate::{App, Message, theme};
-use iced::widget::{
-    Space, button, checkbox, column, container, image, pick_list, row, scrollable, slider, stack, text, text_input,
-    toggler,
-};
+use crate::lively::button;
+use crate::lively::checkbox;
+use crate::dropdown::dropdown;
+use crate::lively::text_input;
+use crate::lively::toggler;
+use crate::lively::Tint;
+use iced::widget::{Space, column, container, image, row, scrollable, slider, stack, text};
 use iced::{Color, Element, Fill, Font, Length};
 use nexo_core::hosting::ServerKind;
 
@@ -54,7 +57,7 @@ fn wizard_view<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
                 .height(64)
                 .width(Fill),
             rule(),
-            scrollable(container(body).padding([22, 32]).width(Fill)).height(Fill),
+            crate::lively::scrollable(container(body).padding([22, 32]).width(Fill)).height(Fill),
             rule(),
             container(row![back, Space::new().width(Fill), next].align_y(iced::Center)).padding([14, 24]),
         ]
@@ -91,11 +94,11 @@ fn stepper(w: &Wizard, roomy: bool) -> Element<'_, Message> {
             .height(28)
             .align_x(iced::Center)
             .align_y(iced::Center)
-            .style(theme::step_dot(current, done));
-        let label = text(step.label())
-            .size(14)
-            .font(if current { theme::BOLD } else { Font::DEFAULT })
-            .color(if current { theme::TEXT } else { theme::MUTED });
+            .tinted(theme::step_dot(current, done));
+        let label = crate::lively::tinted_text(
+            text(step.label()).size(14).font(if current { theme::BOLD } else { Font::DEFAULT }),
+            if current { theme::TEXT } else { theme::MUTED },
+        );
         let content = if roomy || current { row![dot, label] } else { row![dot] };
         steps = steps.push(
             button(content.spacing(9).align_y(iced::Center))
@@ -141,7 +144,7 @@ fn type_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
         cards,
         column![
             field_label("Minecraft version"),
-            pick_list(app.game_versions.as_slice(), Some(&w.version), |v| host(Msg::Version(v)))
+            dropdown(app.game_versions.as_slice(), Some(&w.version), |v| host(Msg::Version(v)))
                 .padding(10)
                 .width(Fill),
         ]
@@ -266,7 +269,7 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     } else if w.results.is_empty() {
         note("Nothing found for that search.")
     } else {
-        let cards: Vec<Element<'_, Message>> = w.results.iter().map(|hit| hit_card(app, w, hit)).collect();
+        let cards: Vec<Element<'_, Message>> = w.results.iter().enumerate().map(|(index, hit)| super::arrive(app, index, hit_card(app, w, hit))).collect();
         let mut grid = column![].spacing(12);
         let mut cards = cards.into_iter();
         while let Some(left) = cards.next() {
@@ -281,7 +284,11 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
         essentials_section(app, w),
         text(format!("More {noun}")).size(16).font(theme::BOLD).color(theme::TEXT),
         column![search, filters].spacing(6),
-        scrollable(picked).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(3).scroller_width(3))),
+        crate::lively::eased_scrollbar(
+            scrollable(picked).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(3).scroller_width(3))),
+            scrollable::default,
+            true,
+        ),
     ]
     .spacing(16);
     if w.kind == ServerKind::Fabric {
@@ -293,7 +300,7 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
 /// The curated list: checkable cards, each saying which build it will get.
 fn essentials_section<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let cards: Vec<Element<'_, Message>> =
-        hosting::essentials(w.kind).iter().map(|e| essential_card(app, w, e)).collect();
+        hosting::essentials(w.kind).iter().enumerate().map(|(index, e)| super::arrive(app, index, essential_card(app, w, e))).collect();
     let mut grid = column![].spacing(10);
     let mut cards = cards.into_iter();
     while let Some(left) = cards.next() {
@@ -332,7 +339,7 @@ fn essential_card<'a>(app: &'a App, w: &'a Wizard, e: &'a Essential) -> Element<
         Probe::Failed => ("Couldn't reach Modrinth — checked again when you come back".to_string(), theme::AMBER, true),
     };
     let icon: Element<'_, Message> = match app.icons.get(e.slug) {
-        Some(handle) => image(handle.clone()).width(36).height(36).into(),
+        Some(handle) => crate::lively::appear(image(handle.clone()).width(36).height(36)),
         None => container(Space::new()).width(36).height(36).style(theme::fill(theme::CONTROL)).into(),
     };
     let check = container(text(if chosen { "✓" } else { "" }).size(13).color(theme::INK))
@@ -340,7 +347,7 @@ fn essential_card<'a>(app: &'a App, w: &'a Wizard, e: &'a Essential) -> Element<
         .height(20)
         .align_x(iced::Center)
         .align_y(iced::Center)
-        .style(theme::fill(if chosen { theme::MINT } else { theme::CONTROL }));
+        .tinted(theme::fill(if chosen { theme::MINT } else { theme::CONTROL }));
 
     button(
         row![
@@ -348,7 +355,7 @@ fn essential_card<'a>(app: &'a App, w: &'a Wizard, e: &'a Essential) -> Element<
             column![
                 row![
                     text(e.name).size(14).font(theme::BOLD).color(theme::TEXT),
-                    container(text(e.tag).size(10)).padding([1, 7]).style(theme::pill(theme::ACCENT)),
+                    container(text(e.tag).size(10)).padding([1, 7]).tinted(theme::pill(theme::ACCENT)),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -372,7 +379,7 @@ fn essential_card<'a>(app: &'a App, w: &'a Wizard, e: &'a Essential) -> Element<
 fn hit_card<'a>(app: &'a App, w: &'a Wizard, hit: &'a nexo_core::modrinth::SearchHit) -> Element<'a, Message> {
     let picked = w.picked.iter().any(|(id, _)| *id == hit.project_id);
     let icon: Element<'_, Message> = match app.icons.get(&hit.project_id) {
-        Some(handle) => image(handle.clone()).width(48).height(48).into(),
+        Some(handle) => crate::lively::appear(image(handle.clone()).width(48).height(48)),
         None => container(Space::new()).width(48).height(48).style(theme::fill(theme::CONTROL)).into(),
     };
     let toggle = button(text(if picked { "Added ✓" } else { "Add" }).size(13))
@@ -441,7 +448,7 @@ fn world_step(w: &Wizard) -> Element<'_, Message> {
         } else {
             column![
                 field_label("World to copy in"),
-                pick_list(w.worlds.as_slice(), w.import_world.as_ref(), |c| host(Msg::ImportWorld(c)))
+                dropdown(w.worlds.as_slice(), w.import_world.as_ref(), |c| host(Msg::ImportWorld(c)))
                     .padding(10)
                     .width(Fill),
                 text("It's copied — the original save stays exactly as it is. Game mode and difficulty come from the world.")
@@ -461,19 +468,19 @@ fn world_step(w: &Wizard) -> Element<'_, Message> {
             row![
                 column![
                     field_label("World type"),
-                    pick_list(&WORLD_TYPES[..], Some(w.world_type), |t| host(Msg::WorldType(t))).padding(10).width(Fill)
+                    dropdown(&WORLD_TYPES[..], Some(w.world_type), |t| host(Msg::WorldType(t))).padding(10).width(Fill)
                 ]
                 .spacing(8)
                 .width(Fill),
                 column![
                     field_label("Game mode"),
-                    pick_list(&GAME_MODES[..], Some(w.game_mode), |m| host(Msg::GameMode(m))).padding(10).width(Fill)
+                    dropdown(&GAME_MODES[..], Some(w.game_mode), |m| host(Msg::GameMode(m))).padding(10).width(Fill)
                 ]
                 .spacing(8)
                 .width(Fill),
                 column![
                     field_label("Difficulty"),
-                    pick_list(&DIFFICULTIES[..], Some(w.difficulty), |d| host(Msg::Difficulty(d))).padding(10).width(Fill)
+                    dropdown(&DIFFICULTIES[..], Some(w.difficulty), |d| host(Msg::Difficulty(d))).padding(10).width(Fill)
                 ]
                 .spacing(8)
                 .width(Fill),
@@ -576,7 +583,7 @@ pub fn ram_picker<'a>(
 
     let picker = stack![
         container(track).height(20).align_y(iced::Center).padding([0, 8]),
-        slider(MIN..=max, value, on_change).step(256u32).height(20).style(theme::bare_slider),
+        crate::lively::slider(slider(MIN..=max, value, on_change).step(256u32).height(20), theme::bare_slider),
     ];
 
     let available = if total > 0 { format!("This PC has {} MB", total) } else { String::new() };
@@ -612,7 +619,7 @@ pub fn ram_picker<'a>(
         )
         .padding([10, 14])
         .width(Fill)
-        .style(theme::callout(match (good, value > danger) {
+        .tinted(theme::callout(match (good, value > danger) {
             (true, _) => theme::MINT,
             (false, false) => theme::AMBER,
             (false, true) => theme::DANGER,
@@ -755,23 +762,23 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
     let mut col = column![text("Setting up your server").size(20).font(theme::BOLD).color(theme::TEXT), list].spacing(16);
 
     if let Some(err) = &setup.error {
-        col = col.push(container(text(err.as_str()).size(13)).padding([10, 14]).width(Fill).style(theme::banner(true)));
+        col = col.push(crate::lively::appear(container(text(err.as_str()).size(13)).padding([10, 14]).width(Fill).style(theme::banner(true))));
     }
     if let Some(err) = tunnel_error {
-        col = col.push(
+        col = col.push(crate::lively::appear(
             container(text(format!("The public address didn't open: {err}. The server still runs on this PC; retry from its dashboard.")).size(13))
                 .padding([10, 14])
                 .width(Fill)
                 .style(theme::banner(true)),
-        );
+        ));
     }
     if !setup.warnings.is_empty() {
-        col = col.push(
+        col = col.push(crate::lively::appear(
             container(text(format!("Some add-ons weren't installed:\n{}", setup.warnings.join("\n"))).size(12))
                 .padding([10, 14])
                 .width(Fill)
                 .style(theme::banner(true)),
-        );
+        ));
     }
 
     if finished && let Some(server) = id.and_then(|id| app.host.server(id)) {
@@ -809,7 +816,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
                 .unwrap_or_else(|| "Waiting for the server's first output…".into());
             col = col.push(
                 container(
-                    scrollable(container(text(tail).size(11).font(Font::MONOSPACE).color(theme::TEXT)).padding(12))
+                    crate::lively::scrollable(container(text(tail).size(11).font(Font::MONOSPACE).color(theme::TEXT)).padding(12))
                         .anchor_bottom()
                         .height(260)
                         .width(Fill),
@@ -846,7 +853,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
     };
     col = col.push(container(actions).width(Fill).align_x(iced::Center));
 
-    container(scrollable(container(col).padding(28)))
+    container(crate::lively::scrollable(container(col).padding(28)))
         .max_width(860)
         .style(theme::card)
         .into()
@@ -854,7 +861,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
 
 pub fn address_row(label: &str, address: String) -> Element<'static, Message> {
     row![
-        container(text(label.to_string()).size(11)).padding([3, 10]).style(theme::pill(theme::ACCENT)),
+        container(text(label.to_string()).size(11)).padding([3, 10]).tinted(theme::pill(theme::ACCENT)),
         container(text(address.clone()).size(14).font(Font::MONOSPACE).color(theme::TEXT))
             .padding([9, 12])
             .width(Fill)

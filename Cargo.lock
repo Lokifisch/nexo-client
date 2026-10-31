@@ -2913,7 +2913,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nexo-app"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytemuck",
  "futures",
@@ -2931,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "nexo-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "directories",

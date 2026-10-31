@@ -1,6 +1,8 @@
 use crate::theme;
 use crate::{empty_state, App, Message};
-use iced::widget::{button, column, container, image, row, scrollable, text, Space};
+use crate::lively::button;
+use crate::lively::scrollable;
+use iced::widget::{column, container, image, row, text, Space};
 use iced::{Element, Fill};
 use nexo_core::Account;
 
@@ -25,7 +27,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         )
     } else {
         scrollable(
-            column(app.accounts.iter().map(|account| card(app, account)))
+            column(app.accounts.iter().enumerate().map(|(index, account)| super::arrive(app, index, card(app, account))))
                 .spacing(12)
                 .width(Fill),
         )

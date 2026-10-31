@@ -8,6 +8,8 @@
 //! pure state transition, which is what keeps the window responsive while a
 //! ~1,000-file install runs underneath it.
 
+mod dropdown;
+mod lively;
 mod motion;
 mod pulse;
 mod screens;
@@ -106,6 +108,14 @@ type ShownPage = (
 );
 
 /// The transitions that aren't per-control.
+/// A Modrinth project waiting to go into an instance.
+#[derive(Debug, Clone)]
+pub struct QueuedInstall {
+    pub instance: String,
+    pub project: String,
+    pub kind: ProjectKind,
+}
+
 pub mod motion_keys {
     use crate::motion::Key;
     pub const PAGE: Key = ("page", "");
@@ -198,6 +208,10 @@ pub struct App {
     /// The one-way action whose button has been clicked once, waiting for
     /// the confirming second click. See [`Armed`].
     armed: Option<Armed>,
+    /// Installs waiting their turn, the front one running. One at a time, since
+    /// each reads the instance, adds to it and saves it. Not a `Status::Busy`:
+    /// a banner would push the list down under the cursor mid bulk-install.
+    pub install_queue: std::collections::VecDeque<QueuedInstall>,
     /// Bumped on every arm, so a timeout only disarms the arm that started
     /// it and not a later one.
     armed_generation: u64,
@@ -557,6 +571,7 @@ pub enum Message {
         instance: String,
         project: String,
     },
+    InstallDone(Result<(), String>),
     AddFromFile(String),
     RemoveContent {
         instance: String,
@@ -641,6 +656,7 @@ impl App {
             active_account: None,
             game_versions: vec![DEFAULT_GAME_VERSION.to_string()],
             armed: None,
+            install_queue: Default::default(),
             armed_generation: 0,
             status: Status::Busy("Starting up".into()),
             new_name: String::new(),
@@ -1966,30 +1982,27 @@ impl App {
             }
 
             Message::InstallProject { instance, project } => {
-                let Some(core) = self.core.clone() else {
+                if self.core.is_none() || self.install_queue.iter().any(|q| q.instance == instance && q.project == project) {
                     return Task::none();
-                };
-                let kind = self.content_kind;
-                self.status = Status::Busy("Installing".into());
+                }
+                self.install_queue.push_back(QueuedInstall { instance, project, kind: self.content_kind });
+                // Otherwise the one running starts this when it finishes.
+                if self.install_queue.len() == 1 { self.next_install() } else { Task::none() }
+            }
 
-                Task::perform(
-                    async move {
-                        let mut target = core
-                            .instances
-                            .get(&instance)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        core.content
-                            .install_modrinth(&mut target, &project, kind)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        core.instances
-                            .save(&target)
-                            .await
-                            .map_err(|e| e.to_string())
-                    },
-                    Message::NexoModDone,
-                )
+            Message::InstallDone(result) => {
+                self.install_queue.pop_front();
+                // The rest of the queue still goes: one mod without a build for
+                // this version shouldn't cancel the others.
+                if let Err(err) = result {
+                    self.status = Status::Error(err);
+                }
+                let mut tasks = vec![self.next_install()];
+                tasks.extend(self.core.clone().map(reload));
+                if self.install_queue.is_empty() && let Screen::Instance(id) = self.screen.clone() {
+                    tasks.push(Task::done(Message::LoadJarIcons(id)));
+                }
+                Task::batch(tasks)
             }
 
             Message::AddFromFile(instance) => {
@@ -2873,17 +2886,22 @@ impl App {
         let page = self.motion.get(motion_keys::PAGE, 1.0);
         let content = iced::widget::column![
             screens::top_bar(self),
-            // Not while idle: the bar is empty then, and a column skips empties only if
-            // they are truly zero-sized, which a reveal around one is not.
+            // In a column of its own, always there. A column drops zero-sized children
+            // entirely, so an empty bar here would move the page one place along
+            // whenever a banner came up, and iced would rebuild it as a new widget:
+            // every list on the page lost its scroll position.
             if matches!(self.status, Status::Idle) {
-                screens::status_bar(&self.status)
+                iced::widget::column![iced::widget::Space::new().height(16)]
             } else {
-                screens::reveal(screens::status_bar(&self.status), self.motion.get(motion_keys::STATUS, 1.0), 0.0)
+                iced::widget::column![
+                    iced::widget::Space::new().height(16),
+                    screens::reveal(screens::status_bar(&self.status), self.motion.get(motion_keys::STATUS, 1.0), 0.0),
+                    iced::widget::Space::new().height(16),
+                ]
             },
             // The page finishes before the list stagger that shares its clock.
             screens::reveal(body, if self.page_within { 1.0 } else { (page * 1.6).min(1.0) }, self.page_rise),
         ]
-        .spacing(16)
         .padding(24)
         .width(Fill)
         .height(Fill);
@@ -2972,7 +2990,31 @@ impl App {
     }
 
     fn is_busy(&self) -> bool {
+        self.other_work() || !self.install_queue.is_empty()
+    }
+
+    /// Busy with something an install has to wait out. Installs themselves
+    /// don't count: the next one can always join the queue.
+    fn other_work(&self) -> bool {
         matches!(self.status, Status::Busy(_))
+    }
+
+    /// Starts whatever is at the front of the install queue.
+    fn next_install(&mut self) -> Task<Message> {
+        let Some(QueuedInstall { instance, project, kind }) = self.install_queue.front().cloned() else {
+            return Task::none();
+        };
+        let Some(core) = self.core.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                let mut target = core.instances.get(&instance).await.map_err(|e| e.to_string())?;
+                core.content.install_modrinth(&mut target, &project, kind).await.map_err(|e| e.to_string())?;
+                core.instances.save(&target).await.map_err(|e| e.to_string())
+            },
+            Message::InstallDone,
+        )
     }
 
     /// The instance the details screen is showing, if that is where we are.
@@ -3435,6 +3477,71 @@ mod motion_frames {
         snapshot.matches_image(dir().join(format!("{name}.png"))).unwrap();
     }
 
+    /// Frames of the dropdown opening and a button lighting up, on a real clock.
+    #[test]
+    #[ignore = "writes images; run by hand"]
+    fn widget_frames() {
+        use iced::{Event, Point, mouse};
+        use iced_test::simulator;
+        let versions: Vec<String> = (0..40).map(|i| format!("1.{}.{}", 21 - i / 8, i % 8)).collect();
+        let chosen = versions[6].clone();
+        let bar = iced::widget::column![
+            iced::widget::row![
+                crate::dropdown::dropdown(versions.as_slice(), Some(&chosen), |_: String| Message::DismissStatus).width(220),
+                crate::lively::button(iced::widget::text("Ghost")).padding([8, 14]).style(theme::ghost_button).on_press(Message::DismissStatus),
+                crate::lively::button(iced::widget::text("PLAY")).padding([8, 24]).style(theme::hero_button).on_press(Message::DismissStatus),
+                crate::lively::toggler(true).on_toggle(|_| Message::DismissStatus),
+                crate::lively::toggler(false).on_toggle(|_| Message::DismissStatus),
+            ]
+            .spacing(14)
+            .align_y(iced::Center),
+            iced::widget::Space::new().height(iced::Fill),
+            crate::dropdown::dropdown(&["Survival", "Creative", "Adventure"][..], Some("Creative"), |_: &str| Message::DismissStatus).width(220),
+        ]
+        .padding(16)
+        .height(iced::Fill);
+        let element: Element<'_, Message> = iced::widget::container(bar).width(iced::Fill).height(iced::Fill).style(theme::panel).into();
+        let mut ui = Simulator::with_size(iced::Settings::default(), iced::Size::new(620.0, 420.0), element);
+        let shot = |ui: &mut Simulator<'_, Message>, name: &str| {
+            ui.snapshot(&theme::nexo()).unwrap().matches_image(dir().join(format!("{name}.png"))).unwrap();
+        };
+        shot(&mut ui, "w00-closed");
+        ui.point_at(Point::new(60.0, 30.0));
+        ui.simulate(simulator::click());
+        for i in 1..=4 {
+            std::thread::sleep(Duration::from_millis(35));
+            shot(&mut ui, &format!("w0{i}-opening"));
+        }
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(35));
+            let _ = ui.snapshot(&theme::nexo());
+        }
+        shot(&mut ui, "w05-open");
+        // The highlight travels to the row under the cursor.
+        ui.point_at(Point::new(90.0, 150.0));
+        ui.simulate([Event::Mouse(mouse::Event::CursorMoved { position: Point::new(90.0, 150.0) })]);
+        let _ = ui.snapshot(&theme::nexo());
+        std::thread::sleep(Duration::from_millis(40));
+        shot(&mut ui, "w06-gliding");
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(35));
+            let _ = ui.snapshot(&theme::nexo());
+        }
+        shot(&mut ui, "w07-hovered");
+        // The bottom one closes the first and opens upward.
+        ui.point_at(Point::new(60.0, 390.0));
+        ui.simulate(simulator::click());
+        let _ = ui.snapshot(&theme::nexo());
+        std::thread::sleep(Duration::from_millis(40));
+        shot(&mut ui, "w08-swap");
+        ui.simulate(simulator::click());
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(35));
+            let _ = ui.snapshot(&theme::nexo());
+        }
+        shot(&mut ui, "w09-up");
+    }
+
     #[test]
     #[ignore = "writes images; run by hand"]
     fn page_transition() {
@@ -3482,6 +3589,45 @@ mod motion_frames {
         play(&mut app, "list", Message::Navigate(Screen::Instances));
         play(&mut app, "open", Message::Navigate(Screen::Instance("i0".to_string())));
         play(&mut app, "tab", Message::SelectTab(screens::instance::Tab::Logs));
+    }
+
+    /// A scrollable's position lives in its widget state, so if the state at
+    /// that spot survives, the list stays where it was scrolled to.
+    #[test]
+    fn installing_keeps_the_mod_list_where_it_was_scrolled() {
+        use iced::advanced::widget::Tree;
+        let (mut app, _boot) = App::boot();
+        app.instances = (0..2).map(instance).collect();
+        let _ = app.update(Message::Navigate(Screen::Instance("i0".to_string())));
+        let _ = app.update(Message::SelectTab(screens::instance::Tab::Content));
+        app.browsing = true;
+        app.status = Status::Idle;
+        let tree_of = |app: &App| Tree::new(&app.view());
+        let mut tree = tree_of(&app);
+        let list = crate::lively::scroll_states(&tree);
+        assert_eq!(list.len(), 1, "the browser has one list");
+
+        let project = |p: &str| Message::InstallProject { instance: "i0".to_string(), project: p.to_string() };
+        for p in ["a", "b"] {
+            app.install_queue.push_back(QueuedInstall { instance: "i0".to_string(), project: p.to_string(), kind: ProjectKind::Mod });
+        }
+        let _ = app.update(project("a"));
+        assert_eq!(app.install_queue.len(), 2, "a second click on a queued mod adds nothing");
+        assert!(matches!(app.status, Status::Idle), "no banner to push the list down");
+        tree.diff(&app.view());
+        assert_eq!(crate::lively::scroll_states(&tree), list);
+
+        // One fails: the banner comes up, the list and the queue both carry on.
+        let _ = app.update(Message::InstallDone(Err("no build".to_string())));
+        assert_eq!(app.install_queue.len(), 1);
+        tree.diff(&app.view());
+        assert_eq!(crate::lively::scroll_states(&tree), list);
+
+        let _ = app.update(Message::DismissStatus);
+        let _ = app.update(Message::InstallDone(Ok(())));
+        assert!(app.install_queue.is_empty());
+        tree.diff(&app.view());
+        assert_eq!(crate::lively::scroll_states(&tree), list);
     }
 
     #[test]

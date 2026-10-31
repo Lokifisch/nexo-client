@@ -14,7 +14,8 @@
 
 use crate::theme;
 use crate::{App, Message};
-use iced::widget::{button, column, container, row, text};
+use crate::lively::button;
+use iced::widget::{column, container, row, text};
 use iced::{Element, Fill};
 use nexo_core::paper_server::{status, PaperServer};
 

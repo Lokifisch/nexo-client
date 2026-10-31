@@ -7,7 +7,10 @@
 
 use crate::theme;
 use crate::{App, Message};
-use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
+use crate::lively::button;
+use crate::lively::scrollable;
+use crate::lively::text_input;
+use iced::widget::{Space, column, container, row, text};
 use iced::{Element, Fill, Font};
 use nexo_core::paper_server::PaperServer;
 

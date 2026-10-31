@@ -7,7 +7,13 @@ use super::server_wizard::{address_row, ram_picker};
 use crate::{App, Message, theme};
 use iced::mouse;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::widget::{Space, button, column, container, pick_list, row, scrollable, text, text_input, toggler};
+use crate::lively::button;
+use crate::dropdown::dropdown;
+use crate::lively::scrollable;
+use crate::lively::text_input;
+use crate::lively::toggler;
+use crate::lively::Tint;
+use iced::widget::{Space, column, container, row, text};
 use iced::{Color, Element, Fill, Font, Point, Rectangle, Renderer, Theme};
 use nexo_core::hosting::{HostedServer, Sample};
 use std::time::Instant;
@@ -87,9 +93,9 @@ fn header<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     let address = app.host.address(server);
     let public = app.host.live.get(&server.id).is_some_and(|l| l.domain.is_some());
     let chip = row![
-        container(text(if public { "Public" } else { "This PC" }).size(11))
+        container(crate::lively::changed(public, text(if public { "Public" } else { "This PC" }).size(11)))
             .padding([2, 8])
-            .style(theme::pill(if public { theme::MINT } else { theme::MUTED })),
+            .tinted(theme::pill(if public { theme::MINT } else { theme::MUTED })),
         text(address.clone()).size(13).font(Font::MONOSPACE).color(theme::TEXT),
         button(text("Copy").size(12)).padding([4, 10]).style(theme::ghost_button).on_press(host(Msg::Copy(address))),
     ]
@@ -107,11 +113,11 @@ fn header<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
                 .height(48)
                 .align_x(iced::Center)
                 .align_y(iced::Center)
-                .style(theme::initial_tile(phase == Phase::Online)),
+                .tinted(theme::initial_tile(phase == Phase::Online)),
             column![
                 row![
                     text(&server.name).size(22).font(theme::BOLD).color(theme::TEXT),
-                    container(text(label).size(11)).padding([2, 9]).style(theme::pill(color)),
+                    container(crate::lively::changed(label, text(label).size(11))).padding([2, 9]).tinted(theme::pill(color)),
                 ]
                 .spacing(10)
                 .align_y(iced::Center),
@@ -170,7 +176,7 @@ fn side_panel<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message
 
     if let Some(live) = app.host.live.get(&server.id) {
         if let Some(err) = &live.error {
-            col = col.push(container(text(err.as_str()).size(12)).padding(10).width(Fill).style(theme::banner(true)));
+            col = col.push(crate::lively::appear(container(text(err.as_str()).size(12)).padding(10).width(Fill).style(theme::banner(true))));
         }
         if let Some(err) = &live.tunnel_error {
             col = col.push(
@@ -258,6 +264,7 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
     } else {
         iced::widget::Canvas::new(Graph {
             samples,
+            newest: live.and_then(|l| l.samples.back().map(|(t, _)| *t)),
             range: app.host.range.secs(),
             range_label: app.host.range.label(),
             memory_mb: server.memory_mb,
@@ -295,13 +302,9 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
 
 fn tile<'a>(label: &'a str, value: String, share: f32, color: Color) -> Element<'a, Message> {
     let share = share.clamp(0.0, 1.0);
-    let filled = (share * 1000.0) as u16;
-    let bar = row![
-        container(Space::new()).width(iced::Length::FillPortion(filled.max(1))).height(4).style(theme::fill(color)),
-        container(Space::new()).width(iced::Length::FillPortion((1000 - filled).max(1))).height(4).style(theme::fill(theme::CONTROL)),
-    ];
+    let bar = crate::lively::meter(share, 4.0, color, theme::CONTROL);
     container(
-        column![text(label).size(13).color(theme::MUTED), text(value).size(26).font(theme::BOLD).color(theme::TEXT), bar].spacing(8),
+        column![text(label).size(13).color(theme::MUTED), crate::lively::ticking(value.clone(), text(value).size(26).font(theme::BOLD)), bar].spacing(8),
     )
     .padding(16)
     .width(Fill)
@@ -327,15 +330,49 @@ fn duration(secs: u64) -> String {
 struct Graph {
     /// (age in seconds, sample), oldest first.
     samples: Vec<(f32, Sample)>,
+    newest: Option<Instant>,
     range: f32,
     range_label: &'static str,
     memory_mb: u32,
 }
 
-impl<Message> canvas::Program<Message> for Graph {
-    type State = ();
+/// What the graph is showing now, on its way to what it should.
+#[derive(Default)]
+struct GraphMotion {
+    /// When the newest sample it has seen was taken, to spot a new one arriving.
+    newest: Option<Instant>,
+    /// 0 when the newest sample just arrived, 1 once the line has reached it.
+    grow: f32,
+    /// The window on screen; slides to a newly chosen range.
+    span: f32,
+    last: Option<Instant>,
+}
 
-    fn draw(&self, _: &(), renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
+impl<Message> canvas::Program<Message> for Graph {
+    type State = GraphMotion;
+
+    fn update(&self, state: &mut GraphMotion, event: &iced::Event, _: Rectangle, _: mouse::Cursor) -> Option<canvas::Action<Message>> {
+        let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event else {
+            return None;
+        };
+        // Seen for the first time, it shows what it has: nothing to catch up on.
+        if state.span == 0.0 {
+            *state = GraphMotion { newest: self.newest, grow: 1.0, span: self.range, last: None };
+        } else if self.newest != state.newest {
+            state.newest = self.newest;
+            state.grow = 0.0;
+        }
+        if state.grow == 1.0 && state.span == self.range {
+            state.last = None;
+            return None;
+        }
+        let k = crate::lively::step(crate::lively::tick(&mut state.last, *now, true));
+        state.grow = crate::lively::num(state.grow, 1.0, k, 0.004);
+        state.span = crate::lively::num(state.span, self.range, k, 0.5);
+        Some(canvas::Action::request_redraw())
+    }
+
+    fn draw(&self, state: &GraphMotion, renderer: &Renderer, _: &Theme, bounds: Rectangle, _: mouse::Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let (left, right, top, bottom) = (44.0, bounds.width - 62.0, 8.0, bounds.height - 20.0);
         let (w, h) = ((right - left).max(1.0), (bottom - top).max(1.0));
@@ -350,7 +387,7 @@ impl<Message> canvas::Program<Message> for Graph {
             label(&mut frame, format!("{:.0}%", share * 100.0), Point::new(4.0, y - 7.0));
             label(&mut frame, format!("{:.0} MB", share * self.memory_mb as f32), Point::new(right + 6.0, y - 7.0));
         }
-        let span = self.range;
+        let span = if state.span > 0.0 { state.span } else { self.range };
         label(&mut frame, format!("{} ago", self.range_label), Point::new(left, bottom + 4.0));
         label(&mut frame, "now".into(), Point::new(right - 22.0, bottom + 4.0));
 
@@ -360,7 +397,18 @@ impl<Message> canvas::Program<Message> for Graph {
         }
         let x = |age: f32| left + w * (1.0 - age / span);
         let series = |value: &dyn Fn(&Sample) -> f32, color: Color, frame: &mut Frame| {
-            let point = |(age, s): &(f32, Sample)| Point::new(x(*age), bottom - h * value(s).clamp(0.0, 1.0));
+            let at = |(age, s): &(f32, Sample)| Point::new(x(*age), bottom - h * value(s).clamp(0.0, 1.0));
+            // The newest point travels out from the one before it, drawing the line on.
+            let newest = visible[visible.len() - 1] as *const (f32, Sample);
+            let before = at(visible[visible.len() - 2]);
+            let point = |sample: &(f32, Sample)| {
+                let there = at(sample);
+                if std::ptr::eq(sample, newest) {
+                    Point::new(before.x + (there.x - before.x) * state.grow, before.y + (there.y - before.y) * state.grow)
+                } else {
+                    there
+                }
+            };
             let line = Path::new(|b| {
                 b.move_to(point(visible[0]));
                 for p in &visible[1..] {
@@ -372,7 +420,7 @@ impl<Message> canvas::Program<Message> for Graph {
                 for p in &visible {
                     b.line_to(point(p));
                 }
-                b.line_to(Point::new(x(visible[visible.len() - 1].0), bottom));
+                b.line_to(Point::new(point(visible[visible.len() - 1]).x, bottom));
                 b.close();
             });
             frame.fill(&area, theme::alpha(color, 0.12));
@@ -597,7 +645,7 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
     let pick = |label: &'static str, key: &'static str, options: &'static [&'static str]| {
         column![
             text(label).size(13).color(theme::TEXT),
-            pick_list(options, hosting::label_of(options, s.get(key)), move |v: &'static str| {
+            dropdown(options, hosting::label_of(options, s.get(key)), move |v: &'static str| {
                 host(Msg::SetProp(key, v.to_lowercase()))
             })
             .padding(9)
@@ -753,4 +801,34 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     ]
     .spacing(14)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas::Program;
+
+    #[test]
+    fn a_new_sample_draws_on_and_settles_even_with_a_full_history() {
+        let frame = |at| iced::Event::Window(iced::window::Event::RedrawRequested(at));
+        let t0 = Instant::now();
+        let graph = |newest| Graph { samples: Vec::new(), newest: Some(newest), range: 60.0, range_label: "1m", memory_mb: 1024 };
+        let mut state = GraphMotion::default();
+        let run = |g: &Graph, state: &mut GraphMotion, at| {
+            <Graph as Program<()>>::update(g, state, &frame(at), Rectangle::default(), mouse::Cursor::Unavailable).is_some()
+        };
+        assert!(!run(&graph(t0), &mut state, t0), "first sight doesn't animate");
+        assert_eq!(state.grow, 1.0);
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        assert!(run(&graph(t1), &mut state, t1), "same count, newer sample: still animates");
+        assert!(state.grow < 1.0);
+        let mut at = t1;
+        for _ in 0..120 {
+            at += std::time::Duration::from_millis(16);
+            if !run(&graph(t1), &mut state, at) {
+                return;
+            }
+        }
+        panic!("must settle, or it repaints forever");
+    }
 }
