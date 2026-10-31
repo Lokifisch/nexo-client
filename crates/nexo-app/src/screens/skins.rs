@@ -84,11 +84,11 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
         text("Model").size(13).color(theme::MUTED).width(90),
         button(text("Classic").size(13))
             .padding([6, 13])
-            .style(theme::nav_button(model == SkinModel::Classic))
+            .style(theme::nav_chip(model == SkinModel::Classic))
             .on_press(Message::SetSkinModel(SkinModel::Classic)),
         button(text("Slim").size(13))
             .padding([6, 13])
-            .style(theme::nav_button(model == SkinModel::Slim))
+            .style(theme::nav_chip(model == SkinModel::Slim))
             .on_press(Message::SetSkinModel(SkinModel::Slim)),
     ]
     .spacing(8)

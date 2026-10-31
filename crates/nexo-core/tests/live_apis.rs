@@ -513,3 +513,107 @@ async fn an_explicit_port_bypasses_srv() {
         "an explicit port should have gone straight to a closed port"
     );
 }
+
+/// e4mc's broker and relay answer the quiclime handshake with a public domain.
+#[tokio::test]
+#[ignore]
+async fn e4mc_relay_assigns_a_domain() {
+    let http = reqwest::Client::new();
+    let tunnel = nexo_core::hosting::tunnel::open(&http, 25565)
+        .await
+        .expect("tunnel should open");
+    assert!(tunnel.domain.contains('.'), "domain: {}", tunnel.domain);
+    println!("assigned {}", tunnel.domain);
+    tunnel.close();
+}
+
+/// The whole hosting path against the real Paper/Modrinth/e4mc services and a
+/// real JVM: make a server with a plugin, start it, run a command, open the
+/// public address, stop it, delete it. Several minutes; needs Java 25+.
+#[tokio::test]
+#[ignore]
+async fn hosting_end_to_end() {
+    use nexo_core::hosting::{ServerKind, ServerSpec, WorldSource};
+    let root = std::env::temp_dir().join(format!("nexo-host-{}", uuid::Uuid::new_v4()));
+    let core = nexo_core::Nexo::with_paths(nexo_core::Paths::with_root(&root)).await.unwrap();
+    let host = &core.hosting;
+    // A folder whose record is unreadable must not be claimed — or deleted.
+    let squatter = root.join("servers").join("live-test");
+    std::fs::create_dir_all(&squatter).unwrap();
+    std::fs::write(squatter.join("keep.txt"), "mine").unwrap();
+
+    let created = host
+        .create(ServerSpec {
+            name: "Live Test".into(),
+            kind: ServerKind::Paper,
+            minecraft_version: "1.21.4".into(),
+            world: WorldSource::New {
+                seed: "42".into(),
+                level_type: "minecraft:flat".into(),
+                game_mode: "creative".into(),
+                difficulty: "peaceful".into(),
+                hardcore: false,
+            },
+            memory_mb: 2048,
+            tunnel: true,
+            // Slugs, as the Essentials list sends them. Neither runs alone:
+            // ViaBackwards needs ViaVersion, WorldGuard needs WorldEdit.
+            content: vec!["viabackwards".into(), "worldguard".into()],
+            eula_accepted: true,
+        })
+        .await
+        .expect("create");
+    assert!(created.warnings.is_empty(), "{:?}", created.warnings);
+    let id = created.server.id.clone();
+    assert_eq!(id, "live-test-2");
+    assert!(squatter.join("keep.txt").exists());
+    let plugins: Vec<String> = host
+        .server_dir(&id)
+        .join("plugins")
+        .read_dir()
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .map(|n| n.to_lowercase())
+        .filter(|n| n.ends_with(".jar"))
+        .collect();
+    for wanted in ["viabackwards", "viaversion", "worldguard", "worldedit"] {
+        assert!(plugins.iter().any(|p| p.contains(wanted)), "{wanted} missing from {plugins:?}");
+    }
+    println!("plugins: {plugins:?}");
+
+    host.start(&id).await.expect("start");
+    let ready = host.wait_ready(&id, None).await;
+    let console = host.console(&id).await.unwrap_or_default();
+    ready.unwrap_or_else(|e| panic!("ready: {e}\n{console}"));
+
+    let players = host.players(&id).await.expect("list");
+    assert_eq!(players.online, 0);
+    assert!(players.max > 0);
+    let props = host.properties(&id).await.unwrap();
+    assert!(props.iter().any(|(k, v)| k == "level-type" && v == "minecraft:flat"));
+
+    let domain = host.open_tunnel(&id).await.expect("tunnel");
+    println!("public address {domain}");
+    // A real player's first packets, from outside, through the relay.
+    let status = nexo_core::server_ping::ping(&domain).await.expect("ping through the tunnel");
+    assert_eq!(status.motd, "Live Test");
+    println!("pinged through tunnel: {} ({}/{})", status.motd, status.players_online, status.players_max);
+    let server = host.read(&id).await.unwrap();
+    assert!(host.is_running(&server));
+    // A launcher restarted since: nothing in its own registry, so only the
+    // recorded pid plus the working-directory check can recognise it.
+    let fresh = nexo_core::Nexo::with_paths(nexo_core::Paths::with_root(&root)).await.unwrap();
+    assert!(fresh.hosting.is_running(&server));
+    let mut stranger = server.clone();
+    stranger.id = "live-test".into();
+    assert!(!fresh.hosting.is_running(&stranger), "a pid must not match another server's folder");
+    let sample = host.sample(&[server.clone()]);
+    assert!(sample.get(&id).is_some_and(|s| s.memory_mb > 100));
+
+    host.stop(&id).await.expect("stop");
+    assert!(!host.is_running(&host.read(&id).await.unwrap()));
+    host.delete(&id).await.expect("delete");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+

@@ -8,6 +8,7 @@
 //! pure state transition, which is what keeps the window responsive while a
 //! ~1,000-file install runs underneath it.
 
+mod motion;
 mod pulse;
 mod screens;
 mod skin3d;
@@ -96,6 +97,22 @@ fn main() -> iced::Result {
 
 /// Not `Copy`: the details screen carries which instance it's showing, so the
 /// selected instance survives navigating away and back.
+/// Which page is on show: the screen, and whichever tab or step within it.
+type ShownPage = (
+    Screen,
+    Option<screens::instance::Tab>,
+    Option<screens::hosting::Tab>,
+    Option<screens::hosting::Step>,
+);
+
+/// The transitions that aren't per-control.
+pub mod motion_keys {
+    use crate::motion::Key;
+    pub const PAGE: Key = ("page", "");
+    pub const RAIL: Key = ("rail", "");
+    pub const STATUS: Key = ("status", "");
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     Home,
@@ -110,6 +127,10 @@ pub enum Screen {
     Instance(String),
     /// Live log + RCON console for one running Paper server, by id.
     PaperConsole(String),
+    /// The create-a-server wizard, then its setup progress.
+    NewServer,
+    /// One hosted server's dashboard, by id.
+    Server(String),
 }
 
 impl Screen {
@@ -118,7 +139,7 @@ impl Screen {
     fn nav_group(&self) -> Screen {
         match self {
             Screen::Instance(_) => Screen::Instances,
-            Screen::PaperConsole(_) => Screen::Servers,
+            Screen::PaperConsole(_) | Screen::NewServer | Screen::Server(_) => Screen::Servers,
             other => other.clone(),
         }
     }
@@ -265,6 +286,16 @@ pub struct App {
     /// Wrapped at [`CLOCK_WRAP`], which is a whole multiple of both periods,
     /// so neither animation jumps when it comes round.
     clock: f32,
+    /// Everything mid-transition. See `App::start_transitions`.
+    pub motion: motion::Motion,
+    /// What the transitions last saw, to tell when something changed.
+    shown_page: ShownPage,
+    shown_rail: f32,
+    shown_status: std::mem::Discriminant<Status>,
+    /// How far the current page transition starts below its place.
+    pub page_rise: f32,
+    /// Whether the transition is a tab change inside a screen, not a whole page.
+    page_within: bool,
     /// Whether the window has focus. The clock stops when it doesn't.
     focused: bool,
 
@@ -302,6 +333,9 @@ pub struct App {
     /// world folder)` since the Worlds tab is scoped to whichever instance
     /// is open, but this state must survive being read from a world row.
     confirm_convert_world: Option<(String, String)>,
+
+    /// Servers made from scratch: wizard, setup, dashboards.
+    host: screens::hosting::HostState,
 
     // Paper server console (Screen::PaperConsole).
     /// The tail of `logs/latest.log`, and whether it was cut short. `None`
@@ -484,6 +518,8 @@ pub enum Message {
     PaperConsoleInputChanged(String),
     SendPaperConsoleCommand,
     PaperConsoleCommandSent(Result<String, String>),
+    /// Everything for servers made from scratch — see `screens::hosting`.
+    Host(screens::hosting::Msg),
 
     LoadLogs,
     LogsLoaded(Vec<nexo_core::browse::LogFile>),
@@ -493,6 +529,10 @@ pub enum Message {
     /// frame count so the animations run at the same speed whatever the tick
     /// interval turns out to be on a loaded machine.
     Tick(f32),
+    /// A frame was drawn while something is moving.
+    Frame(std::time::Instant),
+    /// The cursor entered or left a control whose hover state eases.
+    Hover(motion::Key, bool),
     WindowFocused(bool),
     /// Re-reads the log being followed. Separate from [`Message::SelectLog`]
     /// because it must not clear the text first — blanking the viewer once a
@@ -627,6 +667,12 @@ impl App {
             tab: screens::instance::Tab::Content,
             tabs_loaded: std::collections::HashSet::new(),
             clock: 0.0,
+            motion: motion::Motion::new(),
+            shown_page: (Screen::Home, None, None, None),
+            shown_rail: screens::rail_y(&Screen::Home),
+            shown_status: std::mem::discriminant(&Status::Idle),
+            page_rise: 14.0,
+            page_within: false,
             focused: true,
             files: Vec::new(),
             files_at: std::path::PathBuf::new(),
@@ -639,6 +685,7 @@ impl App {
             server_form: None,
             paper_servers: Vec::new(),
             confirm_convert_world: None,
+            host: Default::default(),
             paper_console_log: None,
             paper_console_input: String::new(),
             paper_console_response: None,
@@ -675,7 +722,63 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let frame = matches!(message, Message::Frame(_));
+        let task = self.handle(message);
+        // In one place, so no screen change can forget its transition. Skipped
+        // for frames, which by definition change nothing it compares.
+        if !frame {
+            self.start_transitions();
+        }
+        task
+    }
+
+    /// Compares what is showing against what was, and starts whatever moved.
+    fn start_transitions(&mut self) {
+        let page = (
+            self.screen.clone(),
+            matches!(self.screen, Screen::Instance(_)).then_some(self.tab),
+            matches!(self.screen, Screen::Server(_)).then_some(self.host.tab),
+            self.host.wizard.as_ref().filter(|_| matches!(self.screen, Screen::NewServer)).map(|wizard| wizard.step),
+        );
+        if page != self.shown_page {
+            let same_screen = page.0 == self.shown_page.0;
+            // A new screen rises further than a new tab of the same one.
+            self.page_rise = if same_screen { 6.0 } else { 14.0 };
+            // A new tab moves only what is under the strip; the strip and the header stay put.
+            self.page_within = same_screen && matches!(self.screen, Screen::Instance(_) | Screen::Server(_));
+            self.motion.restart(motion_keys::PAGE, 0.0, 1.0, if same_screen { 260 } else { 420 });
+            self.shown_page = page;
+        }
+        let rail = screens::rail_y(&self.screen.nav_group());
+        if rail != self.shown_rail {
+            self.motion.to(motion_keys::RAIL, self.shown_rail, rail, 280);
+            self.shown_rail = rail;
+        }
+        for tab in screens::instance::Tab::ALL {
+            self.motion.settle(("tab", tab.label()), if self.tab == tab { 1.0 } else { 0.0 }, 240);
+        }
+        for tab in screens::hosting::Tab::ALL {
+            self.motion.settle(("hosttab", tab.label()), if self.host.tab == tab { 1.0 } else { 0.0 }, 240);
+        }
+        let status = std::mem::discriminant(&self.status);
+        if status != self.shown_status {
+            self.motion.restart(motion_keys::STATUS, 0.0, 1.0, 220);
+            self.shown_status = status;
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Frame(now) => {
+                self.motion.advance(now);
+                Task::none()
+            }
+
+            Message::Hover(key, hovered) => {
+                self.motion.to(key, 0.0, if hovered { 1.0 } else { 0.0 }, if hovered { 120 } else { 220 });
+                Task::none()
+            }
+
             Message::Booted(Ok(core)) => {
                 self.core = Some(core.clone());
                 self.status = Status::Idle;
@@ -686,6 +789,7 @@ impl App {
                     Task::done(Message::CheckForUpdate { announce: false }),
                     // Also quietly: lets the instance list flag outdated Nexo Mod.
                     Task::done(Message::FetchNexoRelease),
+                    dev_screen(),
                 ])
             }
             Message::Booted(Err(err)) => {
@@ -756,7 +860,8 @@ impl App {
                 let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
                 let opening_servers = screen == Screen::Servers && self.screen != Screen::Servers;
                 let opening_console = matches!(&screen, Screen::PaperConsole(_)) && screen != self.screen;
-                self.screen = screen;
+                self.screen = screen.clone();
+                let host_task = screens::hosting::on_navigate(self, &screen);
                 if opening_console {
                     self.paper_console_log = None;
                     self.paper_console_input.clear();
@@ -775,9 +880,9 @@ impl App {
                     // be started or stopped by the Mod between visits, and a
                     // stale list would show a Stop button for a server that
                     // already reverted.
-                    return Task::done(Message::LoadPaperServers);
+                    return Task::batch([Task::done(Message::LoadPaperServers), host_task]);
                 }
-                Task::none()
+                host_task
             }
 
             Message::DismissStatus => {
@@ -786,6 +891,8 @@ impl App {
             }
 
             Message::Noop => Task::none(),
+
+            Message::Host(msg) => screens::hosting::update(self, msg),
 
             Message::NewNameChanged(name) => {
                 self.new_name = name;
@@ -1848,44 +1955,9 @@ impl App {
             Message::ContentResults(Ok(hits)) => {
                 self.content_searching = false;
 
-                // Fetch any icon not already cached. One task each, so a slow
-                // or missing icon never holds up the others.
-                let mut fetches = Vec::new();
-                for hit in &hits {
-                    let (Some(url), false) = (
-                        hit.icon_url.clone(),
-                        self.icons.contains_key(&hit.project_id),
-                    ) else {
-                        continue;
-                    };
-                    let Some(core) = self.core.clone() else {
-                        continue;
-                    };
-                    let project = hit.project_id.clone();
-
-                    fetches.push(Task::perform(
-                        async move {
-                            nexo_core::skin::fetch_texture(core.http(), &url)
-                                .await
-                                .ok()
-                                .map(|icon| (project, icon))
-                        },
-                        |loaded| match loaded {
-                            Some((project, icon)) => Message::IconLoaded {
-                                project,
-                                handle: image::Handle::from_rgba(
-                                    icon.width,
-                                    icon.height,
-                                    icon.pixels,
-                                ),
-                            },
-                            None => Message::Noop,
-                        },
-                    ));
-                }
-
+                let fetches = fetch_icons(self.core.clone(), &hits, &self.icons);
                 self.content_results = hits;
-                Task::batch(fetches)
+                fetches
             }
             Message::ContentResults(Err(err)) => {
                 self.content_searching = false;
@@ -2775,7 +2847,12 @@ impl App {
             Screen::Instances => screens::instances::view(self),
             Screen::Accounts => screens::accounts::view(self),
             Screen::Skins => screens::skins::view(self),
-            Screen::Servers => screens::paper_servers::view(self),
+            Screen::Servers => screens::hosting::list_view(self),
+            Screen::NewServer => screens::server_wizard::view(self),
+            Screen::Server(id) => match self.host.server(id) {
+                Some(server) => screens::server_dashboard::view(self, server),
+                None => empty_state("That server is gone", "It was deleted, or its folder was removed."),
+            },
             Screen::Instance(id) => match self.instances.iter().find(|i| &i.id == id) {
                 Some(instance) => screens::instance::view(self, instance),
                 // Deleted from under us, or an id that no longer exists.
@@ -2793,10 +2870,18 @@ impl App {
             },
         };
 
+        let page = self.motion.get(motion_keys::PAGE, 1.0);
         let content = iced::widget::column![
             screens::top_bar(self),
-            screens::status_bar(&self.status),
-            body
+            // Not while idle: the bar is empty then, and a column skips empties only if
+            // they are truly zero-sized, which a reveal around one is not.
+            if matches!(self.status, Status::Idle) {
+                screens::status_bar(&self.status)
+            } else {
+                screens::reveal(screens::status_bar(&self.status), self.motion.get(motion_keys::STATUS, 1.0), 0.0)
+            },
+            // The page finishes before the list stagger that shares its clock.
+            screens::reveal(body, if self.page_within { 1.0 } else { (page * 1.6).min(1.0) }, self.page_rise),
         ]
         .spacing(16)
         .padding(24)
@@ -2806,6 +2891,15 @@ impl App {
         iced::widget::row![screens::sidebar(self), content]
             .height(Fill)
             .into()
+    }
+
+    /// How far a tab's content has come in, for the screens with a tab strip.
+    pub fn tab_content_progress(&self) -> f32 {
+        if self.page_within {
+            (self.motion.get(motion_keys::PAGE, 1.0) * 1.6).min(1.0)
+        } else {
+            1.0
+        }
     }
 
     /// Arms a one-way button and schedules its disarm. Five seconds is long
@@ -2982,11 +3076,20 @@ impl App {
             _ => None,
         });
 
-        if !self.focused {
-            return focus;
+        // Hosting's sampling keeps running unfocused; its own function decides.
+        let hosting = screens::hosting::subscriptions(self, self.focused);
+        let mut feeds = vec![focus];
+        feeds.extend(hosting);
+
+        // Only while something is moving, so a settled window paints nothing. Focused
+        // or not: a transition left unfinished would hold its veil until refocus.
+        if self.motion.active() {
+            feeds.push(iced::window::frames().map(Message::Frame));
         }
 
-        let mut feeds = vec![focus];
+        if !self.focused {
+            return iced::Subscription::batch(feeds);
+        }
 
         // The live-log pulse is the only animation left, and it only moves on
         // the Logs tab of a running instance. Anywhere else a 30 Hz repaint
@@ -3016,6 +3119,65 @@ impl App {
 
         iced::Subscription::batch(feeds)
     }
+}
+
+/// Debug builds only: `NEXO_DEV_SCREEN` opens a screen at boot, so a screen
+/// can be screenshotted without driving the mouse. `wizard:<0-4>` is a wizard
+/// step; `server:<id>:<0-4>` is a dashboard tab.
+fn dev_screen() -> Task<Message> {
+    if !cfg!(debug_assertions) {
+        return Task::none();
+    }
+    use screens::hosting::{Msg, Step, Tab};
+    let Ok(spec) = std::env::var("NEXO_DEV_SCREEN") else { return Task::none() };
+    let mut parts = spec.split(':');
+    let index = |p: Option<&str>| p.and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    let later = |m: Message| Task::perform(tokio::time::sleep(std::time::Duration::from_millis(1500)), move |_| m.clone());
+    match parts.next() {
+        Some("servers") => Task::done(Message::Navigate(Screen::Servers)),
+        Some("wizard") => {
+            let step = Step::ALL[index(parts.next()).min(4)];
+            Task::done(Message::Navigate(Screen::NewServer)).chain(later(Message::Host(Msg::GoTo(step))))
+        }
+        Some("server") => {
+            let id = parts.next().unwrap_or_default().to_string();
+            let tab = Tab::ALL[index(parts.next()).min(4)];
+            Task::done(Message::Navigate(Screen::Servers))
+                .chain(later(Message::Navigate(Screen::Server(id))))
+                .chain(later(Message::Host(Msg::Tab(tab))))
+        }
+        _ => Task::none(),
+    }
+}
+
+/// Fetches the Modrinth icon of every hit not already cached. One task each,
+/// so a slow or missing icon never holds up the others.
+fn fetch_icons(
+    core: Option<Nexo>,
+    hits: &[nexo_core::modrinth::SearchHit],
+    icons: &std::collections::HashMap<String, image::Handle>,
+) -> Task<Message> {
+    let Some(core) = core else { return Task::none() };
+    Task::batch(hits.iter().filter(|h| !icons.contains_key(&h.project_id)).filter_map(|hit| {
+        let url = hit.icon_url.clone()?;
+        let core = core.clone();
+        let project = hit.project_id.clone();
+        Some(Task::perform(
+            async move {
+                nexo_core::skin::fetch_texture(core.http(), &url)
+                    .await
+                    .ok()
+                    .map(|icon| (project, icon))
+            },
+            |loaded| match loaded {
+                Some((project, icon)) => Message::IconLoaded {
+                    project,
+                    handle: image::Handle::from_rgba(icon.width, icon.height, icon.pixels),
+                },
+                None => Message::Noop,
+            },
+        ))
+    }))
 }
 
 /// Re-reads instances and accounts from disk. Cheap, and simpler to reason
@@ -3251,4 +3413,101 @@ fn empty_state<'a>(title: &'a str, hint: &'a str) -> Element<'a, Message> {
     .width(Fill)
     .style(theme::card)
     .into()
+}
+
+#[cfg(test)]
+mod motion_frames {
+    use super::*;
+    use iced_test::simulator::Simulator;
+    use std::time::{Duration, Instant};
+
+    /// `NEXO_FRAME_DIR=<dir> cargo test -p nexo-app motion_frames -- --ignored`
+    /// writes real rendered frames of a page transition, to look at. Needs no
+    /// window, so it works on a locked or headless machine.
+    fn dir() -> std::path::PathBuf {
+        std::env::var("NEXO_FRAME_DIR").expect("set NEXO_FRAME_DIR").into()
+    }
+
+    fn shoot(app: &App, name: &str) {
+        let settings = iced::Settings::default();
+        let mut ui = Simulator::with_size(settings, iced::Size::new(1100.0, 640.0), app.view());
+        let snapshot = ui.snapshot(&theme::nexo()).unwrap();
+        snapshot.matches_image(dir().join(format!("{name}.png"))).unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes images; run by hand"]
+    fn page_transition() {
+        let (mut app, _boot) = App::boot();
+        let _ = app.update(Message::Navigate(Screen::Home));
+        let t0 = Instant::now();
+        let _ = app.update(Message::Navigate(Screen::Accounts));
+        for millis in [0u64, 60, 140, 280, 600] {
+            let _ = app.update(Message::Frame(t0 + Duration::from_millis(millis)));
+            shoot(&app, &format!("nav-{millis:03}"));
+        }
+        assert!(!app.motion.active(), "must stop asking for frames once settled");
+    }
+
+    fn instance(number: usize) -> Instance {
+        Instance {
+            id: format!("i{number}"),
+            name: format!("Instance {number}"),
+            game_version: "26.3".to_string(),
+            loader: Default::default(),
+            loader_version: None,
+            created_at: 0,
+            last_played: None,
+            memory_mb: None,
+            java_path: None,
+            mods: Vec::new(),
+        }
+    }
+
+    fn play(app: &mut App, name: &str, change: Message) {
+        let t0 = Instant::now();
+        let _ = app.update(change);
+        for millis in [0u64, 60, 140, 280, 600] {
+            let _ = app.update(Message::Frame(t0 + Duration::from_millis(millis)));
+            shoot(app, &format!("{name}-{millis:03}"));
+        }
+        assert!(!app.motion.active(), "{name} must settle");
+    }
+
+    #[test]
+    #[ignore = "writes images; run by hand"]
+    fn instances_list_and_tabs() {
+        let (mut app, _boot) = App::boot();
+        app.instances = (0..6).map(instance).collect();
+        play(&mut app, "list", Message::Navigate(Screen::Instances));
+        play(&mut app, "open", Message::Navigate(Screen::Instance("i0".to_string())));
+        play(&mut app, "tab", Message::SelectTab(screens::instance::Tab::Logs));
+    }
+
+    #[test]
+    #[ignore = "writes images; run by hand"]
+    fn rail_hover() {
+        let (mut app, _boot) = App::boot();
+        let t0 = Instant::now();
+        let _ = app.update(Message::Hover(("nav", "Skin & capes"), true));
+        for millis in [0u64, 60, 200] {
+            let _ = app.update(Message::Frame(t0 + Duration::from_millis(millis)));
+            shoot(&app, &format!("hover-{millis:03}"));
+        }
+        let _ = app.update(Message::Frame(t0 + Duration::from_millis(600)));
+        assert!(!app.motion.active());
+    }
+
+    #[test]
+    #[ignore = "writes images; run by hand"]
+    fn tab_underlines() {
+        let bar = iced::widget::column(
+            [0.0f32, 0.25, 0.5, 0.75, 1.0].into_iter().map(|amount| {
+                iced::widget::container(screens::tab_underline(amount)).width(200).padding(8).into()
+            }),
+        );
+        let element: Element<'_, Message> = bar.into();
+        let mut ui = Simulator::with_size(iced::Settings::default(), iced::Size::new(216.0, 110.0), element);
+        ui.snapshot(&theme::nexo()).unwrap().matches_image(dir().join("underline.png")).unwrap();
+    }
 }

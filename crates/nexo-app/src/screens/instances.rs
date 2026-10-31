@@ -21,7 +21,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
         empty_state("No matches", "No instance has that in its name.")
     } else {
         scrollable(
-            column(shown.into_iter().map(|instance| card(app, instance)))
+            column(shown.into_iter().enumerate().map(|(index, instance)| {
+                let arrived = crate::motion::Motion::stagger(app.motion.get(crate::motion_keys::PAGE, 1.0), index);
+                super::reveal(card(app, instance), arrived, 8.0)
+            }))
                 .spacing(8)
                 .width(Fill),
         )

@@ -10,7 +10,7 @@
 //! ordinary Rust that the compiler checks, and hover/press/disabled states
 //! can't be silently forgotten.
 
-use iced::widget::{button, checkbox, container, svg, text_input, toggler};
+use iced::widget::{button, checkbox, container, slider, svg, text_input, toggler};
 use iced::{border, gradient, Background, Border, Color, Font, Shadow, Theme, Vector};
 
 /// Logo violet — the primary accent.
@@ -35,6 +35,8 @@ pub const TEXT: Color = rgb(0xf2, 0xf2, 0xf5);
 /// Secondary text; still clears 4.5:1 on [`RAISED`].
 pub const MUTED: Color = rgb(0x8b, 0x8b, 0x99);
 pub const DANGER: Color = rgb(0xff, 0x54, 0x70);
+/// "Works, but not ideal" — the RAM slider's edges, warnings in a log.
+pub const AMBER: Color = rgb(0xff, 0xb4, 0x3c);
 
 /// Headings and button labels. Weight, not size, carries the hierarchy.
 pub const BOLD: Font = Font {
@@ -271,31 +273,52 @@ pub fn danger_button(theme: &Theme, status: button::Status) -> button::Style {
     outline(Some(DANGER), theme, status)
 }
 
+/// The rail's selected look, on the one highlight that slides between entries.
+pub fn nav_highlight(theme: &Theme) -> container::Style {
+    let accent = accent(theme);
+    container::Style {
+        background: Some(Background::Color(blend(SURFACE, accent, 0.16))),
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: accent,
+        },
+        shadow: halo(alpha(accent, 0.45), 16.0),
+        ..Default::default()
+    }
+}
+
+/// The window's colour at `amount` opacity: see `screens::reveal`.
+pub fn veil(amount: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: (amount > 0.0).then(|| Background::Color(alpha(INK, amount))),
+        ..Default::default()
+    }
+}
+
 /// A square icon entry in the nav rail. The selected one is tinted, outlined
 /// and glowing; the rest are bare until hovered, which is what makes "where
 /// you are" readable at a glance. The icon itself is tinted by [`nav_icon`].
-pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+pub fn nav_button(selected: bool, hover: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, _status| {
         let accent = accent(theme);
 
+        // The selected look itself is `nav_highlight`, sitting behind this.
         if selected {
             return button::Style {
-                background: Some(Background::Color(blend(SURFACE, accent, 0.16))),
+                background: None,
                 text_color: accent,
                 border: Border {
                     radius: 8.0.into(),
-                    width: 1.0,
-                    color: accent,
+                    ..Default::default()
                 },
-                shadow: halo(alpha(accent, 0.45), 16.0),
                 ..Default::default()
             };
         }
 
         button::Style {
-            background: Some(Background::Color(if hovered { FIELD } else { Color::TRANSPARENT })),
-            text_color: if hovered { TEXT } else { MUTED },
+            background: Some(Background::Color(alpha(FIELD, hover))),
+            text_color: blend(MUTED, TEXT, hover),
             border: Border {
                 radius: 8.0.into(),
                 ..Default::default()
@@ -305,15 +328,35 @@ pub fn nav_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::
     }
 }
 
+/// A small selectable button off the rail, with the selected look built in.
+pub fn nav_chip(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if !selected {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            return nav_button(false, if hovered { 1.0 } else { 0.0 })(theme, status);
+        }
+        let highlight = nav_highlight(theme);
+        button::Style {
+            background: highlight.background,
+            text_color: accent(theme),
+            border: highlight.border,
+            shadow: highlight.shadow,
+            ..Default::default()
+        }
+    }
+}
+
 /// Tints a rail icon to match its [`nav_button`]: accent when selected, text
 /// when hovered, muted otherwise.
-pub fn nav_icon(selected: bool) -> impl Fn(&Theme, svg::Status) -> svg::Style {
-    move |theme, status| svg::Style {
-        color: Some(match (selected, status) {
-            (true, _) => accent(theme),
-            (false, svg::Status::Hovered) => TEXT,
-            (false, svg::Status::Idle) => MUTED,
-        }),
+///
+/// `lit` is how close the sliding highlight is, 0 to 1, so an icon takes the
+/// accent as the highlight reaches it rather than ahead of it.
+pub fn nav_icon(lit: f32) -> impl Fn(&Theme, svg::Status) -> svg::Style {
+    move |theme, status| {
+        let base = if matches!(status, svg::Status::Hovered) { TEXT } else { MUTED };
+        svg::Style {
+            color: Some(blend(base, accent(theme), lit)),
+        }
     }
 }
 
@@ -389,23 +432,23 @@ pub fn selected_tile(_theme: &Theme, _status: button::Status) -> button::Style {
 /// The selected tab is white over a faint wash rising from its underline —
 /// the mockup's glow is a text-shadow, which iced cannot draw, and this is
 /// the nearest light that stays behind the label. See [`tab_underline`].
-pub fn tab_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub fn tab_button(amount: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
 
         button::Style {
-            background: Some(if selected {
+            background: Some(if amount > 0.0 {
                 Background::from(
                     gradient::Linear::new(angle::DOWN)
                         .add_stop(0.0, Color::TRANSPARENT)
-                        .add_stop(1.0, alpha(accent(theme), 0.12)),
+                        .add_stop(1.0, alpha(accent(theme), 0.12 * amount)),
                 )
             } else {
                 Background::Color(Color::TRANSPARENT)
             }),
             // Hover only brightens the label: an unselected tab that lit up
             // under the cursor would read as a second selection.
-            text_color: if selected || hovered { TEXT } else { MUTED },
+            text_color: if hovered { TEXT } else { blend(MUTED, TEXT, amount) },
             border: Border {
                 // Square at the bottom so the button sits flush on its
                 // underline instead of floating above a detached bar.
@@ -715,5 +758,77 @@ pub fn toggle(theme: &Theme, status: toggler::Status) -> toggler::Style {
         text_color: None,
         border_radius: None,
         padding_ratio: 0.1,
+    }
+}
+
+/// A slider drawn over a track of its own (the RAM zones), so its rail is
+/// invisible and only the knob shows.
+pub fn bare_slider(_theme: &Theme, status: slider::Status) -> slider::Style {
+    let ring = match status {
+        slider::Status::Hovered | slider::Status::Dragged => 3.0,
+        slider::Status::Active => 2.0,
+    };
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (Background::Color(Color::TRANSPARENT), Background::Color(Color::TRANSPARENT)),
+            width: 4.0,
+            border: Border::default(),
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 8.0 },
+            background: Background::Color(TEXT),
+            border_width: ring,
+            border_color: INK,
+        },
+    }
+}
+
+/// A solid block of one colour: RAM zones, meter fills, graph legend keys.
+pub fn fill(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(Background::Color(color)),
+        border: Border { radius: 3.0.into(), ..Default::default() },
+        ..Default::default()
+    }
+}
+
+/// A callout in any colour — [`banner`] past its two states, for the RAM
+/// verdict's mint / amber / red.
+pub fn callout(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(Background::Color(alpha(color, 0.12))),
+        border: Border { radius: 10.0.into(), width: 1.0, color: alpha(color, 0.45) },
+        text_color: Some(color),
+        ..Default::default()
+    }
+}
+
+/// A state pill in any colour — [`tag`] generalised past mint/grey, for
+/// server states that need amber and red too.
+pub fn pill(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(Background::Color(alpha(color, 0.14))),
+        text_color: Some(color),
+        border: Border { radius: 100.0.into(), width: 1.0, color: alpha(color, 0.35) },
+        ..Default::default()
+    }
+}
+
+/// A numbered step in the server wizard: lit ring for the current one, mint
+/// for done, a dim disc for the rest.
+pub fn step_dot(current: bool, done: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let (fill, edge, label) = match (current, done) {
+            (true, _) => (blend(INK, accent(theme), 0.2), accent(theme), TEXT),
+            (false, true) => (alpha(MINT, 0.14), alpha(MINT, 0.6), MINT),
+            (false, false) => (CONTROL, CONTROL, MUTED),
+        };
+        container::Style {
+            background: Some(Background::Color(fill)),
+            text_color: Some(label),
+            border: Border { radius: 100.0.into(), width: if current { 2.0 } else { 1.0 }, color: edge },
+            shadow: if current { halo(alpha(accent(theme), 0.4), 12.0) } else { Shadow::default() },
+            ..Default::default()
+        }
     }
 }

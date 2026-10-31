@@ -45,6 +45,9 @@ pub struct Status {
     pub latency_ms: u32,
 }
 
+/// 1.21.4's protocol number. Any real version works for a status request.
+const PROTOCOL: i32 = 769;
+
 /// Pings one server. `address` is what is stored in `servers.dat`: a host,
 /// optionally with `:port`, optionally bracketed if it is a literal IPv6.
 pub async fn ping(address: &str) -> Result<Status> {
@@ -87,10 +90,12 @@ async fn exchange(host: &str, port: u16) -> Result<Response> {
     let _ = stream.set_nodelay(true);
 
     let mut handshake = Vec::new();
-    // -1 means "I am not telling you my protocol version", which every server
-    // accepts for a status request. Sending a real number would make an old
-    // server answer "outdated client" instead of describing itself.
-    write_varint(&mut handshake, -1);
+    // A real protocol number, not the -1 ("unspecified") the protocol allows:
+    // e4mc's relay resets any handshake declaring -1, so a server shared
+    // through it read as offline. Servers describe themselves whatever the
+    // number — a mismatch only changes the version they report, and that
+    // field comes from the server, not from this.
+    write_varint(&mut handshake, PROTOCOL);
     write_string(&mut handshake, host);
     handshake.extend(port.to_be_bytes());
     // Next state: 1 = status, 2 = login. This never logs in.

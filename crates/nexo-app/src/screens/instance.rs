@@ -98,7 +98,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             .spacing(14)
             .align_y(iced::Center),
         tab_bar(app, instance),
-        body,
+        super::reveal(body, app.tab_content_progress(), app.page_rise),
     ]
     .spacing(14)
     .height(Fill)
@@ -112,6 +112,7 @@ fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
 
     for tab in Tab::ALL {
         let selected = app.tab == tab;
+        let amount = app.motion.get(("tab", tab.label()), if selected { 1.0 } else { 0.0 });
 
         let mut label = row![text(tab.label()).size(13).font(theme::BOLD)]
             .spacing(8)
@@ -133,10 +134,9 @@ fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             column![
                 button(label)
                     .padding([9, 16])
-                    .style(theme::tab_button(selected))
+                    .style(theme::tab_button(amount))
                     .on_press(Message::SelectTab(tab)),
-                container(Space::new().width(Fill).height(2))
-                    .style(theme::tab_underline(selected)),
+                super::tab_underline(amount),
             ]
             .width(iced::Shrink),
         );

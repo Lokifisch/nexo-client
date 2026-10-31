@@ -57,7 +57,7 @@ impl Installer {
     }
 
     /// Vanilla version JSON, cached under `versions/<id>/<id>.json`.
-    async fn vanilla_version(&self, game_version: &str) -> Result<VersionData> {
+    pub async fn vanilla_version(&self, game_version: &str) -> Result<VersionData> {
         let cached = self
             .paths
             .versions()

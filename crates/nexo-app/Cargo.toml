@@ -51,3 +51,7 @@ rfd = { version = "0.15", default-features = false, features = [
 # script checks the target itself instead.
 [build-dependencies]
 winresource = "0.1"
+
+[dev-dependencies]
+# Renders real frames without a window, to look at transitions frame by frame.
+iced_test = "0.14.0"

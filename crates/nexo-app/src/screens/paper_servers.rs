@@ -1,8 +1,9 @@
-//! Cross-instance list of hosted Paper servers — see `Mod/ROADMAP.md`
-//! Phase 7. Conversion itself starts from a world row on the instance
-//! details screen's Worlds tab, where the source world's path is already at
-//! hand; this screen is purely the "what's running, stop it" panel, and
-//! shows a server regardless of which instance or product created it.
+//! The card for one converted-world Paper server — see `Mod/ROADMAP.md`
+//! Phase 7. Shown under "Converted worlds" on the Servers screen
+//! (`hosting::list_view`). Conversion itself starts from a world row on the
+//! instance details screen's Worlds tab, where the source world's path is
+//! already at hand; a card shows a server regardless of which instance or
+//! product created it.
 //!
 //! Deliberately does not have a live RCON console or a Hangar plugin-browser
 //! tab yet — `nexo_core::paper_server::hangar` and `rcon::RconClient` are
@@ -12,41 +13,12 @@
 //! from here can still be managed from there in the meantime.
 
 use crate::theme;
-use crate::{empty_state, App, Message};
-use iced::widget::{button, column, container, row, scrollable, text};
+use crate::{App, Message};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Fill};
 use nexo_core::paper_server::{status, PaperServer};
 
-pub fn view(app: &App) -> Element<'_, Message> {
-    let list: Element<'_, Message> = if app.paper_servers.is_empty() {
-        empty_state(
-            "No Paper servers yet",
-            "Open an instance, go to its Worlds tab, and hit \"Host as Paper Server\" on a singleplayer world.",
-        )
-    } else {
-        scrollable(
-            column(app.paper_servers.iter().map(|server| card(app, server)))
-                .spacing(12)
-                .width(Fill),
-        )
-        .height(Fill)
-        .into()
-    };
-
-    column![
-        crate::screens::header(
-            "Paper Servers",
-            "Bukkit/Paper plugins on your own singleplayer worlds — started here or from the Mod.",
-            None,
-        ),
-        list,
-    ]
-    .spacing(20)
-    .height(Fill)
-    .into()
-}
-
-fn card<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
+pub fn card<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
     let (status_label, status_color) = if server.status == status::RUNNING {
         (format!("Running on localhost:{}", server.port), theme::MINT)
     } else if server.status == status::ERROR {

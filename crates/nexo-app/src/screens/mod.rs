@@ -1,14 +1,17 @@
 pub mod accounts;
 pub mod home;
+pub mod hosting;
 pub mod instance;
 pub mod instances;
 pub mod paper_console;
 pub mod paper_servers;
+pub mod server_dashboard;
+pub mod server_wizard;
 pub mod skins;
 
 use crate::theme;
 use crate::{App, Message, Screen, Status};
-use iced::widget::{Space, button, column, container, image, row, svg, text, tooltip};
+use iced::widget::{mouse_area, stack, Space, button, column, container, image, row, svg, text, tooltip};
 use iced::{Element, Fill};
 use std::sync::LazyLock;
 
@@ -50,22 +53,79 @@ fn labelled<'a>(content: impl Into<Element<'a, Message>>, label: String) -> Elem
     .into()
 }
 
+/// Where a section's highlight sits on the rail. Follows the column in
+/// [`sidebar`]: top padding, logo, its gap, the spacer, then 44px entries.
+pub fn rail_y(section: &Screen) -> f32 {
+    const FIRST: f32 = 14.0 + 40.0 + 10.0 + 10.0 + 10.0;
+    const STEP: f32 = 44.0 + 10.0;
+    let index = match section {
+        Screen::Home => 0.0,
+        Screen::Instances => 1.0,
+        Screen::Accounts => 2.0,
+        Screen::Skins => 3.0,
+        _ => 4.0,
+    };
+    FIRST + index * STEP
+}
+
+/// Content coming into place: `progress` from 0 to 1, starting `rise` pixels low
+/// and hidden behind a veil of the window's own colour. A veil because iced has
+/// no opacity for a whole subtree. Same structure at every progress, so widget
+/// state like scroll positions and focus survives the animation.
+pub fn reveal<'a>(content: impl Into<Element<'a, Message>>, progress: f32, rise: f32) -> Element<'a, Message> {
+    let hidden = 1.0 - progress.clamp(0.0, 1.0);
+    stack![
+        container(content).padding(iced::Padding { top: hidden * rise, ..Default::default() }).width(Fill),
+        container(Space::new()).width(Fill).height(Fill).style(theme::veil(hidden)),
+    ]
+    .into()
+}
+
+/// A tab's underline: grows out from its centre as the tab becomes selected.
+pub fn tab_underline<'a>(amount: f32) -> Element<'a, Message> {
+    let bar = (amount * 100.0).round() as u16;
+    let side = (100 - bar.min(100)) / 2;
+    // Fixed at zero rather than a portion when fully grown, or the bar stops short.
+    let edge = || if side == 0 { iced::Length::Fixed(0.0) } else { iced::Length::FillPortion(side) };
+    row![
+        Space::new().width(edge()),
+        container(Space::new().width(Fill).height(2))
+            .width(iced::Length::FillPortion(bar.max(1)))
+            .style(theme::tab_underline(bar > 0)),
+        Space::new().width(edge()),
+    ]
+    .width(Fill)
+    .into()
+}
+
 /// Left navigation rail: the logo, one icon per screen, and Play at the foot.
 pub fn sidebar(app: &App) -> Element<'_, Message> {
     let nav_entry = |label: &'static str, handle: &LazyLock<svg::Handle>, screen: Screen| {
         let selected = app.screen.nav_group() == screen;
+        let key = ("nav", label);
+        let hover = app.motion.get(key, 0.0);
+        let highlight_at = app.motion.get(crate::motion_keys::RAIL, rail_y(&app.screen.nav_group()));
+        // One rail step away counts as unlit.
+        let lit = (1.0 - (highlight_at - rail_y(&screen)).abs() / 54.0).clamp(0.0, 1.0);
+        // The icon grows slightly under the cursor; the padding gives back what
+        // it takes, so the button itself holds still.
+        let grow = hover * 2.0;
         labelled(
-            button(
-                svg((*handle).clone())
-                    .width(22)
-                    .height(22)
-                    .style(theme::nav_icon(selected)),
+            mouse_area(
+                button(
+                    svg((*handle).clone())
+                        .width(22.0 + grow)
+                        .height(22.0 + grow)
+                        .style(theme::nav_icon(lit)),
+                )
+                .width(44)
+                .height(44)
+                .padding(11.0 - grow / 2.0)
+                .style(theme::nav_button(selected, hover))
+                .on_press(Message::Navigate(screen)),
             )
-            .width(44)
-            .height(44)
-            .padding(11)
-            .style(theme::nav_button(selected))
-            .on_press(Message::Navigate(screen)),
+            .on_enter(Message::Hover(key, true))
+            .on_exit(Message::Hover(key, false)),
             label.to_string(),
         )
     };
@@ -77,7 +137,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
         nav_entry("Instances", &INSTANCES, Screen::Instances),
         nav_entry("Accounts", &ACCOUNTS, Screen::Accounts),
         nav_entry("Skin & capes", &SKINS, Screen::Skins),
-        nav_entry("Paper Servers", &SERVERS, Screen::Servers),
+        nav_entry("Servers", &SERVERS, Screen::Servers),
         Space::new().height(Fill),
         quick_play(app),
     ]
@@ -85,8 +145,17 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
     .padding([14, 12])
     .align_x(iced::Center);
 
+    // The highlight is one element behind all the entries, not part of any of
+    // them, which is what lets it travel from one to the next.
+    let highlight = column![
+        Space::new().height(app.motion.get(crate::motion_keys::RAIL, rail_y(&app.screen.nav_group()))),
+        container(Space::new()).width(44).height(44).style(theme::nav_highlight),
+    ]
+    .width(Fill)
+    .align_x(iced::Center);
+
     row![
-        container(rail).width(68).height(Fill).style(theme::sidebar),
+        container(stack![highlight, rail].width(Fill).height(Fill)).width(68).height(Fill).style(theme::sidebar),
         container(Space::new()).width(1).height(Fill).style(theme::divider),
     ]
     .into()
@@ -113,19 +182,25 @@ pub fn last_instance_launch(app: &App) -> (String, Option<Message>) {
 /// click from any screen.
 fn quick_play(app: &App) -> Element<'_, Message> {
     let (label, message) = last_instance_launch(app);
+    let key = ("nav", "play");
+    let grow = if message.is_some() { app.motion.get(key, 0.0) * 3.0 } else { 0.0 };
 
     labelled(
-        button(
-            svg(PLAY.clone())
-                .width(20)
-                .height(20)
-                .style(theme::icon_on_fill(message.is_some())),
-        )
+        mouse_area(
+            button(
+                svg(PLAY.clone())
+                    .width(20.0 + grow)
+                    .height(20.0 + grow)
+                    .style(theme::icon_on_fill(message.is_some())),
+            )
             .width(46)
             .height(46)
-            .padding(13)
+            .padding(13.0 - grow / 2.0)
             .style(theme::hero_button)
             .on_press_maybe(message),
+        )
+        .on_enter(Message::Hover(key, true))
+        .on_exit(Message::Hover(key, false)),
         label,
     )
 }

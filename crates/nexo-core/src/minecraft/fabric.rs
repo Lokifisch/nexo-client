@@ -94,3 +94,44 @@ pub async fn profile(
 
     Ok(response.json().await?)
 }
+
+#[derive(Debug, Clone, Deserialize)]
+struct InstallerVersion {
+    version: String,
+    #[serde(default)]
+    stable: bool,
+}
+
+/// Fabric's server launcher jar for `game_version`: a small executable jar
+/// that fetches the vanilla server and the loader's libraries on first run.
+/// Fabric publishes no checksum for it, so the bytes are trusted to HTTPS.
+pub async fn server_launcher(http: &reqwest::Client, game_version: &str) -> Result<Vec<u8>> {
+    let loader = latest_stable(http, game_version).await?;
+    let installers: Vec<InstallerVersion> = http
+        .get(format!("{META_BASE}/versions/installer"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let installer = installers
+        .iter()
+        .find(|i| i.stable)
+        .or_else(|| installers.first())
+        .ok_or_else(|| Error::invalid("Fabric has published no installer"))?;
+    if !crate::util::is_safe_version(&installer.version) || !crate::util::is_safe_version(&loader) {
+        return Err(Error::invalid("invalid Fabric loader or installer version"));
+    }
+    let bytes = http
+        .get(format!(
+            "{META_BASE}/versions/loader/{}/{loader}/{}/server/jar",
+            game_version.replace(' ', "%20"),
+            installer.version
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    Ok(bytes.to_vec())
+}

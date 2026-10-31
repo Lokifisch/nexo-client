@@ -84,6 +84,13 @@ impl Paths {
         self.paper_servers().join(id)
     }
 
+    /// Servers created from scratch by the launcher (`hosting`), keyed by id.
+    /// Separate from `paper-servers/`: that layout is a contract with the Mod
+    /// and every record in it is a converted singleplayer world.
+    pub fn servers(&self) -> PathBuf {
+        self.root.join("servers")
+    }
+
     /// Runtimes we downloaded ourselves, when no suitable system JDK exists.
     pub fn java_runtimes(&self) -> PathBuf {
         self.root.join("java")

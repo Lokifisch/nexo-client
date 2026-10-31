@@ -12,6 +12,7 @@ pub mod content;
 pub mod cosmetics;
 pub mod error;
 pub mod github;
+pub mod hosting;
 pub mod hwkey;
 pub mod instance;
 pub mod java;
@@ -56,6 +57,8 @@ pub struct Nexo {
     /// Converts singleplayer worlds to locally-run Paper servers and back —
     /// see `Mod/ROADMAP.md` Phase 7.
     pub paper_servers: paper_server::PaperServers,
+    /// Servers made from scratch and run on this machine.
+    pub hosting: hosting::Hosting,
     /// Updates the launcher itself, as opposed to anything it installs.
     pub self_update: self_update::SelfUpdate,
     /// Games this launcher started. Shared, so every clone of `Nexo` sees the
@@ -95,6 +98,7 @@ impl Nexo {
             skins: skin_library::SkinLibrary::new(&paths),
             mrpack: mrpack::MrPack::new(http.clone(), paths.clone()),
             paper_servers: paper_server::PaperServers::new(http.clone(), paths.clone()),
+            hosting: hosting::Hosting::new(http.clone(), paths.clone(), Installer::new(http.clone(), paths.clone())),
             self_update: self_update::SelfUpdate::new(http.clone()),
             running: running::RunningGames::new(),
             launch_locks: Default::default(),
