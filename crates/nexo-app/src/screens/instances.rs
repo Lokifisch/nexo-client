@@ -38,7 +38,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     let header = row![
-        text("Instances").size(26).font(theme::BOLD).color(theme::TEXT).width(Fill),
+        text("Instances").size(26).font(theme::BOLD).color(theme::text()).width(Fill),
         text_input("Search instances", &app.instance_query)
             .on_input(Message::InstanceQueryChanged)
             .padding([10, 12])
@@ -99,7 +99,7 @@ fn create_form(app: &App) -> Element<'_, Message> {
                 .align_y(iced::Center),
             text("Fabric loader, installed automatically. Importing a modpack creates its own instance.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         ]
         .spacing(10),
     )
@@ -137,7 +137,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     };
 
     let mut title = row![
-        text(&instance.name).size(17).font(theme::BOLD).color(theme::TEXT),
+        text(&instance.name).size(17).font(theme::BOLD).color(theme::text()),
         container(crate::lively::changed(tag, text(tag).size(10).font(theme::BOLD)))
             .padding([3, 7])
             .tinted(theme::tag(lit)),
@@ -167,7 +167,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     // The whole left side is the way into the details screen; a plain text
     // button keeps it looking like a card rather than a control.
     let details = button(
-        column![title, text(meta).size(13).color(theme::MUTED)]
+        column![title, text(meta).size(13).color(theme::muted())]
             .spacing(4)
             .width(Fill),
     )
@@ -179,8 +179,8 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let stats = row![
         text(if mods == 1 { "1 mod".to_string() } else { format!("{mods} mods") })
             .size(12)
-            .color(theme::MUTED),
-        text(played).size(12).color(theme::MUTED),
+            .color(theme::muted()),
+        text(played).size(12).color(theme::muted()),
     ]
     .spacing(22);
 

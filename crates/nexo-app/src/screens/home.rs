@@ -11,8 +11,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let account = app.active_account();
 
     let name: Element<'_, Message> = match account {
-        Some(account) => text(&account.username).size(26).color(theme::TEXT).into(),
-        None => text("Not signed in").size(22).color(theme::MUTED).into(),
+        Some(account) => text(&account.username).size(26).color(theme::text()).into(),
+        None => text("Not signed in").size(22).color(theme::muted()).into(),
     };
 
     let character: Element<'_, Message> = match &app.skin_texture {
@@ -23,6 +23,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             app.skin_key,
             // Only the signed-out placeholder wears the border.
             account.is_none(),
+            app.focused,
             // Home never turns the model round; that belongs to the cape
             // screen, where the back is the thing being changed.
             None,
@@ -50,7 +51,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         content = content.push(
             text("Opens your browser — nothing to type in.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
     } else if app.instances.is_empty() {
         // Nothing to start yet, so the way forward is making one.

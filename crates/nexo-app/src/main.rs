@@ -8,12 +8,14 @@
 //! pure state transition, which is what keeps the window responsive while a
 //! ~1,000-file install runs underneath it.
 
+mod backdrop;
 mod dropdown;
 mod lively;
 mod motion;
 mod pulse;
 mod screens;
 mod skin3d;
+mod sky;
 mod theme;
 
 use iced::widget::image;
@@ -72,7 +74,7 @@ fn main() -> iced::Result {
         // breaks the higher-ranked lifetime resolution for `view` across the
         // whole builder chain, with an error that points at the chain rather
         // than at this line.
-        .theme(|_state: &App| theme::nexo())
+        .theme(|_state: &App| theme::current())
         // Stops entirely when the window loses focus — see `App::subscription`.
         .subscription(App::subscription)
         // Sets the Wayland `app_id` / X11 `WM_CLASS`. It has to match the
@@ -133,6 +135,8 @@ pub enum Screen {
     /// Phase 7. Cross-instance, unlike the other screens: a hosted server
     /// outlives the "open instance" concept the details screen is scoped to.
     Servers,
+    /// The launcher's theme and background effect.
+    Settings,
     /// Details for one instance, by id.
     Instance(String),
     /// Live log + RCON console for one running Paper server, by id.
@@ -191,6 +195,8 @@ pub enum Armed {
     Migrate(String),
     /// Deleting removes the whole instance folder.
     Delete(String),
+    /// Deleting a custom theme, by its place in `App::custom_themes`.
+    DeleteTheme(usize),
 }
 
 pub struct App {
@@ -312,6 +318,20 @@ pub struct App {
     page_within: bool,
     /// Whether the window has focus. The clock stops when it doesn't.
     focused: bool,
+    /// The particles behind the player model.
+    pub effect: backdrop::Effect,
+    pub custom_themes: Vec<theme::Custom>,
+    pub theme_editor: screens::settings::Editor,
+    /// Numbers slider moves, so only the latest one's timer saves.
+    pub theme_save_due: u64,
+    pub particles: backdrop::Tuning,
+    pub reduce_motion: bool,
+    pub settings: nexo_core::settings::Settings,
+    pub settings_tab: screens::settings::Tab,
+    /// Whether a launch minimised the window, so the game's exit can bring it back.
+    pub minimized_for_game: bool,
+    /// Sessions the Stop button ended, so that doesn't get reported as a dead game.
+    pub stopped_by_user: std::collections::HashSet<String>,
 
     // Files tab.
     files: Vec<nexo_core::browse::Entry>,
@@ -399,6 +419,10 @@ pub struct App {
 
 #[derive(Clone)]
 pub enum Message {
+    /// Picks a theme, and the effect it comes with. Built-in themes first, then custom ones.
+    SetTheme(usize),
+    SetEffect(backdrop::Effect),
+    ThemeEditor(screens::settings::Msg),
     Booted(Result<Nexo, String>),
     Loaded {
         instances: Vec<Instance>,
@@ -648,6 +672,7 @@ pub enum Message {
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
+        let appearance = screens::settings::load();
         let app = Self {
             core: None,
             screen: Screen::Home,
@@ -690,6 +715,16 @@ impl App {
             page_rise: 14.0,
             page_within: false,
             focused: true,
+            effect: appearance.effect,
+            theme_editor: appearance.editor,
+            theme_save_due: 0,
+            particles: appearance.particles,
+            reduce_motion: appearance.reduce_motion,
+            settings: appearance.settings,
+            settings_tab: Default::default(),
+            minimized_for_game: false,
+            stopped_by_user: Default::default(),
+            custom_themes: appearance.customs,
             files: Vec::new(),
             files_at: std::path::PathBuf::new(),
             files_error: None,
@@ -876,8 +911,12 @@ impl App {
                 let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
                 let opening_servers = screen == Screen::Servers && self.screen != Screen::Servers;
                 let opening_console = matches!(&screen, Screen::PaperConsole(_)) && screen != self.screen;
+                let opening_settings = screen == Screen::Settings && self.screen != Screen::Settings;
                 self.screen = screen.clone();
                 let host_task = screens::hosting::on_navigate(self, &screen);
+                if opening_settings {
+                    return Task::batch([Task::done(Message::LoadJavaOptions), host_task, screens::hosting::load_total_memory(self)]);
+                }
                 if opening_console {
                     self.paper_console_log = None;
                     self.paper_console_input.clear();
@@ -1060,6 +1099,7 @@ impl App {
             }
 
             Message::Stop(id) => {
+                self.stopped_by_user.insert(id.clone());
                 if let Some(core) = &self.core {
                     core.stop(&id);
                 }
@@ -1069,6 +1109,8 @@ impl App {
             }
 
             Message::StopInstance(id) => {
+                let sessions = self.instance_sessions(&id);
+                self.stopped_by_user.extend(sessions.into_iter().map(|(key, _)| key));
                 if let Some(core) = &self.core {
                     core.stop_instance(&id);
                 }
@@ -1081,15 +1123,30 @@ impl App {
                 if self.is_busy() && self.preparing == 0 {
                     self.status = Status::Idle;
                 }
-                Task::none()
+                screens::settings::after_game_exit(self)
             }
 
             Message::LoadJavaOptions => {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
+                // Includes any JVM a setting names outside the usual places, or the
+                // pickers would call one that works "not found".
+                let mut named: Vec<_> = self.instances.iter().filter_map(|i| i.java_path.clone()).collect();
+                named.extend(self.settings.java_path.clone());
+                named.retain(|path| nexo_core::java::looks_like_java(path));
                 Task::perform(
-                    async move { nexo_core::java::options(&core.paths).await },
+                    async move {
+                        let mut options = nexo_core::java::options(&core.paths).await;
+                        for path in named {
+                            if !options.iter().any(|java| java.path == path)
+                                && let Some(java) = nexo_core::java::probe(&path).await
+                            {
+                                options.push(java);
+                            }
+                        }
+                        options
+                    },
                     Message::JavaOptionsLoaded,
                 )
             }
@@ -1151,7 +1208,8 @@ impl App {
                 match result {
                     // Re-reads from disk rather than patching the in-memory
                     // copy, so the screen can't drift from what was saved.
-                    Ok(()) => Task::batch([reload(core), Task::done(Message::LoadJavaOptions)]),
+                    // In order: the list needs the path that was just saved.
+                    Ok(()) => reload(core).chain(Task::done(Message::LoadJavaOptions)),
                     Err(err) => {
                         self.status = Status::Error(err);
                         Task::none()
@@ -1852,6 +1910,18 @@ impl App {
                 Task::none()
             }
 
+            Message::SetTheme(index) => {
+                // Picking the theme already on leaves a chosen background alone.
+                if index != theme::selected() {
+                    screens::settings::pick(self, index);
+                }
+                Task::none()
+            }
+            Message::SetEffect(effect) => {
+                screens::settings::set_effect(self, effect);
+                Task::none()
+            }
+            Message::ThemeEditor(msg) => screens::settings::update(self, msg),
             Message::WindowFocused(focused) => {
                 self.focused = focused;
                 Task::none()
@@ -2688,6 +2758,9 @@ impl App {
                 // still ends in GameExited, which clears it again.
                 self.running.insert(key.clone());
                 self.preparing += 1;
+                self.stopped_by_user.remove(&key);
+                let (started, game_up) = tokio::sync::oneshot::channel();
+                let after = screens::settings::after_launch_soon(key.clone(), game_up);
 
                 let run = Task::perform(
                     async move {
@@ -2702,6 +2775,7 @@ impl App {
                             let _ = tx.send(Progress::Failed(err.to_string()));
                         } else {
                             let _ = tx.send(Progress::Done);
+                            let _ = started.send(());
                             // Resolves when the JVM exits, however that
                             // happens — quit from the menu, crash, or Stop.
                             core.running.wait_for_exit(&key).await;
@@ -2711,7 +2785,7 @@ impl App {
                     Message::GameExited,
                 );
 
-                Task::batch([progress, run])
+                Task::batch([progress, run, after])
             }
 
             Message::LaunchProgress(progress) => {
@@ -2740,6 +2814,8 @@ impl App {
                             }
                         } else {
                             self.status = Status::Error(err);
+                            // Nobody reads an error on a hidden window.
+                            return screens::settings::restore(self);
                         }
                     }
                 }
@@ -2861,6 +2937,7 @@ impl App {
             Screen::Accounts => screens::accounts::view(self),
             Screen::Skins => screens::skins::view(self),
             Screen::Servers => screens::hosting::list_view(self),
+            Screen::Settings => screens::settings::view(self),
             Screen::NewServer => screens::server_wizard::view(self),
             Screen::Server(id) => match self.host.server(id) {
                 Some(server) => screens::server_dashboard::view(self, server),
@@ -2884,6 +2961,7 @@ impl App {
         };
 
         let page = self.motion.get(motion_keys::PAGE, 1.0);
+        let on_home = self.screen == Screen::Home;
         let content = iced::widget::column![
             screens::top_bar(self),
             // In a column of its own, always there. A column drops zero-sized children
@@ -2900,13 +2978,26 @@ impl App {
                 ]
             },
             // The page finishes before the list stagger that shares its clock.
-            screens::reveal(body, if self.page_within { 1.0 } else { (page * 1.6).min(1.0) }, self.page_rise),
+            screens::reveal(body, if on_home { 1.0 } else if self.page_within { 1.0 } else { (page * 1.6).min(1.0) }, self.page_rise),
         ]
         .padding(24)
         .width(Fill)
         .height(Fill);
 
-        iced::widget::row![screens::sidebar(self), content]
+        // Behind everything right of the rail, not just the page, so it has no edge
+        // of its own. Always a stack, so leaving Home doesn't rebuild the page's widgets.
+        let backdrop: Element<'_, Message> = if on_home {
+            backdrop::view(self.effect, self.particles, self.focused, Fill)
+        } else {
+            iced::widget::Space::new().width(Fill).height(Fill).into()
+        };
+
+        // Home arrives under one veil across all of it, because a veil on just the
+        // page would show as a dark box against the background.
+        let arriving = if on_home && !self.page_within { 1.0 - (page * 1.6).min(1.0) } else { 0.0 };
+        let veil = iced::widget::container(iced::widget::Space::new()).width(Fill).height(Fill).style(theme::veil(arriving));
+
+        iced::widget::row![screens::sidebar(self), iced::widget::stack![backdrop, content, veil]]
             .height(Fill)
             .into()
     }
@@ -2943,7 +3034,7 @@ impl App {
     /// The accent, for the handful of places that colour a piece of text
     /// directly, where there is no style function to read it out of.
     pub fn accent(&self) -> iced::Color {
-        theme::ACCENT
+        theme::accent()
     }
 
     /// Whether any session of the instance is running.
@@ -3133,7 +3224,8 @@ impl App {
             return iced::Subscription::batch(feeds);
         }
 
-        // The live-log pulse is the only animation left, and it only moves on
+        // Widgets and the Home backdrop request their own frames. The live-log
+        // pulse is the one animation on this clock, and it only moves on
         // the Logs tab of a running instance. Anywhere else a 30 Hz repaint
         // would redraw a screen that never changes.
         let pulse_on_screen = matches!(&self.screen, Screen::Instance(id)
@@ -3177,6 +3269,11 @@ fn dev_screen() -> Task<Message> {
     let later = |m: Message| Task::perform(tokio::time::sleep(std::time::Duration::from_millis(1500)), move |_| m.clone());
     match parts.next() {
         Some("servers") => Task::done(Message::Navigate(Screen::Servers)),
+        Some("settings") => {
+            use screens::settings::{Msg, Tab};
+            let tab = if parts.next() == Some("games") { Tab::Games } else { Tab::Appearance };
+            Task::done(Message::Navigate(Screen::Settings)).chain(Task::done(Message::ThemeEditor(Msg::Tab(tab))))
+        }
         Some("wizard") => {
             let step = Step::ALL[index(parts.next()).min(4)];
             Task::done(Message::Navigate(Screen::NewServer)).chain(later(Message::Host(Msg::GoTo(step))))
@@ -3446,8 +3543,8 @@ fn to_handle(rgba: skin::Rgba) -> image::Handle {
 fn empty_state<'a>(title: &'a str, hint: &'a str) -> Element<'a, Message> {
     iced::widget::container(
         iced::widget::column![
-            iced::widget::text(title).size(18).color(theme::TEXT),
-            iced::widget::text(hint).size(14).color(theme::MUTED),
+            iced::widget::text(title).size(18).color(theme::text()),
+            iced::widget::text(hint).size(14).color(theme::muted()),
         ]
         .spacing(8),
     )
@@ -3473,7 +3570,7 @@ mod motion_frames {
     fn shoot(app: &App, name: &str) {
         let settings = iced::Settings::default();
         let mut ui = Simulator::with_size(settings, iced::Size::new(1100.0, 640.0), app.view());
-        let snapshot = ui.snapshot(&theme::nexo()).unwrap();
+        let snapshot = ui.snapshot(&theme::current()).unwrap();
         snapshot.matches_image(dir().join(format!("{name}.png"))).unwrap();
     }
 
@@ -3503,7 +3600,7 @@ mod motion_frames {
         let element: Element<'_, Message> = iced::widget::container(bar).width(iced::Fill).height(iced::Fill).style(theme::panel).into();
         let mut ui = Simulator::with_size(iced::Settings::default(), iced::Size::new(620.0, 420.0), element);
         let shot = |ui: &mut Simulator<'_, Message>, name: &str| {
-            ui.snapshot(&theme::nexo()).unwrap().matches_image(dir().join(format!("{name}.png"))).unwrap();
+            ui.snapshot(&theme::current()).unwrap().matches_image(dir().join(format!("{name}.png"))).unwrap();
         };
         shot(&mut ui, "w00-closed");
         ui.point_at(Point::new(60.0, 30.0));
@@ -3514,30 +3611,30 @@ mod motion_frames {
         }
         for _ in 0..12 {
             std::thread::sleep(Duration::from_millis(35));
-            let _ = ui.snapshot(&theme::nexo());
+            let _ = ui.snapshot(&theme::current());
         }
         shot(&mut ui, "w05-open");
         // The highlight travels to the row under the cursor.
         ui.point_at(Point::new(90.0, 150.0));
         ui.simulate([Event::Mouse(mouse::Event::CursorMoved { position: Point::new(90.0, 150.0) })]);
-        let _ = ui.snapshot(&theme::nexo());
+        let _ = ui.snapshot(&theme::current());
         std::thread::sleep(Duration::from_millis(40));
         shot(&mut ui, "w06-gliding");
         for _ in 0..12 {
             std::thread::sleep(Duration::from_millis(35));
-            let _ = ui.snapshot(&theme::nexo());
+            let _ = ui.snapshot(&theme::current());
         }
         shot(&mut ui, "w07-hovered");
         // The bottom one closes the first and opens upward.
         ui.point_at(Point::new(60.0, 390.0));
         ui.simulate(simulator::click());
-        let _ = ui.snapshot(&theme::nexo());
+        let _ = ui.snapshot(&theme::current());
         std::thread::sleep(Duration::from_millis(40));
         shot(&mut ui, "w08-swap");
         ui.simulate(simulator::click());
         for _ in 0..12 {
             std::thread::sleep(Duration::from_millis(35));
-            let _ = ui.snapshot(&theme::nexo());
+            let _ = ui.snapshot(&theme::current());
         }
         shot(&mut ui, "w09-up");
     }
@@ -3654,6 +3751,6 @@ mod motion_frames {
         );
         let element: Element<'_, Message> = bar.into();
         let mut ui = Simulator::with_size(iced::Settings::default(), iced::Size::new(216.0, 110.0), element);
-        ui.snapshot(&theme::nexo()).unwrap().matches_image(dir().join("underline.png")).unwrap();
+        ui.snapshot(&theme::current()).unwrap().matches_image(dir().join("underline.png")).unwrap();
     }
 }

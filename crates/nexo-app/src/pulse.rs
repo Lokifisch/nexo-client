@@ -71,7 +71,7 @@ impl<Message> canvas::Program<Message> for Pulse {
         if !self.live {
             frame.fill(
                 &Path::circle(center, DOT_RADIUS),
-                theme::alpha(theme::MUTED, 0.55),
+                theme::alpha(theme::muted(), 0.55),
             );
             return vec![frame.into_geometry()];
         }
@@ -91,7 +91,7 @@ impl<Message> canvas::Program<Message> for Pulse {
             frame.stroke(
                 &Path::circle(center, radius),
                 Stroke::default()
-                    .with_color(theme::alpha(theme::MINT, fade * 0.7))
+                    .with_color(theme::alpha(theme::mint(), fade * 0.7))
                     .with_width(1.0 + fade),
             );
         }
@@ -100,9 +100,9 @@ impl<Message> canvas::Program<Message> for Pulse {
         // come out of rather than as a fourth ring.
         frame.fill(
             &Path::circle(center, DOT_RADIUS * 1.8),
-            theme::alpha(theme::MINT, 0.18),
+            theme::alpha(theme::mint(), 0.18),
         );
-        frame.fill(&Path::circle(center, DOT_RADIUS), theme::MINT);
+        frame.fill(&Path::circle(center, DOT_RADIUS), theme::mint());
 
         vec![frame.into_geometry()]
     }
@@ -120,5 +120,5 @@ pub fn view<'a, Message: 'a>(pulse: Pulse) -> Element<'a, Message> {
 
 /// The colour the label beside it should take, so the two can't drift apart.
 pub fn label_color(live: bool) -> Color {
-    if live { theme::MINT } else { theme::MUTED }
+    if live { theme::mint() } else { theme::muted() }
 }

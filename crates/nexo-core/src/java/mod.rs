@@ -54,13 +54,30 @@ pub async fn find_suitable() -> Option<JavaInstall> {
 /// Runs `java -version` and parses what comes back. Returns `None` for
 /// anything that isn't a working JVM, so callers can throw candidate paths
 /// at this freely.
+/// Whether a path from a config file may be run just to read its version. Launch
+/// and Browse run what the user asked for; listing JVMs happens by itself, so a
+/// copied instance folder mustn't be able to name any program it likes.
+pub fn looks_like_java(path: &Path) -> bool {
+    let named_java = path
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("java") || stem.eq_ignore_ascii_case("javaw"));
+    named_java && path.is_absolute() && path.is_file()
+}
+
 pub async fn probe(java: &Path) -> Option<JavaInstall> {
     // Discovery probes every candidate path, so on Windows this is the spawn
     // that ran most often — and each one flashed its own console window.
-    let output = crate::util::no_window_async(tokio::process::Command::new(java).arg("-version"))
-        .output()
-        .await
-        .ok()?;
+    // With a limit, and killed if it runs out: what gets probed isn't always a JVM,
+    // and something that never exits would hold up a launch for good.
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::util::no_window_async(tokio::process::Command::new(java).arg("-version"))
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
 
     // `java -version` writes to stderr, not stdout — a long-standing quirk.
     let text = String::from_utf8_lossy(&output.stderr);
@@ -218,6 +235,21 @@ pub async fn options(paths: &Paths) -> Vec<JavaInstall> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_real_file_named_java_passes_as_java() {
+        let dir = std::env::temp_dir().join(format!("nexo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["java", "payload.sh"] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        assert!(looks_like_java(&dir.join("java")));
+        assert!(!looks_like_java(&dir.join("payload.sh")), "wrong name");
+        assert!(!looks_like_java(&dir.join("javaw")), "doesn't exist");
+        assert!(!looks_like_java(Path::new("java")), "relative");
+        assert!(!looks_like_java(&dir), "a directory");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn parses_modern_and_legacy_versions() {

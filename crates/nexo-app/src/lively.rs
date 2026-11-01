@@ -26,6 +26,9 @@ const TAU: f32 = 0.055;
 /// The share of the remaining way to cover after `dt` seconds. Depends on time,
 /// not frames, so a slow frame doesn't slow the animation down.
 pub fn step(dt: f32) -> f32 {
+    if crate::motion::reduced() {
+        return 1.0;
+    }
     1.0 - (-dt.clamp(0.0, 0.1) / TAU).exp()
 }
 
@@ -350,7 +353,7 @@ impl<'a, M: 'a, S: Tween> Widget<M, Theme, Renderer> for Eased<'a, M, S> {
         }
 
         if let Event::Window(window::Event::RedrawRequested(now)) = event {
-            let target = (self.target)(&crate::theme::CURRENT, sense);
+            let target = (self.target)(&crate::theme::current(), sense);
             let press_to = if self.nudge && sense.pressed && sense.hovered { 1.0 } else { 0.0 };
             let was_moving = anim.shown.is_some_and(|s| s != target) || anim.press != press_to;
             let k = step(tick(&mut anim.last, *now, was_moving));
@@ -468,7 +471,7 @@ impl<'a, M: Clone + 'a> Button<'a, M> {
 impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
     fn from(button: Button<'a, M>) -> Self {
         let Button { inner, style, enabled } = button;
-        let look = Rc::new(Cell::new(style(&crate::theme::CURRENT, b::Status::Active)));
+        let look = Rc::new(Cell::new(style(&crate::theme::current(), b::Status::Active)));
         let read = look.clone();
         let inner = inner.style(move |_, _| read.get());
         let mut eased = Eased::new(look, inner, move |theme, sense: Sense| {
@@ -535,7 +538,7 @@ impl<'a, M: Clone + 'a> Input<'a, M> {
 impl<'a, M: Clone + 'a> From<Input<'a, M>> for Element<'a, M> {
     fn from(input: Input<'a, M>) -> Self {
         let Input { inner, style, enabled } = input;
-        let look = Rc::new(Cell::new(style(&crate::theme::CURRENT, ti::Status::Active)));
+        let look = Rc::new(Cell::new(style(&crate::theme::current(), ti::Status::Active)));
         let read = look.clone();
         let inner = inner.style(move |_, _| read.get());
         let mut eased = Eased::new(look, inner, move |theme, sense: Sense| {
@@ -596,7 +599,7 @@ impl<'a, M: 'a> Check<'a, M> {
 impl<'a, M: 'a> From<Check<'a, M>> for Element<'a, M> {
     fn from(check: Check<'a, M>) -> Self {
         let Check { inner, checked: is_checked, enabled, style } = check;
-        let look = Rc::new(Cell::new(style(&crate::theme::CURRENT, c::Status::Active { is_checked })));
+        let look = Rc::new(Cell::new(style(&crate::theme::current(), c::Status::Active { is_checked })));
         let read = look.clone();
         let inner = inner.style(move |_, _| read.get());
         Eased::new(look, inner, move |theme, sense: Sense| {
@@ -612,7 +615,7 @@ impl<'a, M: 'a> From<Check<'a, M>> for Element<'a, M> {
 
 /// A finished slider, its knob easing between looks.
 pub fn slider<'a, M: Clone + 'a>(inner: sl::Slider<'a, u32, M>, style: impl Fn(&Theme, sl::Status) -> sl::Style + 'a) -> Element<'a, M> {
-    let look = Rc::new(Cell::new(style(&crate::theme::CURRENT, sl::Status::Active)));
+    let look = Rc::new(Cell::new(style(&crate::theme::current(), sl::Status::Active)));
     let read = look.clone();
     let inner = inner.style(move |_, _| read.get());
     Eased::new(look, inner, move |theme, sense: Sense| {
@@ -633,7 +636,7 @@ pub trait Tint<'a, M> {
 
 impl<'a, M: 'a> Tint<'a, M> for k::Container<'a, M> {
     fn tinted(self, style: impl Fn(&Theme) -> k::Style + 'a) -> Element<'a, M> {
-        let look = Rc::new(Cell::new(style(&crate::theme::CURRENT)));
+        let look = Rc::new(Cell::new(style(&crate::theme::current())));
         let read = look.clone();
         let inner = self.style(move |_| read.get());
         Eased::new(look, inner, move |theme, _| style(theme)).into()
@@ -1071,7 +1074,7 @@ impl<'a, M: 'a> Widget<M, Theme, Renderer> for Toggle<'a, M> {
                     (true, true) => tg::Status::Hovered { is_toggled: self.on },
                     (true, false) => tg::Status::Active { is_toggled: self.on },
                 };
-                let target = (self.style)(&crate::theme::CURRENT, status);
+                let target = (self.style)(&crate::theme::current(), status);
                 let knob_to = if self.on { 1.0 } else { 0.0 };
                 let stretch_to = match (enabled, anim.pressed, over) {
                     (true, true, _) => 1.0,
@@ -1204,7 +1207,7 @@ pub fn eased_scrollbar<'a, M: 'a>(
             },
         }
     };
-    let look = Rc::new(Cell::new(style(&crate::theme::CURRENT, status(Sense::default()))));
+    let look = Rc::new(Cell::new(style(&crate::theme::current(), status(Sense::default()))));
     let read = look.clone();
     let inner = inner.style(move |_, _| read.get());
     let mut eased = Eased::new(look, inner, move |theme, sense| style(theme, status(sense)));

@@ -7,6 +7,7 @@ pub mod paper_console;
 pub mod paper_servers;
 pub mod server_dashboard;
 pub mod server_wizard;
+pub mod settings;
 pub mod skins;
 
 use crate::theme;
@@ -37,6 +38,9 @@ static SKINS: LazyLock<svg::Handle> =
     LazyLock::new(|| icon("M8 3l-5 3 2 4 3-1v12h8V9l3 1 2-4-5-3c-1 2-3 2-4 2s-3 0-4-2z"));
 static SERVERS: LazyLock<svg::Handle> =
     LazyLock::new(|| icon("M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01"));
+static SETTINGS: LazyLock<svg::Handle> = LazyLock::new(|| {
+    icon("M12 5a7 7 0 100 14 7 7 0 000-14zM12 9.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.75 1.75M16.95 16.95l1.75 1.75M5.3 18.7l1.75-1.75M16.95 7.05l1.75-1.75")
+});
 static PLAY: LazyLock<svg::Handle> = LazyLock::new(|| {
     svg::Handle::from_memory(
         &br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white"><path d="M7 4.5v15l12-7.5z"/></svg>"#[..],
@@ -72,6 +76,7 @@ pub fn rail_y(section: &Screen) -> f32 {
         Screen::Instances => 1.0,
         Screen::Accounts => 2.0,
         Screen::Skins => 3.0,
+        Screen::Settings => 5.0,
         _ => 4.0,
     };
     FIRST + index * STEP
@@ -148,6 +153,7 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
         nav_entry("Accounts", &ACCOUNTS, Screen::Accounts),
         nav_entry("Skin & capes", &SKINS, Screen::Skins),
         nav_entry("Servers", &SERVERS, Screen::Servers),
+        nav_entry("Settings", &SETTINGS, Screen::Settings),
         Space::new().height(Fill),
         quick_play(app),
     ]
@@ -229,15 +235,15 @@ fn updater(app: &App) -> Element<'_, Message> {
     // and nothing the running process reports about updates is true any more.
     if app.update_installed {
         return column![
-            text("Update installed").size(12).color(theme::MINT),
-            text("Restart Nexo to use it").size(11).color(theme::MUTED),
+            text("Update installed").size(12).color(theme::mint()),
+            text("Restart Nexo to use it").size(11).color(theme::muted()),
         ]
         .spacing(2)
         .into();
     }
 
     if app.update_busy {
-        return text("Checking…").size(12).color(theme::MUTED).into();
+        return text("Checking…").size(12).color(theme::muted()).into();
     }
 
     match &app.update {
@@ -256,10 +262,10 @@ fn updater(app: &App) -> Element<'_, Message> {
         Some(update) => column![
             text(format!("Nexo {} is out", update.version))
                 .size(12)
-                .color(theme::TEXT),
+                .color(theme::text()),
             text(update.install.reason().unwrap_or_default())
                 .size(11)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         ]
         .spacing(2)
         .into(),
@@ -270,7 +276,7 @@ fn updater(app: &App) -> Element<'_, Message> {
                 format!("v{CURRENT}")
             })
             .size(12)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         )
         .padding(0)
         .style(theme::bare_button)
@@ -306,7 +312,7 @@ fn account_button(app: &App) -> Element<'_, Message> {
             };
 
             button(
-                row![face, text(&account.username).size(14).color(theme::TEXT)]
+                row![face, text(&account.username).size(14).color(theme::text())]
                     .spacing(10)
                     .align_y(iced::Center),
             )
@@ -319,17 +325,16 @@ fn account_button(app: &App) -> Element<'_, Message> {
         // affordance for adding one.
         None => button(
             row![
-                // Magenta rather than the primary violet: it echoes the warm
-                // end of the placeholder silhouette's gradient, so the two
-                // signed-out affordances read as one thing.
-                text("+").size(20).color(theme::MAGENTA),
+                // The ramp's warm pole rather than the accent, to stand apart
+                // from the lit controls around it.
+                text("+").size(20).color(theme::magenta()),
                 text(if app.signing_in {
                     "Signing in…"
                 } else {
                     "Add account"
                 })
                 .size(14)
-                .color(theme::TEXT),
+                .color(theme::text()),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -348,7 +353,7 @@ pub fn status_bar(status: &Status) -> Element<'_, Message> {
         Status::Idle => Space::new().height(0).into(),
         Status::Busy(label) => container(
             // By stage, not by count: "412 of 3000" changes too fast to fade.
-            column![crate::lively::changed(label.replace(|c: char| c.is_ascii_digit(), ""), text(label).size(14)), crate::lively::working(2.0, theme::ACCENT)].spacing(8),
+            column![crate::lively::changed(label.replace(|c: char| c.is_ascii_digit(), ""), text(label).size(14)), crate::lively::working(2.0, theme::accent())].spacing(8),
         )
         .padding([8, 14])
         .width(Fill)
@@ -378,9 +383,9 @@ pub fn header<'a>(
     subtitle: &'a str,
     action: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut left = column![text(title).size(24).font(theme::BOLD).color(theme::TEXT)].spacing(4);
+    let mut left = column![text(title).size(24).font(theme::BOLD).color(theme::text())].spacing(4);
     if !subtitle.is_empty() {
-        left = left.push(text(subtitle).size(13).color(theme::MUTED));
+        left = left.push(text(subtitle).size(13).color(theme::muted()));
     }
 
     let mut bar = row![left.width(Fill)].align_y(iced::Center);

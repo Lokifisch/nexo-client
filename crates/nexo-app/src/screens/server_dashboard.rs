@@ -95,8 +95,8 @@ fn header<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     let chip = row![
         container(crate::lively::changed(public, text(if public { "Public" } else { "This PC" }).size(11)))
             .padding([2, 8])
-            .tinted(theme::pill(if public { theme::MINT } else { theme::MUTED })),
-        text(address.clone()).size(13).font(Font::MONOSPACE).color(theme::TEXT),
+            .tinted(theme::pill(if public { theme::mint() } else { theme::muted() })),
+        text(address.clone()).size(13).font(Font::MONOSPACE).color(theme::text()),
         button(text("Copy").size(12)).padding([4, 10]).style(theme::ghost_button).on_press(host(Msg::Copy(address))),
     ]
     .spacing(10)
@@ -116,12 +116,12 @@ fn header<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
                 .tinted(theme::initial_tile(phase == Phase::Online)),
             column![
                 row![
-                    text(&server.name).size(22).font(theme::BOLD).color(theme::TEXT),
+                    text(&server.name).size(22).font(theme::BOLD).color(theme::text()),
                     container(crate::lively::changed(label, text(label).size(11))).padding([2, 9]).tinted(theme::pill(color)),
                 ]
                 .spacing(10)
                 .align_y(iced::Center),
-                text(format!("{} · {}", server.kind.label(), server.minecraft_version)).size(13).color(theme::MUTED),
+                text(format!("{} · {}", server.kind.label(), server.minecraft_version)).size(13).color(theme::muted()),
             ]
             .spacing(6)
             .width(Fill),
@@ -152,22 +152,22 @@ fn side_panel<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message
 
     let mut list = column![].spacing(6);
     match (&app.host.players, online) {
-        (_, false) => list = list.push(text("The server is offline.").size(13).color(theme::MUTED)),
+        (_, false) => list = list.push(text("The server is offline.").size(13).color(theme::muted())),
         (Some(p), true) if !p.names.is_empty() => {
             for name in &p.names {
                 list = list.push(
-                    container(text(name.as_str()).size(14).color(theme::TEXT)).padding([7, 10]).width(Fill).style(theme::well),
+                    container(text(name.as_str()).size(14).color(theme::text())).padding([7, 10]).width(Fill).style(theme::well),
                 );
             }
         }
-        _ => list = list.push(text("No players online.").size(13).color(theme::MUTED)),
+        _ => list = list.push(text("No players online.").size(13).color(theme::muted())),
     }
 
     let mut col = column![
         row![
-            text("Online players").size(15).font(theme::BOLD).color(theme::TEXT),
+            text("Online players").size(15).font(theme::BOLD).color(theme::text()),
             Space::new().width(Fill),
-            text(count).size(13).color(theme::MUTED),
+            text(count).size(13).color(theme::muted()),
         ],
         invite,
         scrollable(list).height(Fill),
@@ -202,8 +202,8 @@ fn side_panel<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message
 
 fn section<'a>(heading: &'a str, sub: &'a str) -> Element<'a, Message> {
     column![
-        text(heading).size(20).font(theme::BOLD).color(theme::TEXT),
-        text(sub).size(13).color(theme::MUTED)
+        text(heading).size(20).font(theme::BOLD).color(theme::text()),
+        text(sub).size(13).color(theme::muted())
     ]
     .spacing(4)
     .into()
@@ -225,15 +225,15 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
             "CPU usage",
             latest.map_or("–".into(), |s| format!("{:.1}%", s.cpu_percent)),
             latest.map_or(0.0, |s| s.cpu_percent / 100.0),
-            theme::MAGENTA,
+            theme::magenta(),
         ),
         tile(
             "RAM usage",
             latest.map_or("–".into(), |s| format!("{} MB", s.memory_mb)),
             latest.map_or(0.0, |s| s.memory_mb as f32 / server.memory_mb.max(1) as f32),
-            theme::MINT,
+            theme::mint(),
         ),
-        tile("Uptime", uptime, if online { 1.0 } else { 0.0 }, theme::ACCENT),
+        tile("Uptime", uptime, if online { 1.0 } else { 0.0 }, theme::accent()),
     ]
     .spacing(12);
 
@@ -255,7 +255,7 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
         None => Vec::new(),
     };
     let graph: Element<'_, Message> = if samples.len() < 2 {
-        container(text(if online { "Collecting samples…" } else { "Start the server to see its performance." }).size(13).color(theme::MUTED))
+        container(text(if online { "Collecting samples…" } else { "Start the server to see its performance." }).size(13).color(theme::muted()))
             .width(Fill)
             .height(Fill)
             .align_x(iced::Center)
@@ -275,7 +275,7 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
     };
 
     let legend = |c: Color, l: &'static str| {
-        row![container(Space::new()).width(10).height(10).style(theme::fill(c)), text(l).size(12).color(theme::MUTED)]
+        row![container(Space::new()).width(10).height(10).style(theme::fill(c)), text(l).size(12).color(theme::muted())]
             .spacing(6)
             .align_y(iced::Center)
     };
@@ -285,10 +285,10 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
         tiles,
         container(
             column![
-                row![text("Performance graph").size(15).font(theme::BOLD).color(theme::TEXT), Space::new().width(Fill), ranges]
+                row![text("Performance graph").size(15).font(theme::BOLD).color(theme::text()), Space::new().width(Fill), ranges]
                     .align_y(iced::Center),
                 graph,
-                row![legend(theme::MAGENTA, "CPU (% of this PC)"), legend(theme::MINT, "RAM (MB)")].spacing(18),
+                row![legend(theme::magenta(), "CPU (% of this PC)"), legend(theme::mint(), "RAM (MB)")].spacing(18),
             ]
             .spacing(12),
         )
@@ -302,9 +302,9 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
 
 fn tile<'a>(label: &'a str, value: String, share: f32, color: Color) -> Element<'a, Message> {
     let share = share.clamp(0.0, 1.0);
-    let bar = crate::lively::meter(share, 4.0, color, theme::CONTROL);
+    let bar = crate::lively::meter(share, 4.0, color, theme::control());
     container(
-        column![text(label).size(13).color(theme::MUTED), crate::lively::ticking(value.clone(), text(value).size(26).font(theme::BOLD)), bar].spacing(8),
+        column![text(label).size(13).color(theme::muted()), crate::lively::ticking(value.clone(), text(value).size(26).font(theme::BOLD)), bar].spacing(8),
     )
     .padding(16)
     .width(Fill)
@@ -381,7 +381,7 @@ impl<Message> canvas::Program<Message> for Graph {
             let y = top + h * i as f32 / 4.0;
             frame.stroke(
                 &Path::line(Point::new(left, y), Point::new(right, y)),
-                Stroke::default().with_color(theme::LINE).with_width(1.0),
+                Stroke::default().with_color(theme::line()).with_width(1.0),
             );
             let share = 1.0 - i as f32 / 4.0;
             label(&mut frame, format!("{:.0}%", share * 100.0), Point::new(4.0, y - 7.0));
@@ -427,8 +427,8 @@ impl<Message> canvas::Program<Message> for Graph {
             frame.stroke(&line, Stroke::default().with_color(color).with_width(2.0));
         };
         let mem = self.memory_mb.max(1) as f32;
-        series(&|s| s.memory_mb as f32 / mem, theme::MINT, &mut frame);
-        series(&|s| s.cpu_percent / 100.0, theme::MAGENTA, &mut frame);
+        series(&|s| s.memory_mb as f32 / mem, theme::mint(), &mut frame);
+        series(&|s| s.cpu_percent / 100.0, theme::magenta(), &mut frame);
         vec![frame.into_geometry()]
     }
 }
@@ -437,7 +437,7 @@ fn label(frame: &mut Frame, content: String, at: Point) {
     frame.fill_text(canvas::Text {
         content,
         position: at,
-        color: theme::MUTED,
+        color: theme::muted(),
         size: 11.0.into(),
         ..Default::default()
     });
@@ -474,10 +474,10 @@ fn console<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
             .on_press(host(Msg::Filter(f)))
     };
     let chips = row![
-        chip(Filter::All, format!("All ({})", lines.len()), theme::TEXT),
-        chip(Filter::Errors, format!("Errors ({})", count(Filter::Errors)), theme::DANGER),
-        chip(Filter::Warnings, format!("Warnings ({})", count(Filter::Warnings)), theme::AMBER),
-        chip(Filter::Info, format!("Info ({})", count(Filter::Info)), theme::ACCENT),
+        chip(Filter::All, format!("All ({})", lines.len()), theme::text()),
+        chip(Filter::Errors, format!("Errors ({})", count(Filter::Errors)), theme::danger()),
+        chip(Filter::Warnings, format!("Warnings ({})", count(Filter::Warnings)), theme::amber()),
+        chip(Filter::Info, format!("Info ({})", count(Filter::Info)), theme::accent()),
     ]
     .spacing(6);
 
@@ -511,9 +511,9 @@ fn console<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         .on_press_maybe((online && !app.host.command.trim().is_empty()).then_some(host(Msg::SendCommand)));
 
     let mut col = column![
-        row![chips, Space::new().width(Fill), text(hosting_console_name()).size(12).color(theme::MUTED)].align_y(iced::Center),
+        row![chips, Space::new().width(Fill), text(hosting_console_name()).size(12).color(theme::muted())].align_y(iced::Center),
         container(
-            scrollable(container(text(body).size(11).font(Font::MONOSPACE).color(theme::TEXT)).padding(12))
+            scrollable(container(text(body).size(11).font(Font::MONOSPACE).color(theme::text())).padding(12))
                 .anchor_bottom()
                 .width(Fill)
                 .height(Fill),
@@ -525,7 +525,7 @@ fn console<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     .spacing(12)
     .height(Fill);
     if let Some(reply) = &app.host.reply {
-        col = col.push(container(text(reply.as_str()).size(12).font(Font::MONOSPACE).color(theme::TEXT)).padding(10).width(Fill).style(theme::well));
+        col = col.push(container(text(reply.as_str()).size(12).font(Font::MONOSPACE).color(theme::text())).padding(10).width(Fill).style(theme::well));
     }
     col.into()
 }
@@ -559,7 +559,7 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
                 list = list.push(
                     container(
                         row![
-                            text(player.as_str()).size(15).color(theme::TEXT).width(Fill),
+                            text(player.as_str()).size(15).color(theme::text()).width(Fill),
                             act("Make operator", "op", false),
                             act("Remove operator", "deop", false),
                             act("Kick", "kick", true),
@@ -577,7 +577,7 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
             list = list.push(
                 text(if online { "Nobody is online right now." } else { "Start the server to manage players." })
                     .size(13)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             )
         }
     }
@@ -586,7 +586,7 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         section("Players", "Who's on, and who may join. Every action is a console command, so it shows up in the console too."),
         container(
             column![
-                text("Any player, online or not").size(14).font(theme::BOLD).color(theme::TEXT),
+                text("Any player, online or not").size(14).font(theme::BOLD).color(theme::text()),
                 row![
                     text_input("Minecraft username", &app.host.player_input)
                         .on_input(|s| host(Msg::PlayerInput(s)))
@@ -604,12 +604,12 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         )
         .padding(16)
         .style(theme::well),
-        text("Online now").size(14).font(theme::BOLD).color(theme::TEXT),
+        text("Online now").size(14).font(theme::BOLD).color(theme::text()),
         scrollable(list).height(Fill),
     ]
     .spacing(14);
     if let Some(reply) = &app.host.reply {
-        col = col.push(text(reply.as_str()).size(12).color(theme::MUTED));
+        col = col.push(text(reply.as_str()).size(12).color(theme::muted()));
     }
     col.into()
 }
@@ -618,7 +618,7 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
 
 fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     let Some(s) = &app.host.settings else {
-        return text("Reading server.properties…").size(13).color(theme::MUTED).into();
+        return text("Reading server.properties…").size(13).color(theme::muted()).into();
     };
 
     let flag = |label: &'static str, key: &'static str| {
@@ -627,14 +627,14 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
                 .size(18)
                 .style(theme::toggle)
                 .on_toggle(move |on| host(Msg::SetProp(key, on.to_string()))),
-            text(label).size(14).color(theme::TEXT),
+            text(label).size(14).color(theme::text()),
         ]
         .spacing(10)
         .align_y(iced::Center)
     };
     let number = |label: &'static str, key: &'static str, hint: &'static str| {
         column![
-            text(label).size(13).color(theme::TEXT),
+            text(label).size(13).color(theme::text()),
             text_input(hint, s.get(key))
                 .on_input(move |v| host(Msg::SetProp(key, v.chars().filter(char::is_ascii_digit).take(4).collect())))
                 .padding(9)
@@ -644,7 +644,7 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
     };
     let pick = |label: &'static str, key: &'static str, options: &'static [&'static str]| {
         column![
-            text(label).size(13).color(theme::TEXT),
+            text(label).size(13).color(theme::text()),
             dropdown(options, hosting::label_of(options, s.get(key)), move |v: &'static str| {
                 host(Msg::SetProp(key, v.to_lowercase()))
             })
@@ -656,7 +656,7 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
 
     let gameplay = container(
         column![
-            text("Gameplay").size(16).font(theme::BOLD).color(theme::TEXT),
+            text("Gameplay").size(16).font(theme::BOLD).color(theme::text()),
             pick("Game mode", "gamemode", &GAME_MODES),
             flag("Force game mode on join", "force-gamemode"),
             pick("Difficulty", "difficulty", &DIFFICULTIES),
@@ -664,7 +664,7 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
             flag("Allow flight (stops fly-kicks with some mods)", "allow-flight"),
             flag("Whitelist — only listed players may join", "white-list"),
             column![
-                text("Server message (MOTD)").size(13).color(theme::TEXT),
+                text("Server message (MOTD)").size(13).color(theme::text()),
                 text_input("Shown in the server list", s.get("motd"))
                     .on_input(|v| host(Msg::SetProp("motd", v)))
                     .padding(9)
@@ -680,11 +680,11 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
 
     let performance = container(
         column![
-            text("Performance").size(16).font(theme::BOLD).color(theme::TEXT),
+            text("Performance").size(16).font(theme::BOLD).color(theme::text()),
             row![number("Max players", "max-players", "20"), number("Spawn protection", "spawn-protection", "16")].spacing(12),
             row![number("View distance", "view-distance", "10"), number("Simulation distance", "simulation-distance", "10")]
                 .spacing(12),
-            text("Memory").size(13).color(theme::TEXT),
+            text("Memory").size(13).color(theme::text()),
             ram_picker(app, server.kind, s.memory_mb, |mb| host(Msg::SettingsMemory(mb))),
         ]
         .spacing(14),
@@ -734,10 +734,10 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     let tunnel = container(
         row![
             column![
-                text("Public address").size(15).font(theme::BOLD).color(theme::TEXT),
+                text("Public address").size(15).font(theme::BOLD).color(theme::text()),
                 text("Through e4mc's relay, so friends join without port forwarding. The address changes each time it opens, and closes when Nexo does.")
                     .size(12)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             ]
             .spacing(4)
             .width(Fill),
@@ -764,7 +764,7 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
                 text(dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default())
                     .size(13)
                     .font(Font::MONOSPACE)
-                    .color(theme::TEXT)
+                    .color(theme::text())
                     .width(Fill),
                 button(text("Open folder").size(13))
                     .padding([8, 14])
@@ -782,10 +782,10 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         container(
             row![
                 column![
-                    text("Delete server").size(15).font(theme::BOLD).color(theme::DANGER),
+                    text("Delete server").size(15).font(theme::BOLD).color(theme::danger()),
                     text(if running { "Stop it first." } else { "Removes the folder, world included. There is no undo." })
                         .size(12)
-                        .color(theme::MUTED),
+                        .color(theme::muted()),
                 ]
                 .spacing(4)
                 .width(Fill),

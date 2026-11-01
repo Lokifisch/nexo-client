@@ -21,15 +21,15 @@ use nexo_core::paper_server::{status, PaperServer};
 
 pub fn card<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
     let (status_label, status_color) = if server.status == status::RUNNING {
-        (format!("Running on localhost:{}", server.port), theme::MINT)
+        (format!("Running on localhost:{}", server.port), theme::mint())
     } else if server.status == status::ERROR {
-        ("Error — check the log".to_string(), theme::DANGER)
+        ("Error — check the log".to_string(), theme::danger())
     } else {
-        (status_label_for(&server.status), theme::MUTED)
+        (status_label_for(&server.status), theme::muted())
     };
 
     let mut details = column![
-        text(&server.name).size(17).color(theme::TEXT),
+        text(&server.name).size(17).color(theme::text()),
         text(status_label).size(12).color(status_color),
         text(format!(
             "Minecraft {}{}",
@@ -40,7 +40,7 @@ pub fn card<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
                 .unwrap_or_default()
         ))
         .size(11)
-        .color(theme::MUTED),
+        .color(theme::muted()),
     ]
     .spacing(3)
     .width(Fill);
@@ -52,7 +52,7 @@ pub fn card<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
     if server.friend_hosting.tunnel_active
         && let Some(domain) = &server.friend_hosting.domain
     {
-        details = details.push(text(format!("Shared with friends: {domain}")).size(11).color(theme::MINT));
+        details = details.push(text(format!("Shared with friends: {domain}")).size(11).color(theme::mint()));
     }
 
     let action: Element<'_, Message> = if server.status == status::RUNNING {

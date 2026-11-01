@@ -240,7 +240,7 @@ where
                 shell.request_redraw();
             }
             Event::Window(window::Event::RedrawRequested(now)) => {
-                let target = theme::input(&theme::CURRENT, if state.open {
+                let target = theme::input(&theme::current(), if state.open {
                     ti::Status::Focused { is_hovered: over }
                 } else if over {
                     ti::Status::Hovered
@@ -250,7 +250,7 @@ where
                 let open_to = if state.open { 1.0 } else { 0.0 };
                 let k = step(tick(&mut state.last, *now, true));
                 state.amount = num(state.amount, open_to, k, 0.004);
-                state.glide = num(state.glide, state.active as f32, k * 1.4, 0.004);
+                state.glide = num(state.glide, state.active as f32, (k * 1.4).min(1.0), 0.004);
                 state.scroll = num(state.scroll, state.scroll_to, k, 0.3);
                 if state.showing != self.label {
                     state.showing = self.label.clone();
@@ -285,7 +285,7 @@ where
     ) {
         let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
-        let look = state.look.unwrap_or_else(|| theme::input(&theme::CURRENT, ti::Status::Active));
+        let look = state.look.unwrap_or_else(|| theme::input(&theme::current(), ti::Status::Active));
         renderer.fill_quad(renderer::Quad { bounds, border: look.border, ..Default::default() }, look.background);
 
         const CHEVRON_SIZE: f32 = 12.0;
@@ -308,7 +308,7 @@ where
         adv_svg::Renderer::draw_svg(
             renderer,
             adv_svg::Svg::new(CHEVRON.clone())
-                .color(theme::MUTED.toward(theme::TEXT, state.amount))
+                .color(theme::muted().toward(theme::text(), state.amount))
                 .rotation(std::f32::consts::PI * state.amount),
             icon,
             *viewport,
@@ -511,11 +511,11 @@ impl<T: ToString + Clone, M> overlay::Overlay<M, Theme, Renderer> for List<'_, T
         renderer.fill_quad(
             renderer::Quad {
                 bounds: shown,
-                border: Border { radius: 10.0.into(), width: 1.0, color: faded(theme::CONTROL, amount) },
+                border: Border { radius: 10.0.into(), width: 1.0, color: faded(theme::control(), amount) },
                 ..Default::default()
             },
             // Solid well before the rows arrive, so nothing behind shows through them.
-            Background::Color(faded(theme::RAISED, (amount * 2.5).min(1.0))),
+            Background::Color(faded(theme::raised(), (amount * 2.5).min(1.0))),
         );
 
         let scroll = self.state.scroll;
@@ -556,7 +556,7 @@ impl<T: ToString + Clone, M> overlay::Overlay<M, Theme, Renderer> for List<'_, T
                     );
                 }
                 let lit = (1.0 - (self.state.glide - index as f32).abs()).clamp(0.0, 1.0);
-                let color = if picked { theme::TEXT } else { theme::MUTED.toward(theme::TEXT, lit) };
+                let color = if picked { theme::text() } else { theme::muted().toward(theme::text(), lit) };
                 let x = bounds.x + self.pad_x + INSET + (1.0 - arrived) * 8.0;
                 renderer.fill_text(
                     text_of(
@@ -600,7 +600,7 @@ impl<T: ToString + Clone, M> overlay::Overlay<M, Theme, Renderer> for List<'_, T
                         border: Border { radius: 1.5.into(), ..Default::default() },
                         ..Default::default()
                     },
-                    Background::Color(faded(theme::MUTED, 0.5 * amount)),
+                    Background::Color(faded(theme::muted(), 0.5 * amount)),
                 );
             }
         });
@@ -687,10 +687,10 @@ mod tests {
         let mut ui = Simulator::with_size(iced::Settings::default(), Size::new(400.0, 400.0), element);
         ui.point_at(Point::new(50.0, 190.0));
         ui.simulate(simulator::click());
-        let _ = ui.snapshot(&theme::nexo());
+        let _ = ui.snapshot(&theme::current());
         ui.point_at(Point::new(50.0, 15.0));
         ui.simulate(simulator::click());
-        let _ = ui.snapshot(&theme::nexo());
+        let _ = ui.snapshot(&theme::current());
         // Neither open now: the click on the other field closed the first and no more.
         ui.tap_key(keyboard::Key::Named(keyboard::key::Named::Enter));
         assert_eq!(ui.into_messages().count(), 0);

@@ -44,6 +44,7 @@ fn signed_in(app: &App) -> Element<'_, Message> {
                 // No border here: this is a real skin, and the ring exists to
                 // mark the signed-out placeholder.
                 false,
+                app.focused,
                 app.cape_reveal,
             ))
             .width(240)
@@ -83,7 +84,7 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
     // The arm width is part of the skin, not a separate preference — the same
     // texture reads wrong on the other model, so it is chosen at upload time.
     let variant = row![
-        text("Model").size(13).color(theme::MUTED).width(90),
+        text("Model").size(13).color(theme::muted()).width(90),
         button(text("Classic").size(13))
             .padding([6, 13])
             .style(theme::nav_chip(model == SkinModel::Classic))
@@ -98,10 +99,10 @@ fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
 
     container(
         column![
-            text("Skin").size(17).color(theme::TEXT),
+            text("Skin").size(17).color(theme::text()),
             text("Drag the model to turn it. Upload a 64×64 PNG; slim gives the narrower three-pixel arms.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
             Space::new().height(4),
             variant,
             Space::new().height(4),
@@ -132,10 +133,10 @@ fn library_card(app: &App) -> Element<'_, Message> {
     const COLUMNS: usize = 4;
 
     let body = column![
-        text("Your skins").size(17).color(theme::TEXT),
+        text("Your skins").size(17).color(theme::text()),
         text("Kept automatically whenever a skin is worn. Click one to put it back on.")
             .size(12)
-            .color(theme::MUTED),
+            .color(theme::muted()),
     ]
     .spacing(3);
 
@@ -157,7 +158,7 @@ fn library_card(app: &App) -> Element<'_, Message> {
             tiles.push(
                 container(
                     column![
-                        text("Delete?").size(12).color(theme::TEXT),
+                        text("Delete?").size(12).color(theme::text()),
                         row![
                             button(text("Yes").size(11))
                                 .padding([4, 8])
@@ -228,7 +229,7 @@ fn library_card(app: &App) -> Element<'_, Message> {
     let note: Element<'_, Message> = if app.saved_skins.is_empty() {
         text("Nothing saved yet — the skin you're wearing is added automatically.")
             .size(12)
-            .color(theme::MUTED)
+            .color(theme::muted())
             .into()
     } else {
         Space::new().height(0).into()
@@ -265,10 +266,10 @@ fn capes_card(app: &App) -> Element<'_, Message> {
 
     let body = column![row![
         column![
-            text("Capes").size(17).color(theme::TEXT),
+            text("Capes").size(17).color(theme::text()),
             text("Only capes your account already owns can be worn.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         ]
         .spacing(3)
         .width(Fill),
@@ -335,7 +336,7 @@ fn capes_card(app: &App) -> Element<'_, Message> {
     let note: Element<'_, Message> = if app.capes.is_empty() {
         text("No capes on this account yet.")
             .size(12)
-            .color(theme::MUTED)
+            .color(theme::muted())
             .into()
     } else {
         Space::new().height(0).into()
@@ -355,9 +356,9 @@ fn cape_tile<'a>(
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
     let caption = if worn {
-        text("Worn").size(11).color(theme::MINT)
+        text("Worn").size(11).color(theme::mint())
     } else {
-        text(label).size(11).color(theme::MUTED)
+        text(label).size(11).color(theme::muted())
     };
 
     button(

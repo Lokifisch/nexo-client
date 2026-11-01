@@ -27,6 +27,7 @@ pub mod paths;
 pub mod running;
 pub mod self_update;
 pub mod server_ping;
+pub mod settings;
 pub mod shared_store;
 pub mod skin;
 pub mod skin_library;
@@ -190,17 +191,37 @@ impl Nexo {
         }
         // Downloads a runtime if the machine has none new enough, so a fresh
         // install doesn't stop at "go and install Java first". An existing
-        // system JVM is always preferred, and an instance that names its own
-        // is never overridden.
-        let java = java::ensure(
+        // system JVM is always preferred, and a JVM named by the instance or the
+        // launcher's settings is never overridden.
+        let settings = settings::Settings::load(&self.paths);
+        let mut java = java::ensure(
             &self.http,
             &self.paths,
-            instance.java_path.as_deref(),
+            settings.java_for(&instance),
             progress,
         )
         .await?;
 
         let version = self.installer.install(&instance, progress).await?;
+        // Only the version knows what it needs, and an old JVM would otherwise
+        // start and die with an error naming class file versions.
+        if let Some(needed) = &version.java_version
+            && java.major < needed.major_version
+        {
+            // Automatic can still fetch what this version wants; a JVM somebody
+            // chose is never swapped behind their back.
+            if settings.java_for(&instance).is_none() {
+                java = java::adoptium::ensure(&self.http, &self.paths, needed.major_version, progress).await?;
+            } else {
+                return Err(Error::invalid(format!(
+                    "Minecraft {} needs Java {}, but {} is Java {}. Pick another Java in Settings or on the instance",
+                    instance.game_version,
+                    needed.major_version,
+                    java.path.display(),
+                    java.major,
+                )));
+            }
+        }
         if cancelled(&prepare) {
             return Err(Error::invalid(running::LAUNCH_CANCELLED));
         }
@@ -224,8 +245,8 @@ impl Nexo {
         let options = LaunchOptions {
             account,
             java: java.path,
-            memory_mb: instance.memory_mb.unwrap_or(minecraft::DEFAULT_MEMORY_MB),
-            extra_jvm_args: Vec::new(),
+            memory_mb: settings.memory_for(&instance),
+            extra_jvm_args: settings.jvm_arg_list(),
         };
 
         if cancelled(&prepare) {

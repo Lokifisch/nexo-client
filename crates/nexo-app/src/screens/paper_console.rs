@@ -19,13 +19,13 @@ pub fn view<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
         Some((body, truncated)) => {
             let mut head = row![Space::new().width(Fill)];
             if *truncated {
-                head = head.push(text("showing the end only").size(11).color(theme::MUTED));
+                head = head.push(text("showing the end only").size(11).color(theme::muted()));
             }
             column![
                 head,
                 container(
                     scrollable(
-                        container(text(body.as_str()).size(11).font(Font::MONOSPACE).color(theme::TEXT))
+                        container(text(body.as_str()).size(11).font(Font::MONOSPACE).color(theme::text()))
                             .padding(12)
                     )
                     // Same reasoning as the instance Logs tab: a live log
@@ -59,7 +59,7 @@ pub fn view<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
 
     let mut body = column![
         row![
-            text(format!("{} — Console", server.name)).size(24).color(theme::TEXT),
+            text(format!("{} — Console", server.name)).size(24).color(theme::text()),
             Space::new().width(Fill),
             button(text("Back").size(13))
                 .padding([6, 12])
@@ -75,7 +75,7 @@ pub fn view<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
 
     if let Some(response) = &app.paper_console_response {
         body = body.push(
-            container(text(response.as_str()).size(12).font(Font::MONOSPACE).color(theme::TEXT))
+            container(text(response.as_str()).size(12).font(Font::MONOSPACE).color(theme::text()))
                 .padding(10)
                 .width(Fill)
                 .style(theme::well),
@@ -86,7 +86,7 @@ pub fn view<'a>(app: &'a App, server: &'a PaperServer) -> Element<'a, Message> {
 }
 
 fn centered_note(message: &str) -> Element<'_, Message> {
-    container(text(message.to_string()).size(12).color(theme::MUTED))
+    container(text(message.to_string()).size(12).color(theme::muted()))
         .width(Fill)
         .height(Fill)
         .align_x(iced::Center)

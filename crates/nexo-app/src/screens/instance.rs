@@ -72,7 +72,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .tinted(theme::initial_tile(true));
 
     let heading = column![
-        text(&instance.name).size(20).font(theme::BOLD).color(theme::TEXT),
+        text(&instance.name).size(20).font(theme::BOLD).color(theme::text()),
         text(format!(
             "Minecraft {} · {}{}",
             instance.game_version,
@@ -84,7 +84,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                 .unwrap_or_default()
         ))
         .size(12)
-        .color(theme::MUTED),
+        .color(theme::muted()),
     ]
     .spacing(2)
     .width(Fill);
@@ -182,7 +182,7 @@ fn launch_control<'a>(
     for (key, name) in app.instance_sessions(&instance.id) {
         col = col.push(
             row![
-                text(name).size(12).color(theme::MINT),
+                text(name).size(12).color(theme::mint()),
                 button(text("STOP").size(12).font(theme::BOLD).center())
                     .width(96)
                     .padding([10, 0])
@@ -237,7 +237,7 @@ fn launch_control<'a>(
         col = col.push(
             column![
                 play,
-                text("Sign in first").size(11).color(theme::MUTED),
+                text("Sign in first").size(11).color(theme::muted()),
             ]
             .spacing(4)
             .align_x(iced::Center),
@@ -254,10 +254,10 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
     let mut body = column![
         row![
             column![
-                text("Nexo Mod").size(17).color(theme::TEXT),
+                text("Nexo Mod").size(17).color(theme::text()),
                 text("The client-side half — cosmetics, position obscuring, macros.")
                     .size(12)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             ]
             .spacing(3)
             .width(Fill),
@@ -280,11 +280,11 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
         // rather than pressing the retry sitting right underneath.
         None => {
             let (line, tone) = match (&app.nexo_release_error, installed) {
-                (Some(err), _) => (err.clone(), theme::DANGER),
+                (Some(err), _) => (err.clone(), theme::danger()),
                 (None, Some(current)) => {
-                    (format!("Installed — {}", current.version_number), theme::MUTED)
+                    (format!("Installed — {}", current.version_number), theme::muted())
                 }
-                (None, None) => ("Checking for the latest release…".to_string(), theme::MUTED),
+                (None, None) => ("Checking for the latest release…".to_string(), theme::muted()),
             };
             let retry = if app.nexo_release_error.is_some() {
                 "Try again"
@@ -326,10 +326,10 @@ fn release_section<'a>(
         && let Some(reason) = release.manifest.incompatibility(instance)
     {
         return column![
-            text(reason).size(12).color(theme::MUTED),
+            text(reason).size(12).color(theme::muted()),
             text("Create an instance on that version to use Nexo Mod.")
                 .size(11)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         ]
         .spacing(4)
         .into();
@@ -356,7 +356,7 @@ fn release_section<'a>(
                     current.version_number
                 ))
                 .size(12)
-                .color(theme::MINT)
+                .color(theme::mint())
                 .into()
             } else {
                 text(format!(
@@ -364,7 +364,7 @@ fn release_section<'a>(
                     current.version_number, release.manifest.mod_version
                 ))
                 .size(12)
-                .color(theme::TEXT)
+                .color(theme::text())
                 .into()
             }
         }
@@ -375,7 +375,7 @@ fn release_section<'a>(
             release.manifest.minecraft_version
         ))
         .size(12)
-        .color(theme::MINT)
+        .color(theme::mint())
         .into(),
     };
 
@@ -385,7 +385,7 @@ fn release_section<'a>(
     // button below is gone in that case, so say why rather than leaving a
     // card that looks broken.
     if let Some(reason) = release.manifest.incompatibility(instance) {
-        section = section.push(text(reason).size(11).color(theme::MUTED));
+        section = section.push(text(reason).size(11).color(theme::muted()));
         // The usual cause is a release for a newer Minecraft; migrating
         // updates Nexo Mod along with everything else.
         let target = &release.manifest.minecraft_version;
@@ -418,7 +418,7 @@ fn release_section<'a>(
                 // the consequence, and holds no matter what a release ships.
                 text("Pick an edition. This decides what the mod is allowed to do on a server, not how much of it you get.")
                     .size(11)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 tiles,
             ]
             .spacing(8),
@@ -435,7 +435,7 @@ fn release_section<'a>(
                 "Installing {selected} removes the {current} jar — Minecraft won't start with both."
             ))
             .size(11)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
     }
 
@@ -484,20 +484,20 @@ fn edition_tile<'a>(
     let is_selected = build.edition == selected;
 
     let mut inner = column![
-        text(build.name.as_str()).size(14).color(theme::TEXT),
+        text(build.name.as_str()).size(14).color(theme::text()),
         text(build.edition.rules_note())
             .size(11)
-            .color(if is_selected { theme::TEXT } else { theme::MUTED }),
+            .color(if is_selected { theme::text() } else { theme::muted() }),
     ]
     .spacing(4);
 
     // Straight from the manifest rather than a copy kept here, which would
     // start lying the first time a release changes what's in a jar.
     if let Some(description) = &build.description {
-        inner = inner.push(text(description.as_str()).size(11).color(theme::MUTED));
+        inner = inner.push(text(description.as_str()).size(11).color(theme::muted()));
     }
     if installed == Some(build.edition) {
-        inner = inner.push(text("Currently installed").size(10).color(theme::MINT));
+        inner = inner.push(text("Currently installed").size(10).color(theme::mint()));
     }
 
     button(inner.width(Fill))
@@ -551,7 +551,7 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
         row![
             text(format!("Content ({})", instance.mods.len()))
                 .size(16)
-                .color(theme::TEXT)
+                .color(theme::text())
                 .width(Fill),
             actions,
         ]
@@ -565,13 +565,13 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
         body = body.push(
             text("Nothing installed yet.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
     } else if matches.is_empty() {
         body = body.push(
             text(format!("Nothing installed matches \"{}\".", app.content_query.trim()))
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
     } else {
         for (index, installed) in matches.into_iter().enumerate() {
@@ -580,11 +580,11 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
                     icon_or_placeholder(app, &installed.project_id, 32.0),
                     column![
                         text(&installed.name).size(14).color(if installed.enabled {
-                            theme::TEXT
+                            theme::text()
                         } else {
-                            theme::MUTED
+                            theme::muted()
                         }),
-                        text(&installed.file_name).size(11).color(theme::MUTED),
+                        text(&installed.file_name).size(11).color(theme::muted()),
                     ]
                     .spacing(2)
                     .width(Fill),
@@ -602,7 +602,7 @@ fn installed_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messa
                             }
                         })
                     ),
-                    text(&installed.version_number).size(12).color(theme::MUTED),
+                    text(&installed.version_number).size(12).color(theme::muted()),
                     button(text("Remove").size(12))
                         .padding([5, 10])
                         .style(theme::danger_button)
@@ -650,12 +650,12 @@ fn browser<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
 
     let mut results = column![].spacing(8).width(Fill);
     if app.content_searching {
-        results = results.push(text("Searching…").size(12).color(theme::MUTED));
+        results = results.push(text("Searching…").size(12).color(theme::muted()));
     } else if app.content_results.is_empty() {
         results = results.push(
             text("Nothing found for this instance's version and loader.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
     } else {
         for (index, hit) in app.content_results.iter().enumerate() {
@@ -699,7 +699,7 @@ fn filter_panel<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
             .align_y(iced::Center)
     };
 
-    let mut list = column![text("FILTERS").size(11).font(theme::BOLD).color(theme::MUTED)]
+    let mut list = column![text("FILTERS").size(11).font(theme::BOLD).color(theme::muted())]
         .spacing(0)
         .width(Fill);
     list = list.push(Space::new().height(6));
@@ -748,7 +748,7 @@ fn result_row<'a>(
     let mut name = row![text(&hit.title)
         .size(15)
         .font(theme::BOLD)
-        .color(theme::TEXT)
+        .color(theme::text())
         .wrapping(iced::widget::text::Wrapping::None)]
         .spacing(6)
         .align_y(iced::Center);
@@ -756,7 +756,7 @@ fn result_row<'a>(
         name = name.push(
             text(format!("by {author}"))
                 .size(12)
-                .color(theme::MUTED)
+                .color(theme::muted())
                 .wrapping(iced::widget::text::Wrapping::None),
         );
     }
@@ -768,7 +768,7 @@ fn result_row<'a>(
             name,
             text(&hit.description)
                 .size(12)
-                .color(theme::MUTED)
+                .color(theme::muted())
                 .wrapping(iced::widget::text::Wrapping::None),
         ]
         .spacing(3),
@@ -810,7 +810,7 @@ fn result_row<'a>(
             about,
             text(format!("{} downloads", compact(hit.downloads)))
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
             action,
         ]
         .spacing(14)
@@ -848,7 +848,7 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     // A folder that has vanished under us is worth saying out loud — the
     // alternative is a listing that silently reads as empty.
     if let Some(err) = &app.files_error {
-        list = list.push(text(err.as_str()).size(12).color(theme::DANGER));
+        list = list.push(text(err.as_str()).size(12).color(theme::danger()));
     } else if app.files.is_empty() {
         list = list.push(
             text(if app.files_at.as_os_str().is_empty() {
@@ -857,7 +857,7 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                 "This folder is empty."
             })
             .size(12)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
     }
 
@@ -869,11 +869,11 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                 human_bytes(entry.size)
             })
             .size(11)
-            .color(theme::MUTED)
+            .color(theme::muted())
             .width(80),
             text(entry.modified.map(ago).unwrap_or_default())
                 .size(11)
-                .color(theme::MUTED)
+                .color(theme::muted())
                 .width(110),
         ]
         .spacing(10)
@@ -885,14 +885,14 @@ fn files_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             text(if entry.is_dir { "▸" } else { "·" })
                 .size(13)
                 .color(if entry.is_dir {
-                    theme::VIOLET
+                    theme::violet()
                 } else {
-                    theme::MUTED
+                    theme::muted()
                 })
                 .width(14),
             text(entry.name.as_str())
                 .size(13)
-                .color(theme::TEXT)
+                .color(theme::text())
                 .width(Fill),
             meta,
         ]
@@ -950,7 +950,7 @@ fn breadcrumb(app: &App) -> Element<'_, Message> {
     let last = app.files_at.components().count();
     for (index, component) in app.files_at.components().enumerate() {
         so_far.push(component);
-        trail = trail.push(text("/").size(12).color(theme::MUTED));
+        trail = trail.push(text("/").size(12).color(theme::muted()));
         trail = trail.push(
             button(text(component.as_os_str().to_string_lossy().into_owned()).size(13))
                 .padding([5, 8])
@@ -1061,8 +1061,8 @@ fn section_heading<'a>(
     action: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut head = row![
-        text(label).size(13).color(theme::TEXT),
-        text(count.to_string()).size(12).color(theme::MUTED),
+        text(label).size(13).color(theme::text()),
+        text(count.to_string()).size(12).color(theme::muted()),
         Space::new().width(Fill),
     ]
     .spacing(8)
@@ -1077,8 +1077,8 @@ fn section_heading<'a>(
 fn empty_note<'a>(title: &'a str, detail: &'a str) -> Element<'a, Message> {
     container(
         column![
-            text(title).size(15).color(theme::TEXT),
-            text(detail).size(12).color(theme::MUTED),
+            text(title).size(15).color(theme::text()),
+            text(detail).size(12).color(theme::muted()),
         ]
         .spacing(4),
     )
@@ -1120,7 +1120,7 @@ fn server_form(form: &crate::ServerForm, running: bool) -> Element<'_, Message> 
         body = body.push(
             text("Close the game first — Minecraft overwrites its server list on exit.")
                 .size(11)
-                .color(theme::DANGER),
+                .color(theme::danger()),
         );
     }
 
@@ -1166,26 +1166,26 @@ fn server_row<'a>(app: &'a App, server: &'a browse::Server) -> Element<'a, Messa
     // or unreachable. Collapsing "waiting" into "down" would report every
     // server as offline for the first few seconds the tab is open.
     let detail: Element<'a, Message> = match app.server_status.get(&server.address) {
-        None => text("Pinging…").size(11).color(theme::MUTED).into(),
+        None => text("Pinging…").size(11).color(theme::muted()).into(),
         Some(Err(err)) => row![
-            text("Unreachable").size(11).color(theme::DANGER),
-            text(err.as_str()).size(11).color(theme::MUTED),
+            text("Unreachable").size(11).color(theme::danger()),
+            text(err.as_str()).size(11).color(theme::muted()),
         ]
         .spacing(8)
         .into(),
         Some(Ok(status)) => column![
-            text(status.motd.as_str()).size(12).color(theme::TEXT),
+            text(status.motd.as_str()).size(12).color(theme::text()),
             row![
                 text(format!(
                     "{}/{} online",
                     status.players_online, status.players_max
                 ))
                 .size(11)
-                .color(theme::MINT),
-                text(status.version.as_str()).size(11).color(theme::MUTED),
+                .color(theme::mint()),
+                text(status.version.as_str()).size(11).color(theme::muted()),
                 text(format!("{} ms", status.latency_ms))
                     .size(11)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             ]
             .spacing(10),
         ]
@@ -1198,8 +1198,8 @@ fn server_row<'a>(app: &'a App, server: &'a browse::Server) -> Element<'a, Messa
             icon,
             column![
                 row![
-                    text(server.name.as_str()).size(15).color(theme::TEXT),
-                    text(server.address.as_str()).size(11).color(theme::MUTED),
+                    text(server.name.as_str()).size(15).color(theme::text()),
+                    text(server.address.as_str()).size(11).color(theme::muted()),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -1241,10 +1241,10 @@ fn world_row<'a>(
 
     let mut tags = row![].spacing(10).align_y(iced::Center);
     if world.hardcore {
-        tags = tags.push(text("Hardcore").size(11).color(theme::DANGER));
+        tags = tags.push(text("Hardcore").size(11).color(theme::danger()));
     }
     if let Some(mode) = world.mode {
-        tags = tags.push(text(mode).size(11).color(theme::MUTED));
+        tags = tags.push(text(mode).size(11).color(theme::muted()));
     }
     if let Some(version) = &world.game_version {
         // The version that last *wrote* the world, which is not always the
@@ -1252,12 +1252,12 @@ fn world_row<'a>(
         // broken, so the mismatch is worth colouring.
         let matches_instance = *version == instance.game_version;
         tags = tags.push(text(version.as_str()).size(11).color(if matches_instance {
-            theme::MUTED
+            theme::muted()
         } else {
-            theme::MAGENTA
+            theme::magenta()
         }));
     }
-    tags = tags.push(text(human_bytes(world.size)).size(11).color(theme::MUTED));
+    tags = tags.push(text(human_bytes(world.size)).size(11).color(theme::muted()));
     tags = tags.push(
         text(
             world
@@ -1266,10 +1266,10 @@ fn world_row<'a>(
                 .unwrap_or_else(|| "never played".to_string()),
         )
         .size(11)
-        .color(theme::MUTED),
+        .color(theme::muted()),
     );
 
-    let mut details = column![text(world.name.as_str()).size(15).color(theme::TEXT)]
+    let mut details = column![text(world.name.as_str()).size(15).color(theme::text())]
         .spacing(4)
         .width(Fill);
 
@@ -1278,7 +1278,7 @@ fn world_row<'a>(
     // the second is pure noise; it earns its place exactly when a world has
     // been renamed and the folder no longer matches.
     if world.folder != world.name {
-        details = details.push(text(world.folder.as_str()).size(11).color(theme::MUTED));
+        details = details.push(text(world.folder.as_str()).size(11).color(theme::muted()));
     }
     details = details.push(tags);
 
@@ -1288,7 +1288,7 @@ fn world_row<'a>(
     let actions: Element<'a, Message> = if app.confirm_delete_world.as_deref() == Some(&world.folder)
     {
         row![
-            text("Delete for good?").size(12).color(theme::DANGER),
+            text("Delete for good?").size(12).color(theme::danger()),
             button(text("Cancel").size(12))
                 .padding([6, 12])
                 .style(theme::ghost_button)
@@ -1309,7 +1309,7 @@ fn world_row<'a>(
         row![
             text("Agree to Mojang's EULA (aka.ms/MinecraftEULA) to host this?")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
             button(text("Cancel").size(12))
                 .padding([6, 12])
                 .style(theme::ghost_button)
@@ -1374,7 +1374,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         list = list.push(
             text("No logs yet — they appear after the first launch.")
                 .size(12)
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
     }
 
@@ -1383,9 +1383,9 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
 
         let mut title = row![text(log.name.as_str()).size(12).color(if log.crash {
             // The file someone came to this tab to find.
-            theme::DANGER
+            theme::danger()
         } else {
-            theme::TEXT
+            theme::text()
         })]
         .spacing(6)
         .align_y(iced::Center);
@@ -1410,7 +1410,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                         log.modified.map(|w| format!(" · {}", ago(w))).unwrap_or_default()
                     ))
                     .size(10)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
                 ]
                 .spacing(2)
                 .width(Fill),
@@ -1431,7 +1431,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         (Some(log), Some((body, truncated))) => {
             let live = running && is_live_file(log);
 
-            let mut head = row![text(log.name.as_str()).size(14).color(theme::TEXT)]
+            let mut head = row![text(log.name.as_str()).size(14).color(theme::text())]
                 .spacing(8)
                 .align_y(iced::Center);
 
@@ -1458,7 +1458,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             // the start of the session, and someone would go looking for a
             // startup error that is simply off the top.
             if *truncated {
-                head = head.push(text("showing the end only").size(11).color(theme::MUTED));
+                head = head.push(text("showing the end only").size(11).color(theme::muted()));
             }
 
             head = head.push(
@@ -1476,7 +1476,7 @@ fn logs_tab<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
                             text(body.as_str())
                                 .size(11)
                                 .font(Font::MONOSPACE)
-                                .color(theme::TEXT)
+                                .color(theme::text())
                         )
                         .padding(12)
                     )
@@ -1521,7 +1521,7 @@ pub fn is_live_file(log: &browse::LogFile) -> bool {
 }
 
 fn centered_note(message: &str) -> Element<'_, Message> {
-    container(text(message.to_string()).size(12).color(theme::MUTED))
+    container(text(message.to_string()).size(12).color(theme::muted()))
         .width(Fill)
         .height(Fill)
         .align_x(iced::Center)
@@ -1598,6 +1598,8 @@ fn compact(n: u64) -> String {
 #[derive(Clone, PartialEq, Eq)]
 pub enum JavaChoice {
     Automatic,
+    /// On an instance: whatever the launcher's settings say.
+    FromSettings,
     Explicit(nexo_core::java::JavaInstall),
 }
 
@@ -1605,6 +1607,7 @@ impl std::fmt::Display for JavaChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Automatic => f.write_str("Automatic"),
+            Self::FromSettings => f.write_str("Launcher default"),
             Self::Explicit(java) => {
                 // The version alone is ambiguous on a machine with several
                 // builds of the same release, so the directory it lives in
@@ -1627,24 +1630,30 @@ impl std::fmt::Display for JavaChoice {
     }
 }
 
-/// Which JVM this instance launches with.
-fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
-    let mut choices = vec![JavaChoice::Automatic];
+/// A picker over the JVMs on this machine. `none` is the entry meaning no JVM of
+/// its own, which is worded differently per caller.
+pub fn java_picker<'a>(
+    app: &'a App,
+    current: Option<&std::path::Path>,
+    none: JavaChoice,
+    on_pick: impl Fn(Option<std::path::PathBuf>) -> Message + 'a,
+) -> crate::dropdown::Dropdown<'a, JavaChoice, Message> {
+    let mut choices = vec![none.clone()];
     choices.extend(app.java_options.iter().cloned().map(JavaChoice::Explicit));
 
-    // An instance can name a JVM that discovery no longer finds — an uninstalled
+    // A setting can name a JVM that discovery no longer finds — an uninstalled
     // JDK, an unplugged drive. Adding it keeps the picker showing what is
     // actually configured instead of silently snapping back to Automatic, which
     // would look like the setting had been lost.
-    let selected = match &instance.java_path {
-        None => JavaChoice::Automatic,
+    let selected = match current {
+        None => none,
         Some(path) => {
-            let known = app.java_options.iter().find(|j| &j.path == path).cloned();
+            let known = app.java_options.iter().find(|j| j.path == path).cloned();
             match known {
                 Some(java) => JavaChoice::Explicit(java),
                 None => {
                     let missing = nexo_core::java::JavaInstall {
-                        path: path.clone(),
+                        path: path.to_path_buf(),
                         major: 0,
                         version: "not found".to_string(),
                     };
@@ -1655,24 +1664,28 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
         }
     };
 
-    let id = instance.id.clone();
-    let picker = dropdown(choices, Some(selected), move |choice| {
-        Message::SetInstanceJava {
-            instance: id.clone(),
-            path: match choice {
-                JavaChoice::Automatic => None,
-                JavaChoice::Explicit(java) => Some(java.path),
-            },
-        }
+    dropdown(choices, Some(selected), move |choice| {
+        on_pick(match choice {
+            JavaChoice::Automatic | JavaChoice::FromSettings => None,
+            JavaChoice::Explicit(java) => Some(java.path),
+        })
     })
     .padding(6)
     .text_size(12)
-    .width(260);
+    .width(260)
+}
+
+/// Which JVM this instance launches with.
+fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
+    let id = instance.id.clone();
+    let picker = java_picker(app, instance.java_path.as_deref(), JavaChoice::FromSettings, move |path| {
+        Message::SetInstanceJava { instance: id.clone(), path }
+    });
 
     let label_width = 42;
     let mut rows = column![
         row![
-            text("Java").size(12).color(theme::MUTED).width(label_width),
+            text("Java").size(12).color(theme::muted()).width(label_width),
             picker,
             button(text("Browse…").size(12))
                 .padding([5, 9])
@@ -1691,7 +1704,7 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
         rows = rows.push(
             row![
                 Space::new().width(label_width),
-                text(path.display().to_string()).size(11).color(theme::MUTED),
+                text(path.display().to_string()).size(11).color(theme::muted()),
             ]
             .spacing(10),
         );
@@ -1708,8 +1721,8 @@ fn java_field<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> 
 fn details_card<'a>(app: &'a App, instance: &'a Instance, running: bool) -> Element<'a, Message> {
     let fact = |label: &'static str, value: String| {
         column![
-            text(label).size(10).color(theme::MUTED),
-            text(value).size(13).color(theme::TEXT),
+            text(label).size(10).color(theme::muted()),
+            text(value).size(13).color(theme::text()),
         ]
         .spacing(2)
     };

@@ -5,11 +5,23 @@
 //! so a settled window goes back to not repainting at all.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// One animated value's identity: a group and a name within it, both fixed
 /// strings so reading one during `view` allocates nothing.
 pub type Key = (&'static str, &'static str);
+
+static REDUCED: AtomicBool = AtomicBool::new(false);
+
+/// The "Reduce motion" setting: every transition finishes the moment it starts.
+pub fn set_reduced(on: bool) {
+    REDUCED.store(on, Ordering::Relaxed);
+}
+
+pub fn reduced() -> bool {
+    REDUCED.load(Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Tween {
@@ -64,6 +76,7 @@ impl Motion {
         let now = Instant::now();
         self.now = now;
         let current = self.tweens.get(&key).map_or(from, |tween| tween.value(now));
+        let millis = if reduced() { 0 } else { millis };
         self.tweens.insert(key, Tween { from: current, to: target, start: now, duration: Duration::from_millis(millis) });
     }
 

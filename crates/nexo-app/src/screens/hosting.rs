@@ -1339,6 +1339,11 @@ pub fn ram_band(kind: ServerKind) -> (u32, u32) {
 }
 
 /// The slider's top end: the machine's memory, capped so the scale stays usable.
+/// Finds out how much memory this PC has, for anything picking a memory size.
+pub fn load_total_memory(app: &App) -> Task<Message> {
+    call(app, |core| async move { Ok(core.hosting.total_memory_mb()) }, |r| Msg::MemoryFound(r.unwrap_or(0)))
+}
+
 pub fn ram_max(app: &App) -> u32 {
     match app.host.total_memory_mb {
         0 => 16384,
@@ -1361,10 +1366,10 @@ pub fn list_view(app: &App) -> Element<'_, Message> {
     if !app.paper_servers.is_empty() {
         list = list.push(Space::new().height(8)).push(
             column![
-                text("Converted worlds").size(15).font(theme::BOLD).color(theme::TEXT),
+                text("Converted worlds").size(15).font(theme::BOLD).color(theme::text()),
                 text("Singleplayer worlds hosted with Paper from an instance's Worlds tab — stopping one copies the world back.")
                     .size(12)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             ]
             .spacing(3),
         );
@@ -1410,7 +1415,7 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
 
     let mut details = column![
         row![
-            text(&server.name).size(17).font(theme::BOLD).color(theme::TEXT),
+            text(&server.name).size(17).font(theme::BOLD).color(theme::text()),
             container(text(label).size(11)).padding([2, 8]).tinted(theme::pill(color)),
         ]
         .spacing(10)
@@ -1422,12 +1427,12 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
             format_gb(server.memory_mb)
         ))
         .size(12)
-        .color(theme::MUTED),
+        .color(theme::muted()),
     ]
     .spacing(4)
     .width(Fill);
     if phase == Phase::Online {
-        details = details.push(text(app.host.address(server)).size(12).font(iced::Font::MONOSPACE).color(theme::MINT));
+        details = details.push(text(app.host.address(server)).size(12).font(iced::Font::MONOSPACE).color(theme::mint()));
     }
 
     container(
@@ -1452,10 +1457,10 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
 
 pub fn phase_label(phase: Phase) -> (&'static str, iced::Color) {
     match phase {
-        Phase::Offline => ("Offline", theme::MUTED),
-        Phase::Starting => ("Starting…", theme::AMBER),
-        Phase::Online => ("Online", theme::MINT),
-        Phase::Stopping => ("Stopping…", theme::AMBER),
+        Phase::Offline => ("Offline", theme::muted()),
+        Phase::Starting => ("Starting…", theme::amber()),
+        Phase::Online => ("Online", theme::mint()),
+        Phase::Stopping => ("Stopping…", theme::amber()),
     }
 }
 

@@ -250,6 +250,9 @@ pub struct SkinViewer {
     /// placeholder figure, and once a real skin is shown it would just
     /// obscure it — and animating it costs a redraw every frame.
     outlined: bool,
+    /// Whether the border may keep animating. False while the window is
+    /// unfocused, so a launcher left behind a game stops repainting.
+    live: bool,
     /// The cape reveal in progress, if any. The turn is derived from it, so
     /// it cannot be knocked out of step by widget state being reset.
     reveal: Option<Reveal>,
@@ -262,6 +265,7 @@ impl SkinViewer {
         model: SkinModel,
         key: u64,
         outlined: bool,
+        live: bool,
         reveal: Option<Reveal>,
     ) -> Self {
         Self {
@@ -270,6 +274,7 @@ impl SkinViewer {
             model,
             key,
             outlined,
+            live,
             reveal,
         }
     }
@@ -326,7 +331,7 @@ impl<Message> shader::Program<Message> for SkinViewer {
 
                 // A visible outline drifts continuously, so it needs a frame
                 // every time regardless of what the pose is doing.
-                let animating = self.outlined;
+                let animating = self.outlined && self.live;
 
                 if state.drag_from.is_some() {
                     return animating.then(shader::Action::request_redraw);

@@ -57,13 +57,13 @@ fn waiting_notice() -> Element<'static, Message> {
         column![
             text("Finish signing in in your browser")
                 .size(16)
-                .color(theme::TEXT),
+                .color(theme::text()),
             text(
                 "A tab should have opened on Microsoft's sign-in page. \
                  This window picks up automatically once you're done."
             )
             .size(13)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         ]
         .spacing(8),
     )
@@ -79,15 +79,15 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
     let status = if is_active {
         text("Active — launches use this account")
             .size(12)
-            .color(theme::MINT)
+            .color(theme::mint())
     } else if account.is_expired() {
         // Not an error: the token is refreshed silently at launch. Saying so
         // avoids the user re-adding an account that works fine.
         text("Session expired — renews automatically on next launch")
             .size(12)
-            .color(theme::MUTED)
+            .color(theme::muted())
     } else {
-        text("Signed in").size(12).color(theme::MUTED)
+        text("Signed in").size(12).color(theme::muted())
     };
 
     // Each account shows its own head, not just the active one. Space is
@@ -102,7 +102,7 @@ fn card<'a>(app: &'a App, account: &'a Account) -> Element<'a, Message> {
     };
 
     let details = column![
-        text(&account.username).size(16).color(theme::TEXT),
+        text(&account.username).size(16).color(theme::text()),
         status,
     ]
     .spacing(3)

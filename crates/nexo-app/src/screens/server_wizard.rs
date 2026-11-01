@@ -97,7 +97,7 @@ fn stepper(w: &Wizard, roomy: bool) -> Element<'_, Message> {
             .tinted(theme::step_dot(current, done));
         let label = crate::lively::tinted_text(
             text(step.label()).size(14).font(if current { theme::BOLD } else { Font::DEFAULT }),
-            if current { theme::TEXT } else { theme::MUTED },
+            if current { theme::text() } else { theme::muted() },
         );
         let content = if roomy || current { row![dot, label] } else { row![dot] };
         steps = steps.push(
@@ -113,8 +113,8 @@ fn stepper(w: &Wizard, roomy: bool) -> Element<'_, Message> {
 
 fn title<'a>(heading: &'a str, sub: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     column![
-        text(heading).size(24).font(theme::BOLD).color(theme::TEXT),
-        text(sub).size(13).color(theme::MUTED),
+        text(heading).size(24).font(theme::BOLD).color(theme::text()),
+        text(sub).size(13).color(theme::muted()),
     ]
     .spacing(6)
     .width(Fill)
@@ -123,7 +123,7 @@ fn title<'a>(heading: &'a str, sub: impl text::IntoFragment<'a>) -> Element<'a, 
 }
 
 fn field_label(label: &str) -> Element<'_, Message> {
-    text(label).size(14).font(theme::BOLD).color(theme::TEXT).into()
+    text(label).size(14).font(theme::BOLD).color(theme::text()).into()
 }
 
 // ------------------------------------------------------------------- step 1
@@ -136,7 +136,7 @@ fn type_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let lag_note = (w.kind == ServerKind::Paper).then(|| {
         text("Paper usually supports a new Minecraft release a few days after Mojang ships it.")
             .size(12)
-            .color(theme::MUTED)
+            .color(theme::muted())
     });
 
     column![
@@ -184,7 +184,7 @@ fn kind_card(kind: ServerKind, selected: bool) -> Element<'static, Message> {
         container(Space::new())
             .width(Fill)
             .height(5)
-            .style(theme::fill(if i < score { theme::ACCENT } else { theme::CONTROL }))
+            .style(theme::fill(if i < score { theme::accent() } else { theme::control() }))
             .into()
     }))
     .spacing(5);
@@ -192,15 +192,15 @@ fn kind_card(kind: ServerKind, selected: bool) -> Element<'static, Message> {
     let feature = |ok: bool, label: &'static str| {
         text(format!("{} {label}", if ok { "✓" } else { "✕" }))
             .size(12)
-            .color(if ok { theme::MINT } else { theme::MUTED })
+            .color(if ok { theme::mint() } else { theme::muted() })
     };
 
     button(
         column![
-            text(kind.label()).size(20).font(theme::BOLD).color(theme::TEXT),
-            text(blurb).size(13).color(theme::MUTED),
+            text(kind.label()).size(20).font(theme::BOLD).color(theme::text()),
+            text(blurb).size(13).color(theme::muted()),
             Space::new().height(Fill),
-            row![text("Performance").size(12).color(theme::MUTED), Space::new().width(Fill), text(rating).size(12)],
+            row![text("Performance").size(12).color(theme::muted()), Space::new().width(Fill), text(rating).size(12)],
             meter,
             row![
                 feature(plugins, "Plugins"),
@@ -248,9 +248,9 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     ]
     .spacing(8);
 
-    let filters = text(format!("Modrinth · {loader} · Minecraft {}", w.version)).size(12).color(theme::MUTED);
+    let filters = text(format!("Modrinth · {loader} · Minecraft {}", w.version)).size(12).color(theme::muted());
 
-    let mut picked = row![text(format!("{} selected", w.picked.len())).size(12).color(theme::MUTED)]
+    let mut picked = row![text(format!("{} selected", w.picked.len())).size(12).color(theme::muted())]
         .spacing(6)
         .align_y(iced::Center);
     for (id, name) in &w.picked {
@@ -282,7 +282,7 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let mut col = column![
         title("Add-ons", format!("Pick {noun} to install. The right build for Minecraft {} is downloaded when the server is made, with anything it needs.", w.version)),
         essentials_section(app, w),
-        text(format!("More {noun}")).size(16).font(theme::BOLD).color(theme::TEXT),
+        text(format!("More {noun}")).size(16).font(theme::BOLD).color(theme::text()),
         column![search, filters].spacing(6),
         crate::lively::eased_scrollbar(
             scrollable(picked).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(3).scroller_width(3))),
@@ -292,7 +292,7 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     ]
     .spacing(16);
     if w.kind == ServerKind::Fabric {
-        col = col.push(text("Fabric API is added automatically — almost every server mod needs it.").size(12).color(theme::MUTED));
+        col = col.push(text("Fabric API is added automatically — almost every server mod needs it.").size(12).color(theme::muted()));
     }
     col.push(results).into()
 }
@@ -310,8 +310,8 @@ fn essentials_section<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     column![
         row![
             column![
-                text("Essentials").size(16).font(theme::BOLD).color(theme::TEXT),
-                text("Hand-picked, and checked against your version as you look.").size(12).color(theme::MUTED),
+                text("Essentials").size(16).font(theme::BOLD).color(theme::text()),
+                text("Hand-picked, and checked against your version as you look.").size(12).color(theme::muted()),
             ]
             .spacing(3)
             .width(Fill),
@@ -331,35 +331,35 @@ fn essential_card<'a>(app: &'a App, w: &'a Wizard, e: &'a Essential) -> Element<
     let chosen = w.chosen.contains(&e.slug);
     let probe = w.probes.get(e.slug).cloned().unwrap_or(Probe::Checking);
     let (status, color, available) = match &probe {
-        Probe::Checking => ("Checking Modrinth…".to_string(), theme::MUTED, true),
+        Probe::Checking => ("Checking Modrinth…".to_string(), theme::muted(), true),
         Probe::Ready { version, downloads } => {
-            (format!("{version} for {} · ↓ {}", w.version, compact(*downloads)), theme::MINT, true)
+            (format!("{version} for {} · ↓ {}", w.version, compact(*downloads)), theme::mint(), true)
         }
-        Probe::Missing => (format!("No build for {} yet", w.version), theme::AMBER, false),
-        Probe::Failed => ("Couldn't reach Modrinth — checked again when you come back".to_string(), theme::AMBER, true),
+        Probe::Missing => (format!("No build for {} yet", w.version), theme::amber(), false),
+        Probe::Failed => ("Couldn't reach Modrinth — checked again when you come back".to_string(), theme::amber(), true),
     };
     let icon: Element<'_, Message> = match app.icons.get(e.slug) {
         Some(handle) => crate::lively::appear(image(handle.clone()).width(36).height(36)),
-        None => container(Space::new()).width(36).height(36).style(theme::fill(theme::CONTROL)).into(),
+        None => container(Space::new()).width(36).height(36).style(theme::fill(theme::control())).into(),
     };
-    let check = container(text(if chosen { "✓" } else { "" }).size(13).color(theme::INK))
+    let check = container(text(if chosen { "✓" } else { "" }).size(13).color(theme::ink()))
         .width(20)
         .height(20)
         .align_x(iced::Center)
         .align_y(iced::Center)
-        .tinted(theme::fill(if chosen { theme::MINT } else { theme::CONTROL }));
+        .tinted(theme::fill(if chosen { theme::mint() } else { theme::control() }));
 
     button(
         row![
             icon,
             column![
                 row![
-                    text(e.name).size(14).font(theme::BOLD).color(theme::TEXT),
-                    container(text(e.tag).size(10)).padding([1, 7]).tinted(theme::pill(theme::ACCENT)),
+                    text(e.name).size(14).font(theme::BOLD).color(theme::text()),
+                    container(text(e.tag).size(10)).padding([1, 7]).tinted(theme::pill(theme::accent())),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
-                text(e.why).size(12).color(theme::MUTED),
+                text(e.why).size(12).color(theme::muted()),
                 text(status).size(11).color(color),
             ]
             .spacing(4)
@@ -380,7 +380,7 @@ fn hit_card<'a>(app: &'a App, w: &'a Wizard, hit: &'a nexo_core::modrinth::Searc
     let picked = w.picked.iter().any(|(id, _)| *id == hit.project_id);
     let icon: Element<'_, Message> = match app.icons.get(&hit.project_id) {
         Some(handle) => crate::lively::appear(image(handle.clone()).width(48).height(48)),
-        None => container(Space::new()).width(48).height(48).style(theme::fill(theme::CONTROL)).into(),
+        None => container(Space::new()).width(48).height(48).style(theme::fill(theme::control())).into(),
     };
     let toggle = button(text(if picked { "Added ✓" } else { "Add" }).size(13))
         .padding([5, 12])
@@ -391,10 +391,10 @@ fn hit_card<'a>(app: &'a App, w: &'a Wizard, hit: &'a nexo_core::modrinth::Searc
         row![
             icon,
             column![
-                row![text(&hit.title).size(15).font(theme::BOLD).color(theme::TEXT).width(Fill), toggle]
+                row![text(&hit.title).size(15).font(theme::BOLD).color(theme::text()).width(Fill), toggle]
                     .align_y(iced::Center),
-                text(clip(&hit.description, 80)).size(12).color(theme::MUTED),
-                text(format!("↓ {}   ♥ {}", compact(hit.downloads), compact(hit.follows))).size(11).color(theme::MUTED),
+                text(clip(&hit.description, 80)).size(12).color(theme::muted()),
+                text(format!("↓ {}   ♥ {}", compact(hit.downloads), compact(hit.follows))).size(11).color(theme::muted()),
             ]
             .spacing(5)
             .width(Fill),
@@ -424,7 +424,7 @@ pub fn compact(n: u64) -> String {
 }
 
 fn note(message: &str) -> Element<'_, Message> {
-    container(text(message).size(13).color(theme::MUTED))
+    container(text(message).size(13).color(theme::muted()))
         .width(Fill)
         .padding(30)
         .align_x(iced::Center)
@@ -453,7 +453,7 @@ fn world_step(w: &Wizard) -> Element<'_, Message> {
                     .width(Fill),
                 text("It's copied — the original save stays exactly as it is. Game mode and difficulty come from the world.")
                     .size(12)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             ]
             .spacing(8)
             .into()
@@ -488,7 +488,7 @@ fn world_step(w: &Wizard) -> Element<'_, Message> {
             .spacing(14),
             row![
                 toggler(w.hardcore).size(18).style(theme::toggle).on_toggle(|on| host(Msg::Hardcore(on))),
-                text("Hardcore — one life, difficulty locked to Hard").size(13).color(theme::TEXT),
+                text("Hardcore — one life, difficulty locked to Hard").size(13).color(theme::text()),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -512,10 +512,10 @@ fn performance_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let tunnel = container(
         row![
             column![
-                text("Public address").size(14).font(theme::BOLD).color(theme::TEXT),
+                text("Public address").size(14).font(theme::BOLD).color(theme::text()),
                 text("Friends join from anywhere through e4mc's relay — no port forwarding, no account. Open while Nexo runs. The whitelist starts on: add friends under Players.")
                     .size(12)
-                    .color(theme::MUTED),
+                    .color(theme::muted()),
             ]
             .spacing(3)
             .width(Fill),
@@ -538,7 +538,7 @@ fn performance_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
         field_label("Memory"),
         ram_picker(app, w.kind, w.memory_mb, |mb| host(Msg::Memory(mb))),
         Space::new().height(4),
-        text("CONNECTED SERVICES").size(11).color(theme::MUTED),
+        text("CONNECTED SERVICES").size(11).color(theme::muted()),
         tunnel,
     ]
     .spacing(10)
@@ -571,10 +571,10 @@ pub fn ram_picker<'a>(
     };
     let mut track = row![].spacing(0);
     for (p, c) in [
-        (portion(MIN, low), theme::AMBER),
-        (portion(low, high), theme::MINT),
-        (portion(high, danger), theme::AMBER),
-        (portion(danger, max), theme::DANGER),
+        (portion(MIN, low), theme::amber()),
+        (portion(low, high), theme::mint()),
+        (portion(high, danger), theme::amber()),
+        (portion(danger, max), theme::danger()),
     ] {
         if p > 0 {
             track = track.push(zone(p, c));
@@ -588,11 +588,11 @@ pub fn ram_picker<'a>(
 
     let available = if total > 0 { format!("This PC has {} MB", total) } else { String::new() };
     let scale = row![
-        text(format!("{MIN} MB")).size(11).color(theme::MUTED),
+        text(format!("{MIN} MB")).size(11).color(theme::muted()),
         Space::new().width(Fill),
-        text(available).size(11).color(theme::MUTED),
+        text(available).size(11).color(theme::muted()),
         Space::new().width(Fill),
-        text(format!("{max} MB")).size(11).color(theme::MUTED),
+        text(format!("{max} MB")).size(11).color(theme::muted()),
     ];
 
     let label = format!("{} {}", kind.label().to_lowercase(), "server");
@@ -608,8 +608,8 @@ pub fn ram_picker<'a>(
 
     column![
         row![
-            text(format!("{value} MB")).size(22).font(theme::BOLD).color(theme::TEXT),
-            text(format!("  ≈ {} GB", hosting::format_gb(value))).size(13).color(theme::MUTED),
+            text(format!("{value} MB")).size(22).font(theme::BOLD).color(theme::text()),
+            text(format!("  ≈ {} GB", hosting::format_gb(value))).size(13).color(theme::muted()),
         ]
         .align_y(iced::Center),
         picker,
@@ -620,9 +620,9 @@ pub fn ram_picker<'a>(
         .padding([10, 14])
         .width(Fill)
         .tinted(theme::callout(match (good, value > danger) {
-            (true, _) => theme::MINT,
-            (false, false) => theme::AMBER,
-            (false, true) => theme::DANGER,
+            (true, _) => theme::mint(),
+            (false, false) => theme::amber(),
+            (false, true) => theme::danger(),
         })),
     ]
     .spacing(8)
@@ -634,8 +634,8 @@ pub fn ram_picker<'a>(
 fn review_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let line = |label: &'static str, value: String| {
         row![
-            text(label).size(13).color(theme::MUTED).width(170),
-            text(value).size(14).color(theme::TEXT).width(Fill),
+            text(label).size(13).color(theme::muted()).width(170),
+            text(value).size(14).color(theme::text()).width(Fill),
         ]
         .spacing(10)
     };
@@ -741,25 +741,25 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
     let mut list = column![].spacing(12);
     for (i, (label, done, broke)) in steps.iter().enumerate() {
         let (glyph, color) = if *broke {
-            ("✕", theme::DANGER)
+            ("✕", theme::danger())
         } else if *done {
-            ("✓", theme::MINT)
+            ("✓", theme::mint())
         } else if Some(i) == active && !failed {
-            ("◌", theme::ACCENT)
+            ("◌", theme::accent())
         } else {
-            ("○", theme::MUTED)
+            ("○", theme::muted())
         };
         list = list.push(
             row![
                 text(glyph).size(18).color(color).width(22),
-                text(*label).size(16).color(if *done || Some(i) == active { theme::TEXT } else { theme::MUTED }),
+                text(*label).size(16).color(if *done || Some(i) == active { theme::text() } else { theme::muted() }),
             ]
             .spacing(10)
             .align_y(iced::Center),
         );
     }
 
-    let mut col = column![text("Setting up your server").size(20).font(theme::BOLD).color(theme::TEXT), list].spacing(16);
+    let mut col = column![text("Setting up your server").size(20).font(theme::BOLD).color(theme::text()), list].spacing(16);
 
     if let Some(err) = &setup.error {
         col = col.push(crate::lively::appear(container(text(err.as_str()).size(13)).padding([10, 14]).width(Fill).style(theme::banner(true))));
@@ -793,7 +793,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
                 server.minecraft_version
             ))
             .size(12)
-            .color(theme::MUTED),
+            .color(theme::muted()),
         );
     }
 
@@ -816,7 +816,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
                 .unwrap_or_else(|| "Waiting for the server's first output…".into());
             col = col.push(
                 container(
-                    crate::lively::scrollable(container(text(tail).size(11).font(Font::MONOSPACE).color(theme::TEXT)).padding(12))
+                    crate::lively::scrollable(container(text(tail).size(11).font(Font::MONOSPACE).color(theme::text())).padding(12))
                         .anchor_bottom()
                         .height(260)
                         .width(Fill),
@@ -848,7 +848,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
             "The first start builds the world and can take a minute or two."
         })
         .size(12)
-        .color(theme::MUTED)
+        .color(theme::muted())
         .into(),
     };
     col = col.push(container(actions).width(Fill).align_x(iced::Center));
@@ -861,8 +861,8 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
 
 pub fn address_row(label: &str, address: String) -> Element<'static, Message> {
     row![
-        container(text(label.to_string()).size(11)).padding([3, 10]).tinted(theme::pill(theme::ACCENT)),
-        container(text(address.clone()).size(14).font(Font::MONOSPACE).color(theme::TEXT))
+        container(text(label.to_string()).size(11)).padding([3, 10]).tinted(theme::pill(theme::accent())),
+        container(text(address.clone()).size(14).font(Font::MONOSPACE).color(theme::text()))
             .padding([9, 12])
             .width(Fill)
             .style(theme::well),
