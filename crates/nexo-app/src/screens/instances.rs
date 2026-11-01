@@ -67,7 +67,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 fn create_form(app: &App) -> Element<'_, Message> {
     let can_create = app.core.is_some() && !app.is_busy();
 
-    let name = text_input("Instance name", &app.new_name)
+    let name = text_input("Name (optional)", &app.new_name)
         .on_input_maybe(can_create.then_some(Message::NewNameChanged))
         .on_submit(Message::CreateInstance)
         .padding(10)
@@ -81,6 +81,22 @@ fn create_form(app: &App) -> Element<'_, Message> {
     )
     .padding(10)
     .width(160);
+
+    // Whether this version can have Nexo Mod decides what the form offers.
+    let nexo_target = app.nexo_release.as_ref().map(|release| release.manifest.minecraft_version.as_str());
+    let nexo_line: Element<'_, Message> = match nexo_target {
+        Some(target) if target == app.new_version => crate::lively::checkbox(app.new_with_nexo)
+            .label("Add Nexo Mod")
+            .text_size(13)
+            .on_toggle(Message::NewWithNexoToggled)
+            .style(theme::check)
+            .into(),
+        Some(target) => text(format!("Nexo Mod only runs on Minecraft {target}, so this one won't have it."))
+            .size(12)
+            .color(theme::amber())
+            .into(),
+        None => text("Fabric loader, installed automatically.").size(12).color(theme::muted()).into(),
+    };
 
     let create = button(text("Create").size(14))
         .padding([8, 17])
@@ -97,9 +113,7 @@ fn create_form(app: &App) -> Element<'_, Message> {
             row![name, version, create, import]
                 .spacing(12)
                 .align_y(iced::Center),
-            text("Fabric loader, installed automatically. Importing a modpack creates its own instance.")
-                .size(12)
-                .color(theme::muted()),
+            nexo_line,
         ]
         .spacing(10),
     )
@@ -144,7 +158,9 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     ]
     .spacing(10)
     .align_y(iced::Center);
-    if app.nexo_mod_outdated(instance) {
+    // What Play can't sort out by itself, and what it can but the player may want now.
+    let release = app.nexo_release.as_ref().filter(|release| release.manifest.supports(instance));
+    if app.nexo_mod_outdated(instance) && release.is_none() {
         title = title.push(
             container(text("NEXO UPDATE").size(10).font(theme::BOLD))
                 .padding([3, 7])
@@ -217,7 +233,28 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .center_y(52)
         .tinted(theme::initial_tile(running));
 
-    container(row![tile, details, stats, action].spacing(16).align_y(iced::Center))
+    let nexo_button = release.and_then(|release| {
+        let (label, edition) = match nexo_mod::installed(instance) {
+            None => ("ADD NEXO MOD", release.default_edition()),
+            Some(_) if app.nexo_mod_outdated(instance) => ("UPDATE NEXO", nexo_mod::installed_edition(instance).unwrap_or_default()),
+            Some(_) => return None,
+        };
+        Some(
+            button(text(label).size(12).font(theme::BOLD).center())
+                .padding([11, 12])
+                .style(theme::lit_button)
+                .on_press_maybe((!app.is_busy() && !running).then(|| Message::InstallNexoMod {
+                    instance: instance.id.clone(),
+                    edition,
+                })),
+        )
+    });
+    let mut cells = row![tile, details, stats].spacing(16).align_y(iced::Center);
+    if let Some(nexo_button) = nexo_button {
+        cells = cells.push(nexo_button);
+    }
+
+    container(cells.push(action))
         .padding([0, 16])
         .height(84)
         .align_y(iced::Center)

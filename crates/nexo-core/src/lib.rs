@@ -194,6 +194,22 @@ impl Nexo {
         // system JVM is always preferred, and a JVM named by the instance or the
         // launcher's settings is never overridden.
         let settings = settings::Settings::load(&self.paths);
+        // Never in the way of playing: offline or failed, the game starts on what's
+        // there. Not under another session of this instance, which has the jar open.
+        if settings.auto_update_mod && self.running.sessions(instance_id).is_empty() {
+            if let Some(progress) = progress {
+                let _ = progress.send(minecraft::download::Progress::Stage("Checking for Nexo Mod updates".into()));
+            }
+            match self.nexo_mod.update_if_due(&mut instance, progress).await {
+                Ok(true) => {
+                    if let Err(err) = self.instances.save(&instance).await {
+                        tracing::warn!(%err, "could not record the Nexo Mod update");
+                    }
+                }
+                Ok(false) => {}
+                Err(err) => tracing::warn!(%err, "could not update Nexo Mod, launching what's installed"),
+            }
+        }
         let mut java = java::ensure(
             &self.http,
             &self.paths,

@@ -235,6 +235,7 @@ pub enum Msg {
     Memory(u32),
     JvmArgs(String),
     AfterLaunch(AfterLaunch),
+    AutoUpdateMod(bool),
     New,
     Delete,
     Name(String),
@@ -403,6 +404,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::AfterLaunch(after) => {
             app.settings.after_launch = after;
+            save(app);
+            return Task::none();
+        }
+        Msg::AutoUpdateMod(on) => {
+            app.settings.auto_update_mod = on;
             save(app);
             return Task::none();
         }
@@ -743,6 +749,11 @@ fn games_view(app: &App) -> Element<'_, Message> {
         ),
         Space::new().height(8),
         heading("Launcher"),
+        field(
+            "Update Nexo Mod",
+            "Updates automatically when you press Play. A jar you swapped in by hand is left alone.",
+            toggler(settings.auto_update_mod).on_toggle(|on| Message::ThemeEditor(Msg::AutoUpdateMod(on))).style(theme::toggle),
+        ),
         field(
             "After launching",
             "Happens once the game has stayed up for a few seconds. After Close, reopening the launcher won't show that game as running. Close minimises instead while a server or install is running.",

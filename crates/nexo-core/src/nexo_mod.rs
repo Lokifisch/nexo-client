@@ -395,6 +395,14 @@ fn assemble(tag: String, manifest: Manifest, assets: &[GithubAsset]) -> Result<R
                     info.file
                 )));
             }
+            // Installs can happen unattended now, so what's recorded as Legit has to
+            // be the Legit jar, and a manifest can't aim at another mod's file name.
+            if Edition::from_file_name(&info.file) != Some(edition) {
+                return Err(Error::invalid(format!(
+                    "release {tag} declares '{}' as its {edition} edition",
+                    info.file
+                )));
+            }
             let asset = assets.iter().find(|a| a.name == info.file).ok_or_else(|| {
                 Error::invalid(format!(
                     "release {tag} declares its {edition} edition as '{}', but publishes no asset by that name",
@@ -565,8 +573,13 @@ impl NexoMod {
             )));
         }
 
-        let response = self.http.get(&build.url).send().await?.error_for_status()?;
-        let bytes = crate::util::read_capped(response, 128 * 1024 * 1024).await?;
+        // Generous, for a slow line, but this can stand between Play and the game.
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            let response = self.http.get(&build.url).send().await?.error_for_status()?;
+            crate::util::read_capped(response, 128 * 1024 * 1024).await
+        })
+        .await
+        .map_err(|_| Error::invalid("timed out downloading Nexo Mod"))??;
 
         self.place(instance, release, build, &bytes).await
     }
@@ -589,12 +602,12 @@ impl NexoMod {
 
         // Fail closed when the release publishes a hash: a mismatch (or a
         // malformed hash) means these aren't the bytes the maintainer
-        // released, and nothing is touched. Releases without one — every
-        // release up to 0.6.5 — still install, with a warning, because
-        // refusing them would break installing anything already published.
+        // released, and nothing is touched. Releases without one still install,
+        // with a warning, because refusing them would break installing anything
+        // already published: none up to 0.9.1 carries one.
+        let actual = crate::util::sha256_hex(bytes);
         match build.sha256.as_deref() {
             Some(expected) => {
-                let actual = crate::util::sha256_hex(bytes);
                 if !expected.eq_ignore_ascii_case(&actual) {
                     return Err(Error::invalid(format!(
                         "{} failed its SHA-256 check (expected {expected}, got {actual}). \
@@ -613,21 +626,28 @@ impl NexoMod {
         let mods = self.paths.instance_mods(&instance.id);
         tokio::fs::create_dir_all(&mods).await.ctx(&mods)?;
 
-        // Remove first, always. The two editions declare `breaks` on each
-        // other, so a leftover jar isn't a duplicate — it's a game that
-        // won't start.
-        self.remove(instance).await?;
-
         // Temp file + rename, so a crash can't leave a truncated jar that
         // Fabric would then try to load. The `.part` suffix keeps it from
-        // being picked up as a mod in the meantime.
+        // being picked up as a mod in the meantime. Written before anything is
+        // removed, so a full disk costs nothing.
         let destination = mods.join(&build.jar_name);
         let temp = mods.join(format!(
             ".{}.{}.part",
             build.jar_name,
             uuid::Uuid::new_v4().simple()
         ));
-        tokio::fs::write(&temp, bytes).await.ctx(&temp)?;
+        if let Err(err) = tokio::fs::write(&temp, bytes).await {
+            tokio::fs::remove_file(&temp).await.ok();
+            return Err(err).ctx(&temp);
+        }
+
+        // Then remove, always. The two editions declare `breaks` on each
+        // other, so a leftover jar isn't a duplicate — it's a game that
+        // won't start.
+        if let Err(err) = self.remove(instance).await {
+            tokio::fs::remove_file(&temp).await.ok();
+            return Err(err);
+        }
         if let Err(err) = tokio::fs::rename(&temp, &destination).await {
             tokio::fs::remove_file(&temp).await.ok();
             return Err(err).ctx(&destination);
@@ -642,9 +662,67 @@ impl NexoMod {
             source: ModSource::NexoMod,
             enabled: true,
             edition: Some(build.edition),
+            sha256: Some(actual),
         });
 
         Ok(())
+    }
+
+    /// Installs a newer release over the one in `instance`, keeping the edition.
+    /// Returns whether it did. The local checks come first, as the lookup spends
+    /// GitHub's anonymous allowance.
+    pub async fn update_if_due(
+        &self,
+        instance: &mut Instance,
+        progress: Option<&tokio::sync::mpsc::UnboundedSender<crate::minecraft::download::Progress>>,
+    ) -> Result<bool> {
+        let Some(current) = installed(instance) else {
+            return Ok(false);
+        };
+        if !current.enabled || !crate::util::is_bare_basename(&current.file_name) {
+            return Ok(false);
+        }
+        let mods = self.paths.instance_mods(&instance.id);
+        let on_disk = tokio::fs::read(mods.join(&current.file_name))
+            .await
+            .ok()
+            .map(|bytes| crate::util::sha256_hex(&bytes));
+        if hand_copied(current, on_disk.as_deref()) || self.has_untracked_jar(&mods, &current.file_name).await {
+            return Ok(false);
+        }
+
+        // Only the lookup and the download have limits. They're what stands between
+        // Play and the game when the network is slow, and neither has touched a file.
+        let release = tokio::time::timeout(std::time::Duration::from_secs(10), self.latest_including_prereleases())
+            .await
+            .map_err(|_| Error::invalid("timed out looking for a Nexo Mod update"))??;
+        if !update_due(instance, &release.manifest) {
+            return Ok(false);
+        }
+        if let Some(progress) = progress {
+            let _ = progress.send(crate::minecraft::download::Progress::Stage("Updating Nexo Mod".into()));
+        }
+        let edition = installed_edition(instance).unwrap_or_default();
+        // On a copy: if this fails, `instance` still says what it said before.
+        let mut updated = instance.clone();
+        self.install(&mut updated, &release, edition).await?;
+        *instance = updated;
+        Ok(true)
+    }
+
+    /// A Nexo jar beside the tracked one was put there by someone, and installing
+    /// would sweep it away.
+    async fn has_untracked_jar(&self, mods: &std::path::Path, tracked: &str) -> bool {
+        let Ok(mut entries) = tokio::fs::read_dir(mods).await else {
+            return false;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != tracked && name.ends_with(".jar") && Edition::from_file_name(&name).is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Deletes every Nexo Mod jar and forgets them. Safe to call when nothing
@@ -696,6 +774,28 @@ impl NexoMod {
     }
 }
 
+/// Strictly newer, because a release can vanish from the list for many reasons (one
+/// failed request on its manifest makes the lookup settle on an older one), and none
+/// of them should take someone backwards. Anything unparseable counts as not newer.
+pub fn is_newer(latest: &str, current: &str) -> bool {
+    match (semver::Version::parse(latest), semver::Version::parse(current)) {
+        (Ok(latest), Ok(current)) => latest > current,
+        _ => false,
+    }
+}
+
+fn update_due(instance: &Instance, manifest: &Manifest) -> bool {
+    installed(instance).is_some_and(|current| is_newer(&manifest.mod_version, &current.version_number))
+        && manifest.supports(instance)
+}
+
+/// A jar that isn't what the launcher wrote (a local build, say) isn't the launcher's
+/// to overwrite. A missing one is different: there's nothing to protect, and leaving
+/// it would stop updates for good after a failed or interrupted one.
+fn hand_copied(current: &InstalledMod, on_disk: Option<&str>) -> bool {
+    matches!((current.sha256.as_deref(), on_disk), (Some(recorded), Some(on_disk)) if recorded != on_disk)
+}
+
 /// The installed build, if any. Free function so the UI can ask without
 /// holding a [`NexoMod`].
 pub fn installed(instance: &Instance) -> Option<&InstalledMod> {
@@ -743,6 +843,84 @@ mod tests {
         "legit":    { "file": "nexomod-legit-0.5.0.jar", "mod_id": "nexomod-legit", "name": "Legit",    "description": "Nothing a server could read as an advantage." }
       }
     }"#;
+
+    #[test]
+    fn updates_only_what_is_the_launchers_to_update() {
+        let manifest = manifest_from(EDITION_MANIFEST);
+        let mut instance = Instance::new("x", "26.1.2", Loader::Fabric);
+        assert!(!update_due(&instance, &manifest), "nothing installed");
+
+        instance.mods.push(InstalledMod {
+            project_id: PROJECT_ID.to_string(),
+            name: "Nexo Mod".to_string(),
+            version_id: "v0.4.0-alpha".to_string(),
+            version_number: "0.4.0".to_string(),
+            file_name: "nexomod-0.4.0.jar".to_string(),
+            source: ModSource::NexoMod,
+            enabled: true,
+            edition: Some(Edition::Tactical),
+            sha256: Some("aaa".to_string()),
+        });
+        assert!(update_due(&instance, &manifest), "older");
+
+        let current = instance.mods[0].clone();
+        assert!(!hand_copied(&current, Some("aaa")), "what the launcher wrote");
+        assert!(hand_copied(&current, Some("bbb")), "someone's own build");
+        assert!(!hand_copied(&current, None), "gone: an update can bring it back");
+        assert!(!hand_copied(&InstalledMod { sha256: None, ..current }, Some("bbb")), "from before hashes were kept");
+
+        instance.game_version = "26.3".to_string();
+        assert!(!update_due(&instance, &manifest), "the release is for another Minecraft");
+        instance.game_version = "26.1.2".to_string();
+
+        instance.mods[0].version_number = "0.5.0".to_string();
+        assert!(!update_due(&instance, &manifest), "already current");
+
+        instance.mods[0].version_number = "0.6.0".to_string();
+        assert!(!update_due(&instance, &manifest), "never backwards");
+    }
+
+    #[test]
+    fn newer_means_newer() {
+        assert!(is_newer("0.10.0", "0.9.1"), "not compared as text");
+        assert!(!is_newer("0.9.1", "0.9.1"));
+        assert!(!is_newer("0.9.0", "0.9.1"));
+        assert!(!is_newer("garbage", "0.9.1"));
+        assert!(!is_newer("0.9.1", "garbage"));
+    }
+
+    /// A failed write has to leave the old jar and the record of it in place.
+    #[tokio::test]
+    async fn a_failed_write_leaves_the_installed_jar_alone() {
+        let root = std::env::temp_dir().join(format!("nexo-test-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_root(&root);
+        let nexo = NexoMod::new(reqwest::Client::new(), paths.clone());
+        let manifest = manifest_from(EDITION_MANIFEST);
+        let release = Release { tag: "v0.5.0".to_string(), manifest, editions: Vec::new() };
+        let build = ReleaseEdition {
+            edition: Edition::Tactical,
+            name: "Tactical".to_string(),
+            description: None,
+            mod_id: "nexomod".to_string(),
+            jar_name: "nexomod-0.5.0.jar".to_string(),
+            sha256: None,
+            url: String::new(),
+        };
+
+        let mut instance = Instance::new("x", "26.1.2", Loader::Fabric);
+        let mods = paths.instance_mods(&instance.id);
+        std::fs::create_dir_all(&mods).unwrap();
+        nexo.place(&mut instance, &release, &build, b"old").await.unwrap();
+        assert_eq!(std::fs::read(mods.join("nexomod-0.5.0.jar")).unwrap(), b"old");
+
+        // A name too long for the file system fails the temp file's write.
+        let too_long = ReleaseEdition { jar_name: format!("nexomod-{}.jar", "9".repeat(300)), ..build };
+        assert!(nexo.place(&mut instance, &release, &too_long, b"new").await.is_err());
+        assert_eq!(std::fs::read(mods.join("nexomod-0.5.0.jar")).unwrap(), b"old");
+        assert_eq!(installed(&instance).map(|m| m.file_name.as_str()), Some("nexomod-0.5.0.jar"));
+        assert_eq!(std::fs::read_dir(&mods).unwrap().count(), 1, "no temp file left behind");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     fn manifest_from(json: &str) -> Manifest {
         serde_json::from_str(json).expect("manifest fixture should parse")
@@ -1101,6 +1279,7 @@ mod tests {
             source: ModSource::NexoMod,
             enabled: true,
             edition: Some(Edition::Tactical),
+            sha256: None,
         });
 
         nexo.remove(&mut instance).await.unwrap();
@@ -1124,6 +1303,7 @@ mod tests {
             source: ModSource::NexoMod,
             enabled: true,
             edition: None,
+            sha256: None,
         });
 
         assert_eq!(installed_edition(&instance), Some(Edition::Tactical));

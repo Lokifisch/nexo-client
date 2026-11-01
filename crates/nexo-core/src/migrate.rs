@@ -308,6 +308,7 @@ mod tests {
             source: ModSource::Local,
             enabled: true,
             edition: None,
+            sha256: None,
         });
         nexo.instances.save(&inst).await.unwrap();
         let dir = root.join("instances").join(&inst.id);

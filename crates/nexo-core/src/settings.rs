@@ -22,7 +22,7 @@ pub enum AfterLaunch {
     Close,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// `None` is automatic: see [`crate::java::ensure`].
@@ -33,6 +33,20 @@ pub struct Settings {
     // real tokenizer if somebody needs one.
     pub jvm_args: String,
     pub after_launch: AfterLaunch,
+    /// Brings Nexo Mod up to date when an instance is launched.
+    pub auto_update_mod: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            java_path: None,
+            memory_mb: None,
+            jvm_args: String::new(),
+            after_launch: AfterLaunch::default(),
+            auto_update_mod: true,
+        }
+    }
 }
 
 impl Settings {
@@ -112,6 +126,7 @@ mod tests {
             memory_mb: Some(6144),
             jvm_args: "-XX:+UseG1GC".into(),
             after_launch: AfterLaunch::Minimize,
+            auto_update_mod: false,
         };
         settings.save(&paths).unwrap();
         assert_eq!(Settings::load(&paths), settings);
@@ -127,6 +142,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(Settings::file(&paths).with_extension("json.bak")).unwrap(), "{not json");
         std::fs::write(Settings::file(&paths), r#"{"memory_mb":2048,"from_the_future":1}"#).unwrap();
         assert_eq!(Settings::load(&paths).memory_mb, Some(2048));
+        assert!(Settings::load(&paths).auto_update_mod, "on unless turned off, also in an older file");
         std::fs::remove_dir_all(paths.root()).unwrap();
     }
 

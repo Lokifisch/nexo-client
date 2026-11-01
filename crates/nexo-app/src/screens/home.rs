@@ -4,6 +4,53 @@ use crate::lively::button;
 use iced::widget::{column, container, text, Space};
 use iced::{Element, Fill};
 
+/// The whole setup as one button, for someone who has nothing yet. Anything they
+/// already have is left alone.
+fn setup_prompt(app: &App) -> Element<'_, Message> {
+    if let Some(reason) = &app.nexo_release_error {
+        return column![
+            text("Couldn't reach the Nexo download. Check your internet connection.").size(13).color(theme::text()),
+            text(reason).size(11).color(theme::muted()),
+            button(text("Try again").size(14))
+                .padding([8, 18])
+                .style(theme::ghost_button)
+                .on_press(Message::FetchNexoRelease),
+        ]
+        .spacing(8)
+        .align_x(iced::Center)
+        .into();
+    }
+
+    let ready = app.nexo_release.is_some() && !app.is_busy();
+    let mut prompt = column![
+        button(text("Install Nexo & Play").size(16).font(theme::BOLD))
+            .padding([12, 28])
+            .style(theme::hero_button)
+            .on_press_maybe(ready.then_some(Message::QuickSetup)),
+        text(match &app.nexo_release {
+            Some(release) => format!(
+                "One click. Installs the {} edition. The first start downloads Minecraft, so give it a few minutes.",
+                release.default_edition(),
+            ),
+            None => "One click. The first start downloads Minecraft, so give it a few minutes.".to_string(),
+        })
+        .size(12)
+        .color(theme::muted()),
+    ]
+    .spacing(8)
+    .align_x(iced::Center);
+
+    if let (label, Some(launch)) = crate::screens::last_instance_launch(app) {
+        prompt = prompt.push(
+            button(text(format!("{label} without Nexo")).size(13))
+                .padding([6, 14])
+                .style(theme::ghost_button)
+                .on_press(launch),
+        );
+    }
+    prompt.into()
+}
+
 /// Landing screen: the active account's character, front-on, with their name
 /// above it. Signed out, it shows the placeholder silhouette and turns into a
 /// prompt to sign in.
@@ -40,7 +87,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .spacing(8)
         .align_x(iced::Center);
 
-    if account.is_none() {
+    let has_nexo = app.instances.iter().any(|i| nexo_core::nexo_mod::installed(i).is_some());
+    if account.is_some() && !has_nexo {
+        content = content.push(Space::new().height(16));
+        content = content.push(setup_prompt(app));
+    } else if account.is_none() {
         content = content.push(Space::new().height(16));
         content = content.push(
             button(text("Sign in with Microsoft").size(15))

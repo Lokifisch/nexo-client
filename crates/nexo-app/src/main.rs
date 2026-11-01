@@ -232,6 +232,8 @@ pub struct App {
     /// Filter over the instance list, by name.
     instance_query: String,
     new_version: String,
+    /// Whether a new instance gets Nexo Mod, when its version can have it.
+    new_with_nexo: bool,
 
     /// True while the browser sign-in is outstanding, so the button can't be
     /// pressed twice — the second attempt would fail to bind the callback
@@ -486,6 +488,10 @@ pub enum Message {
     FetchNexoRelease,
     NexoReleaseLoaded(Result<nexo_core::nexo_mod::Release, String>),
     SelectNexoEdition(nexo_core::nexo_mod::Edition),
+    NewWithNexoToggled(bool),
+    /// The one button: a new instance with Nexo Mod, then straight into the game.
+    QuickSetup,
+    QuickSetupDone(Result<String, String>),
     /// Installs one edition. Carries it rather than reading the selection at
     /// handling time, so the button does exactly what its label says.
     InstallNexoMod {
@@ -688,6 +694,7 @@ impl App {
             creating: false,
             instance_query: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
+            new_with_nexo: true,
             signing_in: false,
             faces: std::collections::HashMap::new(),
             skin_texture: None,
@@ -973,24 +980,35 @@ impl App {
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
-                let name = self.new_name.trim().to_string();
-                if name.is_empty() {
-                    self.status = Status::Error("Give the instance a name first".into());
-                    return Task::none();
-                }
+                let name = match self.new_name.trim() {
+                    "" => "Nexo".to_string(),
+                    name => name.to_string(),
+                };
 
                 let version = self.new_version.clone();
+                let with_nexo = self
+                    .nexo_release
+                    .clone()
+                    .filter(|release| self.new_with_nexo && release.manifest.minecraft_version == version);
                 self.new_name.clear();
                 self.creating = false;
                 self.status = Status::Busy(format!("Creating {name}"));
 
                 Task::perform(
                     async move {
-                        core.instances
+                        let mut instance = core
+                            .instances
                             .create(&name, &version, Loader::Fabric)
                             .await
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
+                            .map_err(|e| e.to_string())?;
+                        if let Some(release) = with_nexo {
+                            core.nexo_mod
+                                .install(&mut instance, &release, release.default_edition())
+                                .await
+                                .map_err(|e| format!("{name} was created, but Nexo Mod couldn't be added: {e}"))?;
+                            core.instances.save(&instance).await.map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
                     },
                     Message::InstanceCreated,
                 )
@@ -1002,7 +1020,69 @@ impl App {
             }
             Message::InstanceCreated(Err(err)) => {
                 self.status = Status::Error(err);
+                // The instance may exist even so.
+                self.core.clone().map(reload).unwrap_or_else(Task::none)
+            }
+
+            Message::NewWithNexoToggled(on) => {
+                self.new_with_nexo = on;
                 Task::none()
+            }
+
+            Message::QuickSetup => {
+                let (Some(core), Some(release)) = (self.core.clone(), self.nexo_release.clone()) else {
+                    return Task::none();
+                };
+                if self.is_busy() {
+                    return Task::none();
+                }
+                if self.active_account().is_none() {
+                    self.status = Status::Error("Sign in with Microsoft first, on the Home screen.".into());
+                    return Task::none();
+                }
+                // Already set up: there's no reason to make another.
+                if let Some(existing) = self
+                    .instances
+                    .iter()
+                    .find(|i| nexo_core::nexo_mod::installed(i).is_some() && release.manifest.supports(i))
+                {
+                    return Task::done(Message::Launch(existing.id.clone(), None));
+                }
+                self.status = Status::Busy("Setting up Nexo".into());
+                Task::perform(
+                    async move {
+                        let mut instance = core
+                            .instances
+                            .create("Nexo", &release.manifest.minecraft_version, Loader::Fabric)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        // Counts as most recently played from the start, or if the launch
+                        // fails, Play would then go to whatever was played before.
+                        instance.last_played = Some(nexo_core::instance::now());
+                        let installed = match core.nexo_mod.install(&mut instance, &release, release.default_edition()).await {
+                            Ok(()) => core.instances.save(&instance).await,
+                            Err(err) => Err(err),
+                        };
+                        if let Err(err) = installed {
+                            // Brand new and empty, so retries don't pile up husks.
+                            core.instances.delete(&instance.id).await.ok();
+                            return Err(err.to_string());
+                        }
+                        Ok(instance.id)
+                    },
+                    Message::QuickSetupDone,
+                )
+            }
+            Message::QuickSetupDone(Ok(id)) => {
+                // Stays Busy until the launch takes over, so the button can't be pressed again.
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                reload(core).chain(Task::done(Message::Launch(id, None)))
+            }
+            Message::QuickSetupDone(Err(err)) => {
+                self.status = Status::Error(format!("Couldn't set up Nexo: {err}"));
+                self.core.clone().map(reload).unwrap_or_else(Task::none)
             }
 
             Message::DeleteInstance(id) => {
@@ -1304,17 +1384,28 @@ impl App {
             }
 
             Message::NexoReleaseLoaded(Ok(release)) => {
+                // New instances default to what the mod runs on.
+                if self.new_version == DEFAULT_GAME_VERSION {
+                    self.new_version = release.manifest.minecraft_version.clone();
+                }
                 self.nexo_release = Some(release);
                 self.nexo_release_error = None;
-                let behind = self.instances.iter().filter(|i| self.nexo_mod_outdated(i)).count();
+                // Updates happen by themselves on Play, so only what that can't do
+                // is worth saying: an instance on another Minecraft version.
+                let behind = self
+                    .instances
+                    .iter()
+                    .filter(|i| self.nexo_mod_outdated(i))
+                    .filter(|i| !self.settings.auto_update_mod || !self.nexo_release.as_ref().is_some_and(|r| r.manifest.supports(i)))
+                    .count();
                 if let Some(release) = &self.nexo_release
                     && behind > 0
                     && matches!(self.status, Status::Idle)
                 {
                     let version = &release.manifest.mod_version;
                     self.status = Status::Notice(match behind {
-                        1 => format!("Nexo Mod {version} is out — 1 instance can update"),
-                        n => format!("Nexo Mod {version} is out — {n} instances can update"),
+                        1 => format!("Nexo Mod {version} is out, for Minecraft {}. 1 instance can't update until it's on that version.", release.manifest.minecraft_version),
+                        n => format!("Nexo Mod {version} is out, for Minecraft {}. {n} instances can't update until they're on that version.", release.manifest.minecraft_version),
                     });
                 }
                 Task::none()
@@ -1338,6 +1429,10 @@ impl App {
                 else {
                     return Task::none();
                 };
+                // Swapping the jar under a game, or under a launch being prepared.
+                if self.instance_running(&id) || self.preparing > 0 {
+                    return Task::none();
+                }
                 self.status = Status::Busy(format!("Installing Nexo Mod ({edition})"));
 
                 Task::perform(
@@ -3041,7 +3136,9 @@ impl App {
     /// Has Nexo Mod installed, older than the newest release.
     fn nexo_mod_outdated(&self, instance: &Instance) -> bool {
         match (&self.nexo_release, nexo_core::nexo_mod::installed(instance)) {
-            (Some(release), Some(installed)) => installed.version_number != release.manifest.mod_version,
+            (Some(release), Some(installed)) => {
+                nexo_core::nexo_mod::is_newer(&release.manifest.mod_version, &installed.version_number)
+            }
             _ => false,
         }
     }
@@ -3269,6 +3366,23 @@ fn dev_screen() -> Task<Message> {
     let later = |m: Message| Task::perform(tokio::time::sleep(std::time::Duration::from_millis(1500)), move |_| m.clone());
     match parts.next() {
         Some("servers") => Task::done(Message::Navigate(Screen::Servers)),
+        // Home as a signed-in player with nothing set up, with no real account.
+        Some("setup") => {
+            let account = Account {
+                uuid: "00000000000000000000000000000000".to_string(),
+                username: "Friend".to_string(),
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at: 0,
+                skin_url: None,
+                skin_model: Default::default(),
+                cape_url: None,
+            };
+            let active = Some(account.uuid.clone());
+            let run = parts.next() == Some("run");
+            let signed_in = later(Message::Loaded { instances: Vec::new(), accounts: vec![account], active });
+            if run { signed_in.chain(later(Message::QuickSetup)) } else { signed_in }
+        }
         Some("settings") => {
             use screens::settings::{Msg, Tab};
             let tab = if parts.next() == Some("games") { Tab::Games } else { Tab::Appearance };

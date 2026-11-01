@@ -163,6 +163,7 @@ impl Content {
             source: ModSource::Modrinth,
             enabled: true,
             edition: None,
+            sha256: None,
         });
 
         Ok(())
@@ -216,6 +217,7 @@ impl Content {
             source: ModSource::Local,
             enabled: true,
             edition: None,
+            sha256: None,
         });
 
         Ok(())
@@ -504,6 +506,7 @@ mod tests {
             source: ModSource::Local,
             enabled: true,
             edition: None,
+            sha256: None,
         });
         assert!(content.remove(&mut instance, "x").await.is_err());
     }

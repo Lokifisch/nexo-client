@@ -617,3 +617,44 @@ async fn hosting_end_to_end() {
 }
 
 
+
+/// The update Play runs: an older tracked jar is replaced by the newest release's,
+/// in the same edition, and a jar swapped in by hand is left alone.
+#[tokio::test]
+#[ignore = "hits the network"]
+async fn nexo_mod_updates_itself_but_not_a_hand_copied_jar() {
+    let paths = temp_paths();
+    // GitHub answers 403 without a User-Agent.
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("Lokifisch/nexo-client/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .unwrap();
+    let nexo = NexoMod::new(http, paths.clone());
+    let release = nexo.latest_including_prereleases().await.unwrap();
+
+    let mut instance = Instance::new("x", &release.manifest.minecraft_version, Loader::Fabric);
+    nexo.install(&mut instance, &release, Edition::Legit).await.unwrap();
+    assert!(!nexo.update_if_due(&mut instance, None).await.unwrap(), "already current");
+
+    instance.mods[0].version_number = "0.0.1".to_string();
+    assert!(nexo.update_if_due(&mut instance, None).await.unwrap(), "older, so it updates");
+    assert_eq!(instance.mods[0].version_number, release.manifest.mod_version);
+    assert_eq!(nexo_core::nexo_mod::installed_edition(&instance), Some(Edition::Legit));
+
+    instance.mods[0].version_number = "0.0.1".to_string();
+    let jar = paths.instance_mods(&instance.id).join(&instance.mods[0].file_name);
+    std::fs::write(&jar, b"my own build").unwrap();
+    assert!(!nexo.update_if_due(&mut instance, None).await.unwrap(), "someone's own jar stays");
+    assert_eq!(std::fs::read(&jar).unwrap(), b"my own build");
+
+    // Gone, say after an interrupted update: the next Play brings it back.
+    std::fs::remove_file(&jar).unwrap();
+    assert!(nexo.update_if_due(&mut instance, None).await.unwrap());
+    assert!(jar.exists());
+
+    // A build newer than the release is left where it is.
+    instance.mods[0].version_number = "999.0.0".to_string();
+    assert!(!nexo.update_if_due(&mut instance, None).await.unwrap(), "never backwards");
+
+    std::fs::remove_dir_all(paths.root()).unwrap();
+}

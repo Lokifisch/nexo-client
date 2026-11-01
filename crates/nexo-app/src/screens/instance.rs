@@ -255,7 +255,7 @@ fn nexo_mod_card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Messag
         row![
             column![
                 text("Nexo Mod").size(17).color(theme::text()),
-                text("The client-side half — cosmetics, position obscuring, macros.")
+                text("HUDs, emotes, macros and privacy tools.")
                     .size(12)
                     .color(theme::muted()),
             ]
@@ -327,11 +327,12 @@ fn release_section<'a>(
     {
         return column![
             text(reason).size(12).color(theme::muted()),
-            text("Create an instance on that version to use Nexo Mod.")
-                .size(11)
-                .color(theme::muted()),
+            button(text("Make a new Nexo instance & play").size(14))
+                .padding([8, 17])
+                .style(theme::primary_button)
+                .on_press_maybe((!app.is_busy()).then_some(Message::QuickSetup)),
         ]
-        .spacing(4)
+        .spacing(10)
         .into();
     }
 
@@ -369,9 +370,8 @@ fn release_section<'a>(
             }
         }
         None => text(format!(
-            "Compatible — version {} targets {} {}",
+            "Ready to install: version {} for Minecraft {}",
             release.manifest.mod_version,
-            release.manifest.loader,
             release.manifest.minecraft_version
         ))
         .size(12)
@@ -416,7 +416,7 @@ fn release_section<'a>(
                 // Frames the choice as what it is. Which features sit in
                 // which jar is the manifest's business — this line is about
                 // the consequence, and holds no matter what a release ships.
-                text("Pick an edition. This decides what the mod is allowed to do on a server, not how much of it you get.")
+                text("Not sure? Leave it as it is and press the button. This decides what the mod is allowed to do on a server.")
                     .size(11)
                     .color(theme::muted()),
                 tiles,
@@ -443,7 +443,7 @@ fn release_section<'a>(
         // Same edition already there: only an update is left to offer.
         Some(current) if current == selected => (!up_to_date).then(|| "Update".to_string()),
         Some(_) => Some(format!("Switch to {selected}")),
-        None if release.offers_a_choice() => Some(format!("Install {selected}")),
+        None if release.offers_a_choice() => Some(format!("Install Nexo Mod ({selected})")),
         None => Some("Install Nexo Mod".to_string()),
     };
 

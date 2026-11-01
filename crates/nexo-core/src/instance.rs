@@ -160,6 +160,11 @@ pub struct InstalledMod {
         skip_serializing_if = "Option::is_none"
     )]
     pub edition: Option<crate::nexo_mod::Edition>,
+    /// SHA-256 of the jar as the launcher wrote it, on [`ModSource::NexoMod`]
+    /// entries from 0.11 on. A file that no longer matches was put there by hand,
+    /// so automatic updates leave it alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

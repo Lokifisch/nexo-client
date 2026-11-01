@@ -198,6 +198,7 @@ impl MrPack {
                         source: ModSource::Modrinth,
                         enabled: true,
                         edition: None,
+                        sha256: None,
                     });
                 }
                 Err(err) => {
