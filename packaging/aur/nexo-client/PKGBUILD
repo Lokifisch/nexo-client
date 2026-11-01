@@ -1,6 +1,6 @@
 # Maintainer: Lokifisch <lokifisch@lokifisch.dev>
 pkgname=nexo-client
-pkgver=0.9.0
+pkgver=0.10.0
 pkgrel=1
 pkgdesc="Native Minecraft launcher — no webview, no bundled runtime"
 arch=('x86_64' 'aarch64')
@@ -37,7 +37,7 @@ optdepends=(
 	'vulkan-intel: Vulkan driver for Intel GPUs'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('1d7d13c38fb384b9108dd2871749777222a7e718cf1b6b059a46d6d54558e9a9')
+sha256sums=('20d2bb6ea508a3de748228c65922f4183e59b4182dbabbc2cbf79211780db4bf')
 
 prepare() {
 	cd "$pkgname-$pkgver"
