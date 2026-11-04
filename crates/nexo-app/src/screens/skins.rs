@@ -1,10 +1,25 @@
+use crate::lively::{button, scrollable, text, text_input};
+use crate::skin3d::{self, SkinViewer, Stance};
 use crate::theme;
 use crate::{App, Message};
-use crate::lively::button;
-use crate::lively::scrollable;
-use iced::widget::{column, container, image, mouse_area, row, stack, text, Space};
+use iced::widget::{column, container, mouse_area, row, shader, stack, svg, Space};
 use iced::{Element, Fill};
 use nexo_core::SkinModel;
+use std::sync::{Arc, LazyLock};
+
+static RENAME: LazyLock<svg::Handle> = LazyLock::new(|| super::icon("M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"));
+static DELETE: LazyLock<svg::Handle> = LazyLock::new(|| super::icon("M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"));
+static DONE: LazyLock<svg::Handle> = LazyLock::new(|| super::icon("M5 12l5 5L20 7"));
+static PLACEHOLDER: LazyLock<Arc<nexo_core::skin::Rgba>> = LazyLock::new(|| Arc::new(nexo_core::skin::placeholder_texture()));
+
+/// A small icon button over a tile.
+fn tool<'a>(icon: &LazyLock<svg::Handle>, style: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style, message: Message) -> Element<'a, Message> {
+    button(svg((*icon).clone()).width(14).height(14).style(theme::nav_icon(1.0))).padding(6).style(style).on_press(message).into()
+}
+
+/// Every tile is the same size, so the grids line up and wrap cleanly.
+const TILE_WIDTH: f32 = 196.0;
+const FIGURE_HEIGHT: f32 = 220.0;
 
 /// Skin and cape management for the active account.
 ///
@@ -12,8 +27,6 @@ use nexo_core::SkinModel;
 /// launcher setting — it applies wherever the account is used, so the copy
 /// says so rather than implying it is local.
 pub fn view(app: &App) -> Element<'_, Message> {
-    // Only presence matters here: which model to show comes from
-    // `app.skin_model`, which the toggle owns.
     if app.active_account().is_none() {
         return crate::empty_state(
             "Sign in to change your skin",
@@ -21,360 +34,257 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
 
-    signed_in(app)
-}
-
-fn signed_in(app: &App) -> Element<'_, Message> {
-    let heading = crate::screens::header(
-        "Skin & capes",
-        "Changes apply to your Minecraft account everywhere, not just here.",
-        None,
-    );
-
-    // Two columns: the character on the left, everything that changes it on
-    // the right — so the effect of a change is visible next to the control
-    // that made it.
-    let preview: Element<'_, Message> = match &app.skin_texture {
-        Some(texture) => container(
-            iced::widget::shader(crate::skin3d::SkinViewer::new(
-                std::sync::Arc::clone(texture),
-                app.cape_texture.clone(),
-                app.skin_model,
-                app.skin_key,
-                // No border here: this is a real skin, and the ring exists to
-                // mark the signed-out placeholder.
-                false,
-                app.focused,
-                app.cape_reveal,
-            ))
-            .width(240)
-            .height(340),
-        )
-        .padding(16)
-        .style(theme::card)
-        .into(),
-        None => Space::new().width(272).height(372).into(),
-    };
-
-    // Only the controls scroll. The shader widget draws straight to the
-    // surface with its own render pass, so it does not follow a scroll
-    // translation — inside a scrollable it stays pinned and then gets
-    // clipped. Keeping it out is also better: the preview stays visible
-    // while the controls beside it are used.
-    let controls = scrollable(
-        // `app.skin_model` rather than `account.skin_model`: the toggle
-        // updates the former, and highlighting from the latter meant the
-        // model changed while the buttons stayed put.
-        column![skin_card(app, app.skin_model), library_card(app), capes_card(app)]
-            .spacing(16)
-            .width(Fill),
-    )
-    .height(Fill);
-
-    column![
-        heading,
-        row![preview, controls].spacing(20).height(Fill),
+    let busy = app.is_busy();
+    let toolbar = row![
+        text_input("Search skins…", &app.skin_query)
+            .on_input(Message::SkinQuery)
+            .padding([9, 14])
+            .size(14)
+            .width(360),
+        Space::new().width(Fill),
+        button(text("Reset to default").size(13))
+            .padding([8, 14])
+            .style(theme::ghost_button)
+            .on_press_maybe((!busy).then_some(Message::ResetSkin)),
+        button(text("+ Add skin").size(13).font(theme::bold()))
+            .padding([8, 16])
+            .style(theme::primary_button)
+            .on_press_maybe((!busy).then_some(Message::UploadSkin)),
     ]
-    .spacing(16)
-    .height(Fill)
-    .into()
-}
-
-fn skin_card(app: &App, model: SkinModel) -> Element<'_, Message> {
-    // The arm width is part of the skin, not a separate preference — the same
-    // texture reads wrong on the other model, so it is chosen at upload time.
-    let variant = row![
-        text("Model").size(13).color(theme::muted()).width(90),
-        button(text("Classic").size(13))
-            .padding([6, 13])
-            .style(theme::nav_chip(model == SkinModel::Classic))
-            .on_press(Message::SetSkinModel(SkinModel::Classic)),
-        button(text("Slim").size(13))
-            .padding([6, 13])
-            .style(theme::nav_chip(model == SkinModel::Slim))
-            .on_press(Message::SetSkinModel(SkinModel::Slim)),
-    ]
-    .spacing(8)
+    .spacing(10)
     .align_y(iced::Center);
 
-    container(
-        column![
-            text("Skin").size(17).color(theme::text()),
-            text("Drag the model to turn it. Upload a 64×64 PNG; slim gives the narrower three-pixel arms.")
-                .size(12)
-                .color(theme::muted()),
-            Space::new().height(4),
-            variant,
-            Space::new().height(4),
-            row![
-                button(text("Upload skin…").size(13))
-                    .padding([7, 15])
-                    .style(theme::primary_button)
-                    .on_press_maybe((!app.is_busy()).then_some(Message::UploadSkin)),
-                button(text("Reset to default").size(13))
-                    .padding([7, 15])
-                    .style(theme::ghost_button)
-                    .on_press_maybe((!app.is_busy()).then_some(Message::ResetSkin)),
-            ]
-            .spacing(10),
+    let page = column![
+        section("Skins", "Changes apply to your Minecraft account everywhere, not just here. Every skin you wear is kept here."),
+        skins_grid(app),
+        Space::new().height(12),
+        row![
+            section("Capes", "Shown on your skin. Only capes your account owns can be worn."),
+            button(text("Refresh").size(12))
+                .padding([6, 12])
+                .style(theme::ghost_button)
+                .on_press(Message::LoadCapes),
         ]
-        .spacing(8),
-    )
-    .padding(18)
+        .align_y(iced::Center),
+        capes_grid(app),
+    ]
+    .spacing(14)
     .width(Fill)
-    .style(theme::card)
+    .padding(iced::Padding { right: 14.0, bottom: 8.0, ..Default::default() });
+
+    column![toolbar, scrollable(page).height(Fill)].spacing(18).height(Fill).into()
+}
+
+fn section<'a>(title: &'a str, help: &'a str) -> Element<'a, Message> {
+    column![
+        text(title).size(18).font(theme::bold()).color(theme::text()),
+        text(help).size(12).color(theme::muted()),
+    ]
+    .spacing(3)
+    .width(Fill)
     .into()
 }
 
-/// Capes as a grid of thumbnails. A list of full-width rows wasted most of
-/// the width on a 10x16 image, and capes are picked by looking at them.
-/// Every skin the account has worn, so an old one can be put back on.
-fn library_card(app: &App) -> Element<'_, Message> {
-    const COLUMNS: usize = 4;
+/// Tiles in rows as wide as the window allows. Each is held to its width
+/// here: the arrival animation and the hover tools fill whatever they're given, and a
+/// tile that fills the row wraps alone.
+fn wrap<'a>(tiles: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    let tiles = tiles.into_iter().map(|tile| container(tile).width(TILE_WIDTH).into());
+    row(tiles).spacing(14).width(Fill).wrap().vertical_spacing(14).into()
+}
 
-    let body = column![
-        text("Your skins").size(17).color(theme::text()),
-        text("Kept automatically whenever a skin is worn. Click one to put it back on.")
-            .size(12)
-            .color(theme::muted()),
-    ]
-    .spacing(3);
+fn figure<'a>(viewer: SkinViewer) -> Element<'a, Message> {
+    shader(viewer).width(Fill).height(FIGURE_HEIGHT).into()
+}
+
+/// A tile: the figure, a name and a line under it. `chosen` outlines it.
+fn tile<'a>(figure: Element<'a, Message>, name: Element<'a, Message>, detail: Element<'a, Message>, chosen: bool, on_press: Option<Message>) -> Element<'a, Message> {
+    button(column![figure, name, detail].spacing(4).align_x(iced::Center))
+        .padding([10, 10])
+        .width(TILE_WIDTH)
+        .style(if chosen { theme::selected_tile } else { theme::tile })
+        .on_press_maybe(on_press)
+        .into()
+}
+
+fn model_label(model: SkinModel) -> &'static str {
+    match model {
+        SkinModel::Classic => "Classic",
+        SkinModel::Slim => "Slim",
+    }
+}
+
+fn skins_grid(app: &App) -> Element<'_, Message> {
+    let busy = app.is_busy();
+    let query = app.skin_query.trim().to_lowercase();
+    let worn_pixels = app.skin_texture.as_ref().map(|texture| &texture.pixels);
 
     let mut tiles: Vec<Element<'_, Message>> = Vec::new();
-    for saved in &app.saved_skins {
-        let preview: Element<'_, Message> = match app.skin_previews.get(&saved.id) {
-            Some(handle) => image(handle.clone())
-                .filter_method(image::FilterMethod::Nearest)
-                .width(48)
-                .height(96)
-                .into(),
-            None => Space::new().width(48).height(96).into(),
-        };
+    // The way in for a new one is a tile like the rest.
+    if query.is_empty() {
+        tiles.push(add_tile(busy));
+    }
 
-        // Confirmation replaces the tile's own contents rather than appearing
-        // elsewhere, so the thing being deleted is the thing you are looking
-        // at.
-        if app.confirm_delete.as_deref() == Some(saved.id.as_str()) {
-            tiles.push(
-                container(
-                    column![
-                        text("Delete?").size(12).color(theme::text()),
-                        row![
-                            button(text("Yes").size(11))
-                                .padding([4, 8])
-                                .style(theme::danger_button)
-                                .on_press(Message::ConfirmDeleteSkin(saved.id.clone())),
-                            button(text("No").size(11))
-                                .padding([4, 8])
-                                .style(theme::ghost_button)
-                                .on_press(Message::CancelDeleteSkin),
-                        ]
-                        .spacing(6),
-                    ]
-                    .spacing(8)
-                    .align_x(iced::Center),
-                )
-                .padding(8)
-                .height(120)
-                .width(Fill)
-                .center_y(Fill)
-                .style(theme::card)
-                .into(),
-            );
+    let mut index = 0;
+    for saved in &app.saved_skins {
+        let name = saved.name.as_deref().unwrap_or("Saved skin");
+        if !query.is_empty() && !name.to_lowercase().contains(&query) {
             continue;
         }
-
-        let hovered = app.hovered_skin.as_deref() == Some(saved.id.as_str());
-
-        let tile = button(container(preview).width(Fill).center_x(Fill))
-            .padding(8)
-            .width(Fill)
-            .height(120)
-            .style(if hovered { theme::selected_tile } else { theme::tile })
-            .on_press_maybe(
-                (!app.is_busy()).then(|| Message::WearSavedSkin(saved.id.clone())),
-            );
-
-        // The bin is stacked over the tile rather than laid out inside it, so
-        // the tile keeps one shape whether or not the cursor is on it —
-        // previously it grew a row and the grid jumped as the cursor moved.
-        let overlaid: Element<'_, Message> = if hovered {
-            stack![
-                tile,
-                container(
-                    button(text("🗑").size(12))
-                        .padding([2, 6])
-                        .style(theme::danger_button)
-                        .on_press(Message::AskDeleteSkin(saved.id.clone()))
-                )
-                .width(Fill)
-                .height(Fill)
-                .align_right(Fill)
-                .align_bottom(Fill)
-                .padding(6),
-            ]
-            .into()
-        } else {
-            tile.into()
-        };
-
-        tiles.push(
-            mouse_area(overlaid)
-                .on_enter(Message::HoverSkin(Some(saved.id.clone())))
-                .on_exit(Message::HoverSkin(None))
-                .into(),
-        );
+        let Some((texture, model)) = app.saved_textures.get(&saved.id) else { continue };
+        let worn = worn_pixels == Some(&texture.pixels);
+        tiles.push(super::arrive(app, index, skin_tile(app, saved, name, texture, *model, worn, busy)));
+        index += 1;
     }
 
-    let note: Element<'_, Message> = if app.saved_skins.is_empty() {
-        text("Nothing saved yet — the skin you're wearing is added automatically.")
-            .size(12)
-            .color(theme::muted())
+    if tiles.is_empty() {
+        return text("No saved skin has that name.").size(13).color(theme::muted()).into();
+    }
+    wrap(tiles)
+}
+
+fn add_tile<'a>(busy: bool) -> Element<'a, Message> {
+    let plus = container(text("+").size(30).font(theme::bold()).color(theme::accent()))
+        .width(64)
+        .height(64)
+        .center_x(64)
+        .center_y(64)
+        .style(theme::well);
+    let figure = container(plus).width(Fill).height(FIGURE_HEIGHT).center_x(Fill).center_y(FIGURE_HEIGHT);
+    tile(
+        figure.into(),
+        text("Add new skin").size(15).font(theme::bold()).color(theme::text()).into(),
+        text("Upload a 64×64 PNG").size(12).color(theme::muted()).into(),
+        false,
+        (!busy).then_some(Message::UploadSkin),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn skin_tile<'a>(
+    app: &'a App,
+    saved: &'a nexo_core::skin_library::SavedSkin,
+    name: &'a str,
+    texture: &Arc<nexo_core::skin::Rgba>,
+    model: SkinModel,
+    worn: bool,
+    busy: bool,
+) -> Element<'a, Message> {
+    let slot = skin3d::slot(&saved.id);
+    // The pose comes from the skin's id, mixed with a number drawn at launch.
+    let figure = figure(SkinViewer::new(Arc::clone(texture), None, model, slot, slot, Stance::Showcase(slot)));
+
+    // Deleting asks first, in the tile itself, so the thing being deleted is
+    // the thing you are looking at.
+    if app.confirm_delete.as_deref() == Some(saved.id.as_str()) {
+        let ask = row![
+            button(text("Delete").size(12))
+                .padding([5, 10])
+                .style(theme::danger_button)
+                .on_press(Message::ConfirmDeleteSkin(saved.id.clone())),
+            button(text("Keep").size(12))
+                .padding([5, 10])
+                .style(theme::ghost_button)
+                .on_press(Message::CancelDeleteSkin),
+        ]
+        .spacing(6);
+        return tile(figure, text(format!("Delete {name}?")).size(13).color(theme::text()).into(), ask.into(), false, None);
+    }
+
+    let renaming = app.renaming_skin.as_ref().filter(|(id, _)| id == &saved.id);
+    let title: Element<'_, Message> = match renaming {
+        Some((_, draft)) => text_input("Name", draft)
+            .on_input(Message::RenameDraft)
+            .on_submit(Message::RenameDone)
+            .size(14)
+            .padding([4, 8])
+            .into(),
+        None => text(name).size(15).font(theme::bold()).color(theme::text()).into(),
+    };
+    let detail: Element<'_, Message> = if worn {
+        text(format!("{} · Wearing", model_label(model))).size(12).color(theme::mint()).into()
+    } else {
+        text(model_label(model)).size(12).color(theme::muted()).into()
+    };
+    let wear = (!busy && !worn && renaming.is_none()).then(|| Message::WearSavedSkin(saved.id.clone()));
+    let body = tile(figure, title, detail, worn, wear);
+
+    // The buttons sit over the tile rather than in it, so the tile keeps one
+    // shape whether or not the cursor is on it.
+    let hovered = app.hovered_skin.as_deref() == Some(saved.id.as_str());
+    let tools: Element<'_, Message> = if hovered && renaming.is_none() {
+        container(
+            column![
+                tool(&RENAME, theme::ghost_button, Message::RenameSkin(saved.id.clone())),
+                tool(&DELETE, theme::danger_button, Message::AskDeleteSkin(saved.id.clone())),
+            ]
+            .spacing(6),
+        )
+        .width(Fill)
+        .align_right(Fill)
+        .padding(8)
+        .into()
+    } else if renaming.is_some() {
+        container(tool(&DONE, theme::primary_button, Message::RenameDone))
+            .width(Fill)
+            .align_right(Fill)
+            .padding(8)
             .into()
     } else {
-        Space::new().height(0).into()
+        Space::new().into()
     };
 
-    // Pad the last row so its tiles keep the width of the rest.
-    let remainder = tiles.len() % COLUMNS;
-    if remainder != 0 {
-        for _ in 0..(COLUMNS - remainder) {
-            tiles.push(Space::new().width(Fill).into());
-        }
-    }
-
-    let mut grid = column![].spacing(10);
-    let mut current: Vec<Element<'_, Message>> = Vec::with_capacity(COLUMNS);
-    for (index, tile) in tiles.into_iter().enumerate() {
-        current.push(super::arrive(app, index, tile));
-        if current.len() == COLUMNS {
-            grid = grid.push(row(std::mem::take(&mut current)).spacing(10));
-        }
-    }
-
-    container(body.push(note).push(grid).spacing(12))
-        .padding(18)
-        .width(Fill)
-        .style(theme::card)
+    mouse_area(stack![body, tools])
+        .on_enter(Message::HoverSkin(Some(saved.id.clone())))
+        .on_exit(Message::UnhoverSkin(saved.id.clone()))
         .into()
 }
 
-fn capes_card(app: &App) -> Element<'_, Message> {
-    /// Tiles per row. Four fits the controls column without the tiles
-    /// becoming too small to recognise a cape by.
-    const COLUMNS: usize = 4;
-
-    let body = column![row![
-        column![
-            text("Capes").size(17).color(theme::text()),
-            text("Only capes your account already owns can be worn.")
-                .size(12)
-                .color(theme::muted()),
-        ]
-        .spacing(3)
-        .width(Fill),
-        button(text("Refresh").size(12))
-            .padding([6, 12])
-            .style(theme::ghost_button)
-            .on_press(Message::LoadCapes),
-    ]
-    .align_y(iced::Center)]
-    .spacing(12);
-
-    // Deliberately no early return with a different shape here. Swapping the
-    // card's structure reassigns widget state further up the tree, which reset
-    // the 3D viewer's pose — the model snapped to the front mid-animation.
-    // The grid is simply empty instead.
+/// One tile per cape the account owns, each drawn on the skin being worn,
+/// from behind: what you'd see turning round after putting it on.
+fn capes_grid(app: &App) -> Element<'_, Message> {
+    // Until the worn skin has loaded, or if it couldn't be, the capes go on
+    // the placeholder figure rather than disappearing with it.
+    let skin = app.skin_texture.as_ref().unwrap_or(&PLACEHOLDER);
+    let busy = app.is_busy();
     let none_worn = !app.capes.iter().any(|c| c.is_active());
+    // The skin's own key is in each cape tile's, so changing skin redraws them.
+    let back = |name: &str, cape: Option<Arc<nexo_core::skin::Rgba>>| {
+        let slot = skin3d::slot(&format!("cape:{name}"));
+        figure(SkinViewer::new(Arc::clone(skin), cape, app.skin_model, slot ^ app.skin_key, slot, Stance::Back))
+    };
+    let caption = |worn: bool| -> Element<'_, Message> {
+        if worn {
+            text("Wearing").size(12).color(theme::mint()).into()
+        } else {
+            text("Click to wear").size(12).color(theme::muted()).into()
+        }
+    };
 
     // "No cape" is a tile like any other, so taking one off is the same
-    // gesture as putting one on rather than a differently-shaped action.
-    let mut tiles: Vec<Element<'_, Message>> = vec![cape_tile(
-        Space::new().width(60).height(96).into(),
-        "No cape",
+    // gesture as putting one on.
+    let mut tiles = vec![tile(
+        back("", None),
+        text("No cape").size(15).font(theme::bold()).color(theme::text()).into(),
+        caption(none_worn),
         none_worn,
-        (!app.is_busy() && !none_worn).then_some(Message::HideCape),
+        (!busy && !none_worn).then_some(Message::HideCape),
     )];
-
-    for cape in &app.capes {
+    for (index, cape) in app.capes.iter().enumerate() {
         let worn = cape.is_active();
-        let preview: Element<'_, Message> = match app.cape_previews.get(&cape.id) {
-            Some(handle) => image(handle.clone())
-                .filter_method(image::FilterMethod::Nearest)
-                .width(60)
-                .height(96)
-                .into(),
-            None => Space::new().width(60).height(96).into(),
-        };
-
-        tiles.push(cape_tile(
-            preview,
-            cape.label(),
+        // Until its texture arrives, the cape tile shows the bare back.
+        let texture = app.cape_textures.get(&cape.id).cloned();
+        let tile = tile(
+            back(&format!("{}:{}", cape.id, texture.is_some()), texture),
+            text(cape.label()).size(15).font(theme::bold()).color(theme::text()).into(),
+            caption(worn),
             worn,
-            (!app.is_busy() && !worn).then(|| Message::WearCape(cape.id.clone())),
-        ));
+            (!busy && !worn).then(|| Message::WearCape(cape.id.clone())),
+        );
+        tiles.push(super::arrive(app, index + 1, tile));
     }
-
-    // Pad the last row so its tiles keep the same width as the rest rather
-    // than stretching across the gap.
-    let remainder = tiles.len() % COLUMNS;
-    if remainder != 0 {
-        for _ in 0..(COLUMNS - remainder) {
-            tiles.push(Space::new().width(Fill).into());
-        }
+    if app.capes.is_empty() {
+        tiles.push(text("No capes on this account yet.").size(12).color(theme::muted()).into());
     }
-
-    let mut grid = column![].spacing(10);
-    let mut current: Vec<Element<'_, Message>> = Vec::with_capacity(COLUMNS);
-    for (index, tile) in tiles.into_iter().enumerate() {
-        current.push(super::arrive(app, index, tile));
-        if current.len() == COLUMNS {
-            grid = grid.push(row(std::mem::take(&mut current)).spacing(10));
-        }
-    }
-
-    let note: Element<'_, Message> = if app.capes.is_empty() {
-        text("No capes on this account yet.")
-            .size(12)
-            .color(theme::muted())
-            .into()
-    } else {
-        Space::new().height(0).into()
-    };
-
-    container(body.push(note).push(grid))
-        .padding(18)
-        .width(Fill)
-        .style(theme::card)
-        .into()
-}
-
-fn cape_tile<'a>(
-    preview: Element<'a, Message>,
-    label: &'a str,
-    worn: bool,
-    on_press: Option<Message>,
-) -> Element<'a, Message> {
-    let caption = if worn {
-        text("Worn").size(11).color(theme::mint())
-    } else {
-        text(label).size(11).color(theme::muted())
-    };
-
-    button(
-        column![preview, caption]
-            .spacing(6)
-            .align_x(iced::Center),
-    )
-    .padding(8)
-    .width(Fill)
-    // The worn one is outlined so it reads as selected without needing the
-    // caption to be read.
-    .style(if worn {
-        theme::selected_tile
-    } else {
-        theme::tile
-    })
-    .on_press_maybe(on_press)
-    .into()
+    wrap(tiles)
 }

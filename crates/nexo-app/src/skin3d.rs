@@ -43,22 +43,19 @@ const REST_PITCH: f32 = 0.20;
 /// from the front pose, keeping the same slight lean.
 const BACK_YAW: f32 = REST_YAW + std::f32::consts::PI;
 
-
 /// How long a dragged pose is left alone before it eases back.
 const HOLD: Duration = Duration::from_secs(5);
-
-/// How long the model stays turned round after a cape change before easing
-/// back to the front. Long enough to actually look at the cape.
-const REVEAL_HOLD: Duration = Duration::from_secs(30);
-
-/// How long the turn itself takes, each way. Fixed, so the movement looks the
-/// same every time regardless of where the model happened to be.
-const TURN: Duration = Duration::from_millis(1000);
 
 /// Fraction of the remaining distance closed per second while easing back.
 /// Exponential rather than linear so it arrives gently instead of stopping
 /// dead.
 const RETURN_RATE: f32 = 2.2;
+
+/// How fast the head turns toward the cursor, the same way.
+const LOOK_RATE: f32 = 5.0;
+/// How far the head turns from the body before the neck would look broken.
+const MAX_LOOK_YAW: f32 = 1.0;
+const MAX_LOOK_PITCH: f32 = 0.55;
 
 /// Below this, the pose is close enough to rest to stop animating — without
 /// it, exponential decay never quite arrives and redraws never stop.
@@ -76,19 +73,146 @@ const OUTLINE_PIXELS: f32 = 4.0;
 /// Single channel is all the coverage mask needs.
 const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
+/// What the figure is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stance {
+    /// Breathing, swaying its arms and following the cursor with its head.
+    /// Can be dragged round, and eases back afterwards.
+    Idle,
+    /// One of [`POSES`] (any number picks one), held still, for a tile of
+    /// the skin library.
+    Showcase(u64),
+    /// A still pose from behind, for showing a cape.
+    Back,
+}
+
+/// How each limb is turned, in radians, plus how far the whole figure floats.
+/// Swings are positive forwards and spreads positive away from the body,
+/// whichever side the limb is on.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Rig {
+    head_yaw: f32,
+    head_pitch: f32,
+    right_arm: (f32, f32),
+    left_arm: (f32, f32),
+    right_leg: f32,
+    left_leg: f32,
+    /// How far the cape is lifted off the back.
+    cape: f32,
+    bob: f32,
+}
+
+impl Rig {
+    /// Minecraft's own idle, a little livelier: the arms drift out and back,
+    /// and the figure rises and sinks as if breathing. `t` is seconds.
+    fn idle(t: f32) -> Self {
+        Self {
+            right_arm: ((t * 1.34).sin() * 0.16, 0.09 + (t * 1.8).cos() * 0.08),
+            left_arm: (-(t * 1.34).sin() * 0.16, 0.09 + (t * 1.8).cos() * 0.08),
+            cape: 0.1 + (t * 1.3).sin() * 0.06,
+            bob: (t * 1.8).sin() * 0.9,
+            ..Self::default()
+        }
+    }
+
+    /// The same pose the other way round.
+    fn mirrored(self) -> Self {
+        Self {
+            head_yaw: -self.head_yaw,
+            right_arm: self.left_arm,
+            left_arm: self.right_arm,
+            right_leg: self.left_leg,
+            left_leg: self.right_leg,
+            ..self
+        }
+    }
+
+    fn back() -> Self {
+        Self { right_arm: (0.0, 0.06), left_arm: (0.0, 0.06), cape: 0.14, ..Self::default() }
+    }
+}
+
+/// Still poses for the library's tiles: how far the body is turned, then the
+/// rig. Each also appears mirrored, so a page of skins isn't a row of twins.
+const POSES: [(f32, Rig); 9] = {
+    const fn pose(yaw: f32, head: (f32, f32), right_arm: (f32, f32), left_arm: (f32, f32), legs: (f32, f32), cape: f32) -> (f32, Rig) {
+        (yaw, Rig { head_yaw: head.0, head_pitch: head.1, right_arm, left_arm, right_leg: legs.0, left_leg: legs.1, cape, bob: 0.0 })
+    }
+    [
+        // Waving.
+        pose(-0.45, (0.25, -0.1), (2.3, 0.7), (-0.35, 0.12), (0.45, -0.4), 0.25),
+        // Cheering, both arms up.
+        pose(-0.3, (0.0, -0.3), (2.9, 0.45), (2.9, 0.45), (0.1, -0.1), 0.2),
+        // Mid-stride.
+        pose(-0.6, (0.1, 0.05), (-0.6, 0.05), (0.6, 0.05), (0.6, -0.6), 0.3),
+        // Pointing ahead.
+        pose(-0.5, (0.15, 0.05), (1.5, 0.1), (-0.1, 0.08), (0.2, -0.15), 0.15),
+        // Arms out wide.
+        pose(-0.35, (0.0, 0.0), (0.1, 1.35), (0.1, 1.35), (0.0, 0.0), 0.1),
+        // Standing easy, arms a little out, looking down.
+        pose(-0.55, (-0.2, 0.15), (0.3, 0.45), (0.3, 0.45), (0.15, -0.1), 0.1),
+        // Running.
+        pose(-0.7, (0.0, 0.15), (1.0, 0.05), (-1.0, 0.05), (-0.9, 0.9), 0.55),
+        // Thinking: a hand up by the chin, looking up.
+        pose(-0.4, (0.3, -0.35), (1.9, -0.3), (0.2, 0.05), (0.05, 0.0), 0.1),
+        // Kicking.
+        pose(-0.5, (0.0, 0.2), (0.4, 0.2), (-0.4, 0.2), (1.1, -0.1), 0.3),
+    ]
+};
+
+/// Drawn once per launch, so the library's tiles stand differently each time
+/// the launcher starts but don't change pose while it's running.
+static SESSION: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    slot(&nanos.to_string())
+});
+
+/// Pose `n` of the eighteen, mirrored for the second nine.
+fn showcase(n: u64) -> (f32, Rig) {
+    let (yaw, rig) = POSES[(n % POSES.len() as u64) as usize];
+    if (n / POSES.len() as u64) % 2 == 1 { (-yaw, rig.mirrored()) } else { (yaw, rig) }
+}
+
+/// How long the idle figure looks at the cursor, and then away, in seconds.
+const ATTENTION: std::ops::Range<f32> = 3.0..5.0;
+const DISTRACTION: std::ops::Range<f32> = 2.5..6.0;
+
+/// A number in `range` from `n`, the same every time for the same `n`: enough
+/// to keep the figure's timing from looking like a metronome.
+fn vary(n: u32, range: std::ops::Range<f32>) -> f32 {
+    let noise = ((n as f32 * 12.9898).sin() * 43_758.547).fract().abs();
+    range.start + (range.end - range.start) * noise
+}
+
+/// Where the head drifts while not looking at the cursor: a slow glance
+/// round, never quite still.
+fn wander(t: f32) -> (f32, f32) {
+    ((t * 0.45).sin() * 0.35 + (t * 0.17).sin() * 0.15, (t * 0.31).sin() * 0.12 - 0.05)
+}
+
 /// Interaction state. Lives in the widget tree, so a redraw doesn't reset the
 /// pose the user dragged to.
 #[derive(Debug)]
 pub struct Pose {
     yaw: f32,
     pitch: f32,
+    /// The head's turn toward the cursor, eased so it follows rather than snaps.
+    look: (f32, f32),
+    /// Where the cursor last was, anywhere in the window.
+    cursor: Option<iced::Point>,
+    /// Whether the head is following the cursor right now, until when, and
+    /// how many times that has changed.
+    attending: bool,
+    switch_at: Option<Instant>,
+    switches: u32,
     /// Cursor position the current drag was last sampled at.
     drag_from: Option<iced::Point>,
     /// When the drag ended, which starts the hold before easing back.
     released_at: Option<Instant>,
     last_tick: Option<Instant>,
-    /// Time base for the drifting rainbow. Set on the first frame rather than
-    /// at construction, so the animation starts when the widget appears.
+    /// Time base for the drifting rainbow and the idle motion. Set on the
+    /// first frame rather than at construction, so both start when the
+    /// widget appears.
     started: Option<Instant>,
 }
 
@@ -97,6 +221,11 @@ impl Default for Pose {
         Self {
             yaw: REST_YAW,
             pitch: REST_PITCH,
+            look: (0.0, 0.0),
+            cursor: None,
+            attending: false,
+            switch_at: None,
+            switches: 0,
             drag_from: None,
             released_at: None,
             last_tick: None,
@@ -122,106 +251,32 @@ impl Pose {
         }
     }
 
-}
-
-/// A request to show the model's back, as two instants: when the outward
-/// turn began, and when to start turning away again.
-///
-/// Two fields rather than one, because switching capes repeatedly must extend
-/// the stay without restarting the turn. With a single timestamp the elapsed
-/// time reset to zero on every switch, and frame one of a fresh turn is the
-/// front — which is exactly what made the model snap round before animating
-/// back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reveal {
-    started: Instant,
-    until: Instant,
-}
-
-impl Reveal {
-    /// Starts a reveal, or extends one already in progress.
-    pub fn trigger(previous: Option<Reveal>, now: Instant) -> Reveal {
-        match previous {
-            // Still on screen: keep the original turn so the model stays put,
-            // and just push the deadline out.
-            Some(active) if now < active.finished_at() => Reveal {
-                started: active.started,
-                until: now + REVEAL_HOLD,
-            },
-            // Finished, or never ran: a fresh turn from the front.
-            _ => Reveal {
-                started: now,
-                until: now + REVEAL_HOLD,
-            },
-        }
-    }
-
-    /// When the whole sequence, return journey included, is over.
-    fn finished_at(&self) -> Instant {
-        self.until + TURN
+    /// Turns the head a step toward the cursor.
+    fn ease_look(&mut self, target: (f32, f32), dt: f32) {
+        let t = 1.0 - (-LOOK_RATE * dt).exp();
+        self.look.0 += (target.0 - self.look.0) * t;
+        self.look.1 += (target.1 - self.look.1) * t;
     }
 }
 
-/// The yaw a cape reveal dictates, or `None` once it has run its course and
-/// ordinary resting behaviour takes over again.
-///
-/// Deliberately a pure function of elapsed time rather than an angle
-/// accumulated in widget state. Widget state can be reset by tree churn —
-/// changing the shape of a sibling is enough — and when that happened
-/// mid-animation the model snapped to the front and re-animated. Derived from
-/// a timestamp there is nothing to lose: a reset recomputes the same angle.
-fn reveal_yaw(reveal: Option<Reveal>, now: Instant) -> Option<f32> {
-    let reveal = reveal?;
-    // `now` comes from the frame clock and can very slightly precede a
-    // timestamp taken on a button press.
-    let turning = now.saturating_duration_since(reveal.started);
-
-    if turning < TURN {
-        return Some(lerp_angle(REST_YAW, BACK_YAW, ease(fraction(turning, TURN))));
-    }
-    if now < reveal.until {
-        return Some(BACK_YAW);
-    }
-
-    let returning = now.saturating_duration_since(reveal.until);
-    if returning < TURN {
-        return Some(lerp_angle(BACK_YAW, REST_YAW, ease(fraction(returning, TURN))));
-    }
-    None
-}
-
-/// When the next frame is due while a reveal is in flight, or `None` once it
-/// has finished. Nothing changes during the hold, so this returns the moment
-/// the return journey starts rather than every frame in between.
-fn reveal_next_frame(reveal: Option<Reveal>, now: Instant) -> Option<Instant> {
-    let reveal = reveal?;
-
-    if now.saturating_duration_since(reveal.started) < TURN {
-        return Some(now);
-    }
-    if now < reveal.until {
-        return Some(reveal.until);
-    }
-    if now < reveal.finished_at() {
-        return Some(now);
-    }
-    None
-}
-
-fn fraction(elapsed: Duration, total: Duration) -> f32 {
-    elapsed.as_secs_f32() / total.as_secs_f32().max(f32::EPSILON)
-}
-
-/// Smoothstep, so the turn starts and ends gently rather than jerking into
-/// motion at full speed.
-fn ease(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Interpolates the short way round, so a turn never takes the long route.
-fn lerp_angle(from: f32, to: f32, t: f32) -> f32 {
-    from + shortest_angle(to - from) * t
+/// The head turn, relative to the body, that faces `cursor`. The head is
+/// treated as sitting a little way in front of the screen, so a cursor right
+/// beside it turns it fully and one across the window less than that.
+fn look_at(cursor: iced::Point, bounds: Rectangle, yaw: f32, pitch: f32) -> (f32, f32) {
+    // The head's centre on screen, from the same projection the figure is drawn with.
+    let clip = glam::Mat4::from_cols_array_2d(&mvp(yaw, pitch, 0.0, bounds)) * glam::Vec4::new(0.0, 28.0, 0.0, 1.0);
+    let ndc = clip.truncate() / clip.w.max(f32::EPSILON);
+    let head = iced::Point::new(
+        bounds.x + (ndc.x + 1.0) / 2.0 * bounds.width,
+        bounds.y + (1.0 - ndc.y) / 2.0 * bounds.height,
+    );
+    let depth = bounds.height.max(1.0) * 0.9;
+    let toward_yaw = ((cursor.x - head.x) / depth).atan();
+    let toward_pitch = ((cursor.y - head.y) / depth).atan();
+    (
+        shortest_angle(toward_yaw - yaw).clamp(-MAX_LOOK_YAW, MAX_LOOK_YAW),
+        (toward_pitch - pitch).clamp(-MAX_LOOK_PITCH, MAX_LOOK_PITCH),
+    )
 }
 
 /// Wraps an angle to (-pi, pi].
@@ -246,38 +301,49 @@ pub struct SkinViewer {
     /// Changes when the textures change, so they're only uploaded then rather
     /// than every frame.
     key: u64,
+    /// Which set of GPU buffers this viewer draws from. iced keeps one
+    /// pipeline for every viewer on screen, and buffer writes all land before
+    /// any of them draws, so viewers sharing buffers would all show the last.
+    slot: u64,
+    stance: Stance,
     /// Draw the rainbow border. Only while signed out: it marks the
     /// placeholder figure, and once a real skin is shown it would just
     /// obscure it — and animating it costs a redraw every frame.
     outlined: bool,
-    /// Whether the border may keep animating. False while the window is
-    /// unfocused, so a launcher left behind a game stops repainting.
+    /// Whether it may keep animating. False while the window is unfocused,
+    /// so a launcher left behind a game stops repainting.
     live: bool,
-    /// The cape reveal in progress, if any. The turn is derived from it, so
-    /// it cannot be knocked out of step by widget state being reset.
-    reveal: Option<Reveal>,
 }
 
 impl SkinViewer {
-    pub fn new(
-        skin: Arc<Rgba>,
-        cape: Option<Arc<Rgba>>,
-        model: SkinModel,
-        key: u64,
-        outlined: bool,
-        live: bool,
-        reveal: Option<Reveal>,
-    ) -> Self {
-        Self {
-            skin,
-            cape,
-            model,
-            key,
-            outlined,
-            live,
-            reveal,
-        }
+    pub fn new(skin: Arc<Rgba>, cape: Option<Arc<Rgba>>, model: SkinModel, key: u64, slot: u64, stance: Stance) -> Self {
+        Self { skin, cape, model, key, slot, stance, outlined: false, live: false }
     }
+
+    /// The rainbow border of the signed-out placeholder.
+    pub fn outlined(mut self, outlined: bool) -> Self {
+        self.outlined = outlined;
+        self
+    }
+
+    /// Lets an idle figure move. Off while the window is unfocused, and with
+    /// reduced motion.
+    pub fn live(mut self, live: bool) -> Self {
+        self.live = live;
+        self
+    }
+
+    fn idle_moves(&self) -> bool {
+        self.stance == Stance::Idle && self.live && !crate::motion::reduced()
+    }
+}
+
+/// A slot number for a viewer, from anything that names it uniquely.
+pub fn slot(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl<Message> shader::Program<Message> for SkinViewer {
@@ -295,6 +361,11 @@ impl<Message> shader::Program<Message> for SkinViewer {
         use iced::window::Event as Window;
         use iced::Event as E;
 
+        // The still poses don't respond to anything.
+        if self.stance != Stance::Idle {
+            return None;
+        }
+
         match event {
             E::Mouse(Mouse::ButtonPressed(Button::Left)) => {
                 let position = cursor.position_over(bounds)?;
@@ -304,7 +375,12 @@ impl<Message> shader::Program<Message> for SkinViewer {
             }
 
             E::Mouse(Mouse::CursorMoved { .. }) => {
-                let from = state.drag_from?;
+                state.cursor = cursor.position();
+                let Some(from) = state.drag_from else {
+                    // The head follows on the next frame, which an idle figure
+                    // asks for anyway.
+                    return None;
+                };
                 // Position is read from the cursor rather than the event so a
                 // drag that leaves the widget keeps tracking instead of
                 // sticking.
@@ -316,8 +392,15 @@ impl<Message> shader::Program<Message> for SkinViewer {
                 Some(shader::Action::request_redraw())
             }
 
+            E::Mouse(Mouse::CursorLeft) => {
+                state.cursor = None;
+                None
+            }
+
             E::Mouse(Mouse::ButtonReleased(Button::Left)) => {
                 state.drag_from.take()?;
+                // Spun round several times, it would unwind every turn on its way back.
+                state.yaw = REST_YAW + shortest_angle(state.yaw - REST_YAW);
                 let now = Instant::now();
                 state.released_at = Some(now);
                 // Nothing to draw until the hold expires, so ask to be woken
@@ -328,25 +411,39 @@ impl<Message> shader::Program<Message> for SkinViewer {
             E::Window(Window::RedrawRequested(now)) => {
                 let previous = state.last_tick.replace(*now);
                 state.started.get_or_insert(*now);
+                let dt = previous
+                    .map(|previous| now.duration_since(previous).as_secs_f32())
+                    // First animated frame has no previous tick to measure.
+                    .unwrap_or(1.0 / 60.0)
+                    .min(0.1);
 
-                // A visible outline drifts continuously, so it needs a frame
-                // every time regardless of what the pose is doing.
-                let animating = self.outlined && self.live;
+                // Breathing, the arms and the outline all move continuously,
+                // so they need a frame every time whatever the pose is doing.
+                let animating = (self.outlined || self.idle_moves()) && self.live;
+                if !self.idle_moves() {
+                    // Still faces forward, so coming back doesn't snap to an old glance.
+                    state.look = (0.0, 0.0);
+                    state.switch_at = None;
+                }
+                if self.idle_moves() {
+                    // Looks at the cursor a while, then away a while, and back.
+                    let due = *state.switch_at.get_or_insert(*now + Duration::from_secs_f32(1.5));
+                    if *now >= due {
+                        state.attending = !state.attending;
+                        state.switches = state.switches.wrapping_add(1);
+                        let span = vary(state.switches, if state.attending { ATTENTION } else { DISTRACTION });
+                        state.switch_at = Some(*now + Duration::from_secs_f32(span));
+                    }
+                    let time = state.started.map_or(0.0, |start| now.duration_since(start).as_secs_f32());
+                    let target = match state.cursor {
+                        Some(cursor) if state.attending => look_at(cursor, bounds, state.yaw, state.pitch),
+                        _ => wander(time),
+                    };
+                    state.ease_look(target, dt);
+                }
 
                 if state.drag_from.is_some() {
                     return animating.then(shader::Action::request_redraw);
-                }
-
-                // A reveal in flight owns the yaw outright, so there is no
-                // accumulated angle to be knocked out of step.
-                if let Some(next) = reveal_next_frame(self.reveal, *now) {
-                    return Some(if animating || next <= *now {
-                        shader::Action::request_redraw()
-                    } else {
-                        // Nothing changes during the hold; sleep until the
-                        // return journey is due.
-                        shader::Action::request_redraw_at(next)
-                    });
                 }
 
                 // Hold a dragged pose before easing away from it.
@@ -364,12 +461,11 @@ impl<Message> shader::Program<Message> for SkinViewer {
                     return animating.then(shader::Action::request_redraw);
                 }
 
-                let dt = previous
-                    .map(|previous| now.duration_since(previous).as_secs_f32())
-                    // First animated frame has no previous tick to measure.
-                    .unwrap_or(1.0 / 60.0)
-                    .min(0.1);
-
+                if crate::motion::reduced() {
+                    // Straight back, as everything else does with reduced motion.
+                    *state = Pose { started: state.started, cursor: state.cursor, ..Pose::default() };
+                    return animating.then(shader::Action::request_redraw);
+                }
                 state.ease_back(dt);
                 Some(shader::Action::request_redraw())
             }
@@ -379,24 +475,34 @@ impl<Message> shader::Program<Message> for SkinViewer {
     }
 
     fn draw(&self, state: &Self::State, _cursor: mouse::Cursor, bounds: Rectangle) -> Scene {
-        // A reveal overrides the resting pose while it runs; dragging
-        // overrides the reveal, since the user's hand wins.
-        let yaw = match (state.drag_from, reveal_yaw(self.reveal, Instant::now())) {
-            (None, Some(revealed)) => revealed,
-            _ => state.yaw,
+        let time = state.started.map(|start| start.elapsed().as_secs_f32()).unwrap_or(0.0);
+        let (yaw, pitch, rig) = match self.stance {
+            Stance::Idle => {
+                let mut rig = Rig::default();
+                // Still, the head faces where the body does rather than staying
+                // wherever the cursor last left it.
+                if self.idle_moves() {
+                    rig = Rig::idle(time);
+                    (rig.head_yaw, rig.head_pitch) = state.look;
+                }
+                (state.yaw, state.pitch, rig)
+            }
+            Stance::Showcase(n) => {
+                let (yaw, rig) = showcase(slot(&format!("{n}:{}", *SESSION)));
+                (yaw, 0.12, rig)
+            }
+            Stance::Back => (BACK_YAW, REST_PITCH, Rig::back()),
         };
 
         Scene {
-            mvp: mvp(yaw, state.pitch, bounds),
-            geometry: Arc::new(build_model(self.model, self.cape.is_some())),
+            mvp: mvp(yaw, pitch, rig.bob, bounds),
+            geometry: Arc::new(build_model(self.model, self.cape.is_some(), rig)),
             skin: Arc::clone(&self.skin),
             cape: self.cape.clone(),
             key: self.key,
+            slot: self.slot,
             outlined: self.outlined,
-            time: state
-                .started
-                .map(|start| start.elapsed().as_secs_f32())
-                .unwrap_or(0.0),
+            time,
         }
     }
 
@@ -406,7 +512,9 @@ impl<Message> shader::Program<Message> for SkinViewer {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if state.drag_from.is_some() {
+        if self.stance != Stance::Idle {
+            mouse::Interaction::default()
+        } else if state.drag_from.is_some() {
             mouse::Interaction::Grabbing
         } else if cursor.is_over(bounds) {
             mouse::Interaction::Grab
@@ -416,8 +524,9 @@ impl<Message> shader::Program<Message> for SkinViewer {
     }
 }
 
-/// Model-view-projection for the current pose.
-fn mvp(yaw: f32, pitch: f32, bounds: Rectangle) -> [[f32; 4]; 4] {
+/// Model-view-projection for the current pose. `bob` lifts the whole figure,
+/// in model units.
+fn mvp(yaw: f32, pitch: f32, bob: f32, bounds: Rectangle) -> [[f32; 4]; 4] {
     use glam::{Mat4, Vec3};
 
     let aspect = (bounds.width / bounds.height.max(1.0)).max(0.01);
@@ -433,7 +542,8 @@ fn mvp(yaw: f32, pitch: f32, bounds: Rectangle) -> [[f32; 4]; 4] {
     );
     // Pitch is applied after yaw so tipping stays relative to the viewer
     // rather than to the model's own turned axis.
-    let model = Mat4::from_rotation_x(pitch)
+    let model = Mat4::from_translation(Vec3::new(0.0, bob, 0.0))
+        * Mat4::from_rotation_x(pitch)
         * Mat4::from_rotation_y(yaw)
         // The model is built standing on y=0; recentre it on its waist.
         * Mat4::from_translation(Vec3::new(0.0, -16.0, 0.0));
@@ -501,7 +611,9 @@ fn push_box(
     let left = [u + d + w, v + d, d, h];
     let back = [u + d + w + d, v + d, w, h];
     let top = [u + d, v, w, d];
-    let bottom = [u + d + w, v, w, d];
+    // Mirrored: the game lays the bottom out as if seen from above, through
+    // the box, which seen from below is a mirror image.
+    let bottom = [u + d + w + w, v, -w, d];
 
     let (front_uv, back_uv) = if flip_faces {
         (back, front)
@@ -571,16 +683,31 @@ fn push_box(
         top,
         SHADE_TOP,
     );
+    // Starting from the back corner, so the texture's top row is the back
+    // edge as in the game; starting at the front showed it upside down.
     face(
-        [p(-1., -1., 1.), p(-1., -1., -1.), p(1., -1., -1.), p(1., -1., 1.)],
-        [[-1., -1., 1.], [-1., -1., -1.], [1., -1., -1.], [1., -1., 1.]],
+        [p(1., -1., -1.), p(1., -1., 1.), p(-1., -1., 1.), p(-1., -1., -1.)],
+        [[1., -1., -1.], [1., -1., 1.], [-1., -1., 1.], [-1., -1., -1.]],
         bottom,
         SHADE_BOTTOM,
     );
 }
 
-/// Builds the player model, standing on y = 0, in skin-pixel units.
-fn build_model(model: SkinModel, with_cape: bool) -> Geometry {
+/// Turns the vertices from `from` onwards about `pivot`: the head about the
+/// neck, a limb about its shoulder or hip.
+fn pose_part(vertices: &mut [Vertex], pivot: [f32; 3], rotation: glam::Mat4) {
+    let pivot = glam::Vec3::from(pivot);
+    let transform = glam::Mat4::from_translation(pivot) * rotation * glam::Mat4::from_translation(-pivot);
+    for vertex in vertices {
+        vertex.position = transform.transform_point3(vertex.position.into()).into();
+        vertex.expand = rotation.transform_vector3(vertex.expand.into()).into();
+    }
+}
+
+/// Builds the player model, standing on y = 0, in skin-pixel units, with
+/// each part turned as `rig` says.
+fn build_model(model: SkinModel, with_cape: bool, rig: Rig) -> Geometry {
+    use glam::Mat4;
     let mut v = Vec::new();
     let skin = [64.0, 64.0];
 
@@ -591,23 +718,28 @@ fn build_model(model: SkinModel, with_cape: bool) -> Geometry {
     };
     let arm_x = 4.0 + arm_w / 2.0;
 
-    // Base layers.
-    push_box(&mut v, [0.0, 28.0, 0.0], [8.0, 8.0, 8.0], [0.0, 0.0], skin, 0.0, false);
-    push_box(&mut v, [0.0, 18.0, 0.0], [8.0, 12.0, 4.0], [16.0, 16.0], skin, 0.0, false);
-    push_box(&mut v, [-arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [40.0, 16.0], skin, 0.0, false);
-    push_box(&mut v, [arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [32.0, 48.0], skin, 0.0, false);
-    push_box(&mut v, [-2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 16.0], skin, 0.0, false);
-    push_box(&mut v, [2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [16.0, 48.0], skin, 0.0, false);
+    // Each part with its overlay, slightly inflated so it sits just proud of
+    // the base. Hair and jacket detail live in the overlay; skipping it is the
+    // usual reason a rendered skin looks subtly wrong.
+    let part = |v: &mut Vec<Vertex>, centre, size, base, overlay, inflate, pivot, rotation: Mat4| {
+        let from = v.len();
+        push_box(v, centre, size, base, skin, 0.0, false);
+        push_box(v, centre, size, overlay, skin, inflate, false);
+        pose_part(&mut v[from..], pivot, rotation);
+    };
+    // A swing forwards turns the limb's foot towards +Z, which is the
+    // negative way round X; a spread turns it away from the body. Spread
+    // first: spread after a big swing would push a raised arm inwards.
+    let limb = |(swing, spread): (f32, f32), side: f32| Mat4::from_rotation_x(-swing) * Mat4::from_rotation_z(side * spread);
 
-    // Overlay layers, slightly inflated so they sit just proud of the base.
-    // Hair and jacket detail live here; skipping them is the usual reason a
-    // rendered skin looks subtly wrong.
-    push_box(&mut v, [0.0, 28.0, 0.0], [8.0, 8.0, 8.0], [32.0, 0.0], skin, 0.5, false);
-    push_box(&mut v, [0.0, 18.0, 0.0], [8.0, 12.0, 4.0], [16.0, 32.0], skin, 0.25, false);
-    push_box(&mut v, [-arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [40.0, 32.0], skin, 0.25, false);
-    push_box(&mut v, [arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [48.0, 48.0], skin, 0.25, false);
-    push_box(&mut v, [-2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 32.0], skin, 0.25, false);
-    push_box(&mut v, [2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 48.0], skin, 0.25, false);
+    part(&mut v, [0.0, 28.0, 0.0], [8.0, 8.0, 8.0], [0.0, 0.0], [32.0, 0.0], 0.5, [0.0, 24.0, 0.0],
+        Mat4::from_rotation_y(rig.head_yaw) * Mat4::from_rotation_x(rig.head_pitch));
+    part(&mut v, [0.0, 18.0, 0.0], [8.0, 12.0, 4.0], [16.0, 16.0], [16.0, 32.0], 0.25, [0.0, 18.0, 0.0], Mat4::IDENTITY);
+    // The player's right is -X, so spreading it out turns it the negative way.
+    part(&mut v, [-arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [40.0, 16.0], [40.0, 32.0], 0.25, [-arm_x, 22.0, 0.0], limb(rig.right_arm, -1.0));
+    part(&mut v, [arm_x, 18.0, 0.0], [arm_w, 12.0, 4.0], [32.0, 48.0], [48.0, 48.0], 0.25, [arm_x, 22.0, 0.0], limb(rig.left_arm, 1.0));
+    part(&mut v, [-2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [0.0, 16.0], [0.0, 32.0], 0.25, [-2.0, 12.0, 0.0], limb((rig.right_leg, 0.0), -1.0));
+    part(&mut v, [2.0, 6.0, 0.0], [4.0, 12.0, 4.0], [16.0, 48.0], [0.0, 48.0], 0.25, [2.0, 12.0, 0.0], limb((rig.left_leg, 0.0), 1.0));
 
     let cape_start = v.len() as u32;
 
@@ -626,6 +758,8 @@ fn build_model(model: SkinModel, with_cape: bool) -> Geometry {
             0.0,
             true,
         );
+        // Lifting it swings the bottom edge out behind, about the top edge.
+        pose_part(&mut v[cape_start as usize..], [0.0, 24.0, -3.2], Mat4::from_rotation_x(rig.cape));
     }
 
     Geometry {
@@ -643,6 +777,7 @@ pub struct Scene {
     skin: Arc<Rgba>,
     cape: Option<Arc<Rgba>>,
     key: u64,
+    slot: u64,
     outlined: bool,
     time: f32,
 }
@@ -675,47 +810,30 @@ impl shader::Primitive for Scene {
         // The one place both the logical bounds and the scale factor are in
         // scope; `render` has neither.
         let scale = viewport.scale_factor();
-        pipeline.viewport = Rectangle {
+
+        pipeline.resize_depth(device, viewport.physical_size());
+        let shared = Shared { device, queue, layout: &pipeline.texture_layout, uniform_layout: &pipeline.uniform_layout, sampler: &pipeline.sampler };
+        let instance = pipeline.instances.entry(self.slot).or_insert_with(|| Instance::new(&shared));
+        instance.upload_geometry(&shared, &self.geometry);
+        instance.upload_textures(&shared, self.key, &self.skin, self.cape.as_deref());
+        instance.viewport = Rectangle {
             x: bounds.x * scale,
             y: bounds.y * scale,
             width: bounds.width * scale,
             height: bounds.height * scale,
         };
 
-        pipeline.upload_geometry(device, queue, &self.geometry);
-        pipeline.upload_textures(device, queue, self.key, &self.skin, self.cape.as_deref());
-        pipeline.resize_depth(device, viewport.physical_size());
-
-        // One uniform block per pass; only the outline width, colour and
-        // whether to sample the texture differ.
-        let passes = [
-            // Used by both the textured pass and the coverage pass; the
-            // vertex stage is shared, so the geometry must match exactly.
-            Uniforms {
-                mvp: self.mvp,
-                colour: [1.0; 4],
-                expand: 0.0,
-                textured: 1.0,
-                rainbow: 0.0,
-                time: 0.0,
-            },
-            Uniforms {
-                mvp: self.mvp,
-                colour: [1.0; 4],
-                expand: 0.0,
-                textured: 1.0,
-                rainbow: 0.0,
-                time: 0.0,
-            },
-        ];
-
-        for (index, uniforms) in passes.iter().enumerate() {
-            queue.write_buffer(
-                &pipeline.uniforms[index],
-                0,
-                bytemuck::bytes_of(uniforms),
-            );
-        }
+        // Used by both the textured pass and the coverage pass; the vertex
+        // stage is shared, so the geometry must match exactly.
+        let uniforms = Uniforms {
+            mvp: self.mvp,
+            colour: [1.0; 4],
+            expand: 0.0,
+            textured: 1.0,
+            rainbow: 0.0,
+            time: 0.0,
+        };
+        queue.write_buffer(&instance.uniforms, 0, bytemuck::bytes_of(&uniforms));
 
         queue.write_buffer(
             &pipeline.outline_uniform,
@@ -739,25 +857,26 @@ impl shader::Primitive for Scene {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
-        let Some(depth) = pipeline.depth.as_ref() else {
+        let (Some(depth), Some(instance)) = (pipeline.depth.as_ref(), pipeline.instances.get(&self.slot)) else {
             return;
         };
-        if pipeline.vertex_count == 0 {
+        if instance.vertex_count == 0 {
             return;
         }
+        let viewport = instance.viewport;
 
         let body = 0..self.geometry.cape_start;
-        let cape = self.geometry.cape_start..pipeline.vertex_count;
+        let cape = self.geometry.cape_start..instance.vertex_count;
 
         // Draws the figure's geometry, whatever the current pass is.
         let draw_figure = |pass: &mut wgpu::RenderPass<'_>| {
-            pass.set_vertex_buffer(0, pipeline.vertices.slice(..));
-            pass.set_bind_group(0, &pipeline.uniform_bindings[0], &[]);
-            pass.set_bind_group(1, &pipeline.skin_binding, &[]);
+            pass.set_vertex_buffer(0, instance.vertices.slice(..));
+            pass.set_bind_group(0, &instance.uniform_binding, &[]);
+            pass.set_bind_group(1, &instance.skin_binding, &[]);
             pass.draw(body.clone(), 0..1);
 
             if !cape.is_empty()
-                && let Some(cape_binding) = pipeline.cape_binding.as_ref()
+                && let Some(cape_binding) = instance.cape_binding.as_ref()
             {
                 pass.set_bind_group(1, cape_binding, &[]);
                 pass.draw(cape.clone(), 0..1);
@@ -800,10 +919,10 @@ impl shader::Primitive for Scene {
                 // Same viewport as the final pass, so mask pixels and screen
                 // pixels are the same pixels.
                 pass.set_viewport(
-                    pipeline.viewport.x,
-                    pipeline.viewport.y,
-                    pipeline.viewport.width,
-                    pipeline.viewport.height,
+                    viewport.x,
+                    viewport.y,
+                    viewport.width,
+                    viewport.height,
                     0.0,
                     1.0,
                 );
@@ -835,10 +954,10 @@ impl shader::Primitive for Scene {
                 clip_bounds.height.max(1),
             );
             pass.set_viewport(
-                pipeline.viewport.x,
-                pipeline.viewport.y,
-                pipeline.viewport.width,
-                pipeline.viewport.height,
+                viewport.x,
+                viewport.y,
+                viewport.width,
+                viewport.height,
                 0.0,
                 1.0,
             );
@@ -882,10 +1001,10 @@ impl shader::Primitive for Scene {
             clip_bounds.height.max(1),
         );
         pass.set_viewport(
-            pipeline.viewport.x,
-            pipeline.viewport.y,
-            pipeline.viewport.width,
-            pipeline.viewport.height,
+            viewport.x,
+            viewport.y,
+            viewport.width,
+            viewport.height,
             0.0,
             1.0,
         );
@@ -907,20 +1026,39 @@ pub struct ModelPipeline {
     mask_layout: wgpu::BindGroupLayout,
     outline_uniform: wgpu::Buffer,
     outline_uniform_binding: wgpu::BindGroup,
+    uniform_layout: wgpu::BindGroupLayout,
+    texture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// Each viewer's own buffers, by its slot.
+    // ponytail: never pruned; bounded by how many skins and capes have been shown.
+    instances: std::collections::HashMap<u64, Instance>,
+    /// Shared: each viewer's pass clears it before drawing.
+    depth: Option<wgpu::TextureView>,
+    depth_size: (u32, u32),
+}
+
+/// The pipeline's device-side helpers, borrowed for one `prepare`.
+struct Shared<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    layout: &'a wgpu::BindGroupLayout,
+    uniform_layout: &'a wgpu::BindGroupLayout,
+    sampler: &'a wgpu::Sampler,
+}
+
+/// One viewer's geometry, textures and uniforms.
+#[derive(Debug)]
+pub struct Instance {
     vertices: wgpu::Buffer,
     vertex_capacity: u32,
     vertex_count: u32,
-    uniforms: [wgpu::Buffer; 2],
-    uniform_bindings: [wgpu::BindGroup; 2],
-    texture_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
+    uniforms: wgpu::Buffer,
+    uniform_binding: wgpu::BindGroup,
     skin_binding: wgpu::BindGroup,
     cape_binding: Option<wgpu::BindGroup>,
     /// Which textures are currently uploaded, so they aren't re-sent each
     /// frame.
     uploaded_key: Option<u64>,
-    depth: Option<wgpu::TextureView>,
-    depth_size: (u32, u32),
     /// The widget's rectangle in **physical** pixels, computed in `prepare`
     /// where the scale factor is available and consumed in `render`, which
     /// only gets the clip rectangle.
@@ -1162,42 +1300,11 @@ impl shader::Pipeline for ModelPipeline {
             }],
         });
 
-        let uniforms: [wgpu::Buffer; 2] = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("nexo.skin3d.uniform"),
-                size: std::mem::size_of::<Uniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
-
-        let uniform_bindings = std::array::from_fn(|i| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("nexo.skin3d.uniform.bind"),
-                layout: &uniform_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms[i].as_entire_binding(),
-                }],
-            })
-        });
-
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nexo.skin3d.sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
-        });
-
-        // A 1x1 placeholder keeps the bind group valid before any skin has
-        // been uploaded.
-        let skin_binding = blank_binding(device, &texture_layout, &sampler);
-
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("nexo.skin3d.vertices"),
-            size: 1024,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
         });
 
         Self {
@@ -1209,33 +1316,53 @@ impl shader::Pipeline for ModelPipeline {
             mask_layout,
             outline_uniform,
             outline_uniform_binding,
-            vertices,
-            vertex_capacity: 0,
-            vertex_count: 0,
-            uniforms,
-            uniform_bindings,
+            uniform_layout,
             texture_layout,
             sampler,
-            skin_binding,
-            cape_binding: None,
-            uploaded_key: None,
+            instances: std::collections::HashMap::new(),
             depth: None,
             depth_size: (0, 0),
-            viewport: Rectangle::default(),
         }
     }
 }
 
-impl ModelPipeline {
-    fn upload_geometry(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        geometry: &Geometry,
-    ) {
+impl Instance {
+    fn new(shared: &Shared<'_>) -> Self {
+        let uniforms = shared.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nexo.skin3d.uniform"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_binding = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nexo.skin3d.uniform.bind"),
+            layout: shared.uniform_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+        });
+        Self {
+            vertices: shared.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("nexo.skin3d.vertices"),
+                size: 1024,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            vertex_capacity: 0,
+            vertex_count: 0,
+            uniforms,
+            uniform_binding,
+            // A 1x1 placeholder keeps the bind group valid before any skin has
+            // been uploaded.
+            skin_binding: blank_binding(shared.device, shared.layout, shared.sampler),
+            cape_binding: None,
+            uploaded_key: None,
+            viewport: Rectangle::default(),
+        }
+    }
+
+    fn upload_geometry(&mut self, shared: &Shared<'_>, geometry: &Geometry) {
         let needed = geometry.vertices.len() as u32;
         if needed > self.vertex_capacity {
-            self.vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            self.vertices = shared.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("nexo.skin3d.vertices"),
                 size: (std::mem::size_of::<Vertex>() * geometry.vertices.len()) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
@@ -1243,28 +1370,21 @@ impl ModelPipeline {
             });
             self.vertex_capacity = needed;
         }
-        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&geometry.vertices));
+        shared.queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&geometry.vertices));
         self.vertex_count = needed;
     }
 
-    fn upload_textures(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        key: u64,
-        skin: &Rgba,
-        cape: Option<&Rgba>,
-    ) {
+    fn upload_textures(&mut self, shared: &Shared<'_>, key: u64, skin: &Rgba, cape: Option<&Rgba>) {
         if self.uploaded_key == Some(key) {
             return;
         }
-
-        self.skin_binding = texture_binding(device, queue, &self.texture_layout, &self.sampler, skin);
-        self.cape_binding = cape
-            .map(|cape| texture_binding(device, queue, &self.texture_layout, &self.sampler, cape));
+        self.skin_binding = texture_binding(shared.device, shared.queue, shared.layout, shared.sampler, skin);
+        self.cape_binding = cape.map(|cape| texture_binding(shared.device, shared.queue, shared.layout, shared.sampler, cape));
         self.uploaded_key = Some(key);
     }
+}
 
+impl ModelPipeline {
     /// The depth buffer has to match the surface it's paired with, so it's
     /// rebuilt whenever the window changes size.
     fn resize_depth(&mut self, device: &wgpu::Device, size: iced::Size<u32>) {
@@ -1610,7 +1730,7 @@ mod tests {
 
     #[test]
     fn model_has_geometry_for_every_part() {
-        let model = build_model(SkinModel::Classic, false);
+        let model = build_model(SkinModel::Classic, false, Rig::default());
         // Six base parts plus six overlays, six faces each, two triangles a
         // face, three vertices a triangle.
         assert_eq!(model.vertices.len(), 12 * 6 * 6);
@@ -1619,8 +1739,8 @@ mod tests {
 
     #[test]
     fn cape_is_appended_after_the_body() {
-        let without = build_model(SkinModel::Classic, false);
-        let with = build_model(SkinModel::Classic, true);
+        let without = build_model(SkinModel::Classic, false, Rig::default());
+        let with = build_model(SkinModel::Classic, true, Rig::default());
 
         assert_eq!(with.cape_start, without.vertices.len() as u32);
         assert_eq!(with.vertices.len(), without.vertices.len() + 36);
@@ -1628,8 +1748,8 @@ mod tests {
 
     #[test]
     fn slim_arms_are_narrower_and_hang_closer() {
-        let classic = build_model(SkinModel::Classic, false);
-        let slim = build_model(SkinModel::Slim, false);
+        let classic = build_model(SkinModel::Classic, false, Rig::default());
+        let slim = build_model(SkinModel::Slim, false, Rig::default());
         assert_eq!(classic.vertices.len(), slim.vertices.len());
 
         let widest = |g: &Geometry| {
@@ -1643,7 +1763,7 @@ mod tests {
 
     #[test]
     fn expand_directions_point_away_from_their_own_box() {
-        let model = build_model(SkinModel::Classic, false);
+        let model = build_model(SkinModel::Classic, false, Rig::default());
         // A normalized direction, or zero — never anything longer, which
         // would make the outline uneven.
         for vertex in &model.vertices {
@@ -1680,156 +1800,58 @@ mod tests {
         assert!(area >= 8.0, "triangle does not cover clip space, area {area}");
     }
 
+    /// The waving arm goes up and out to the side, not across the face: the
+    /// order the two turns are applied in decides which.
     #[test]
-    fn a_reveal_turns_to_the_back_then_returns_to_the_front() {
-        let at = Instant::now();
+    fn a_raised_arm_stays_out_to_the_side() {
+        let model = build_model(SkinModel::Classic, false, POSES[0].1);
+        // The right arm's base box is the third part: head and torso come first,
+        // each a base and an overlay box of 36 vertices.
+        let arm = &model.vertices[4 * 36..5 * 36];
+        let hand_height = arm.iter().map(|v| v.position[1]).fold(f32::MIN, f32::max);
+        let innermost = arm.iter().map(|v| v.position[0]).fold(f32::MIN, f32::max);
+        assert!(hand_height > 26.0, "the arm should be raised above the shoulder, reached {hand_height}");
+        assert!(innermost < -3.0, "the arm crossed in front of the body, reaching x = {innermost}");
+    }
 
-        // Starts at the front and ends the outward turn facing away.
-        let start = reveal_yaw(Some(Reveal::trigger(None, at)), at).unwrap();
-        assert!((start - REST_YAW).abs() < 0.01, "should begin at the front");
-        let turned = reveal_yaw(Some(Reveal::trigger(None, at)), at + TURN).unwrap();
-        assert!((turned - BACK_YAW).abs() < 0.01, "should end facing away");
-
-        // Held there for the whole thirty seconds.
-        for seconds in [2, 10, 29] {
-            let held = reveal_yaw(Some(Reveal::trigger(None, at)), at + Duration::from_secs(seconds)).unwrap();
-            assert!(
-                (held - BACK_YAW).abs() < 0.01,
-                "should still be facing away at {seconds}s"
-            );
+    #[test]
+    fn there_are_eighteen_poses_and_the_mirrors_differ() {
+        let poses: Vec<_> = (0..18).map(showcase).collect();
+        for (i, a) in poses.iter().enumerate() {
+            for b in &poses[i + 1..] {
+                assert_ne!(a, b, "two tiles would stand the same way");
+            }
         }
-
-        // Then turns back, and afterwards stops dictating the pose at all.
-        let returning = reveal_yaw(Some(Reveal::trigger(None, at)), at + REVEAL_HOLD + TURN / 2).unwrap();
-        assert!(
-            (returning - BACK_YAW).abs() > 0.01 && (returning - REST_YAW).abs() > 0.01,
-            "should be mid-turn, not snapped to either end"
-        );
-        assert_eq!(
-            reveal_yaw(Some(Reveal::trigger(None, at)), at + REVEAL_HOLD + TURN * 2),
-            None,
-            "once finished, ordinary resting behaviour takes over"
-        );
+        assert_eq!(showcase(18), showcase(0), "numbers past the end wrap round");
     }
 
-    /// The reported bug, exactly: turn to the back, then switch capes again
-    /// while facing away. It must not snap to the front and re-animate.
     #[test]
-    fn switching_again_while_facing_away_does_not_snap_to_the_front() {
-        let first = Instant::now();
-        let reveal = Reveal::trigger(None, first);
-
-        // Turn completes; the model is facing away.
-        let settled = first + TURN + Duration::from_secs(3);
-        assert!((reveal_yaw(Some(reveal), settled).unwrap() - BACK_YAW).abs() < 0.01);
-
-        // Switch again. The very next frame must still be the back, not the
-        // front — that jump is the whole bug.
-        let again = Reveal::trigger(Some(reveal), settled);
-        let next_frame = reveal_yaw(Some(again), settled).unwrap();
-        assert!(
-            (next_frame - BACK_YAW).abs() < 0.01,
-            "snapped to {next_frame} instead of staying at the back {BACK_YAW}"
-        );
-
-        // And it stays put rather than re-running the outward turn.
-        for offset in [1, 2, 5] {
-            let yaw = reveal_yaw(Some(again), settled + Duration::from_secs(offset)).unwrap();
-            assert!(
-                (yaw - BACK_YAW).abs() < 0.01,
-                "moved to {yaw} at +{offset}s"
-            );
+    fn looking_away_takes_its_time() {
+        for n in 0..50 {
+            assert!(ATTENTION.contains(&vary(n, ATTENTION)));
+            assert!(DISTRACTION.contains(&vary(n, DISTRACTION)));
         }
+        // Not the same length every time.
+        assert!((0..10).map(|n| (vary(n, ATTENTION) * 10.0) as i32).collect::<std::collections::HashSet<_>>().len() > 3);
+    }
+
+    /// The game's bottom face: the texture's top row is the back edge and its
+    /// left column the player's left (+X), seen from below.
+    #[test]
+    fn the_underside_is_laid_out_as_the_game_does() {
+        let model = build_model(SkinModel::Classic, false, Rig::default());
+        // The head's base box, sixth face; its first corner is (+X, bottom, back).
+        let corner = model.vertices[5 * 6];
+        assert_eq!(corner.position, [4.0, 24.0, -4.0]);
+        assert_eq!(corner.uv, [24.0 / 64.0, 0.0]);
     }
 
     #[test]
-    fn switching_again_only_extends_the_stay() {
-        let start = Instant::now();
-        let reveal = Reveal::trigger(None, start);
-
-        // Twenty seconds in, switch again: the original deadline would have
-        // turned the model away ten seconds later.
-        let later = start + Duration::from_secs(20);
-        let extended = Reveal::trigger(Some(reveal), later);
-
-        assert!((reveal_yaw(Some(extended), start + Duration::from_secs(35)).unwrap()
-            - BACK_YAW)
-            .abs()
-            < 0.01, "should still be facing away past the original deadline");
-
-        // And it does eventually return, measured from the newer switch.
-        assert_eq!(
-            reveal_yaw(Some(extended), later + REVEAL_HOLD + TURN * 2),
-            None
-        );
-    }
-
-    #[test]
-    fn a_finished_reveal_starts_over_from_the_front() {
-        let start = Instant::now();
-        let reveal = Reveal::trigger(None, start);
-        let after = start + REVEAL_HOLD + TURN * 3;
-        assert_eq!(reveal_yaw(Some(reveal), after), None, "sequence is over");
-
-        // Triggering again now should genuinely turn from the front.
-        let fresh = Reveal::trigger(Some(reveal), after);
-        assert!((reveal_yaw(Some(fresh), after).unwrap() - REST_YAW).abs() < 0.01);
-    }
-
-    /// The property the whole rewrite exists for: the angle depends only on
-    /// the timestamp, so losing widget state cannot make the model jump.
-    #[test]
-    fn the_turn_depends_only_on_elapsed_time() {
-        let at = Instant::now();
-        let sample = at + Duration::from_millis(400);
-
-        let first = reveal_yaw(Some(Reveal::trigger(None, at)), sample);
-        let again = reveal_yaw(Some(Reveal::trigger(None, at)), sample);
-        assert_eq!(first, again);
-        assert!(first.is_some());
-    }
-
-    #[test]
-    fn no_reveal_leaves_the_pose_alone() {
-        assert_eq!(reveal_yaw(None, Instant::now()), None);
-        assert_eq!(reveal_next_frame(None, Instant::now()), None);
-    }
-
-    #[test]
-    fn the_hold_sleeps_instead_of_drawing_frames() {
-        let at = Instant::now();
-
-        // Mid-turn: every frame is wanted.
-        assert_eq!(
-            reveal_next_frame(Some(Reveal::trigger(None, at)), at + TURN / 2),
-            Some(at + TURN / 2)
-        );
-        // Holding: nothing changes until the return is due.
-        assert_eq!(
-            reveal_next_frame(Some(Reveal::trigger(None, at)), at + Duration::from_secs(5)),
-            Some(at + REVEAL_HOLD)
-        );
-        // Finished: no further frames needed.
-        assert_eq!(reveal_next_frame(Some(Reveal::trigger(None, at)), at + REVEAL_HOLD + TURN * 2), None);
-    }
-
-    #[test]
-    fn easing_is_smooth_at_both_ends() {
-        assert_eq!(ease(0.0), 0.0);
-        assert_eq!(ease(1.0), 1.0);
-        // Clamped, so a late frame can't overshoot past the target.
-        assert_eq!(ease(1.5), 1.0);
-        assert_eq!(ease(-0.5), 0.0);
-        assert!((ease(0.5) - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn angles_interpolate_the_short_way_round() {
-        use std::f32::consts::TAU;
-        // Half a turn away in the "long" direction should still travel the
-        // short way, so a turn never unwinds most of a circle.
-        let midpoint = lerp_angle(0.1, 0.1 + TAU - 0.4, 0.5);
-        assert!((midpoint - (0.1 - 0.2)).abs() < 1e-4, "got {midpoint}");
+    fn the_cape_lifts_away_from_the_back() {
+        let lifted = Rig { cape: 0.3, ..Rig::default() };
+        let cape = build_model(SkinModel::Classic, true, lifted);
+        let deepest = cape.vertices[cape.cape_start as usize..].iter().map(|v| v.position[2]).fold(f32::MAX, f32::min);
+        assert!(deepest < -6.0, "a lifted cape swings out behind, reached z = {deepest}");
     }
 
     #[test]

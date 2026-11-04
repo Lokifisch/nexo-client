@@ -2913,9 +2913,10 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nexo-app"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bytemuck",
+ "fontdb",
  "futures",
  "glam 0.33.3",
  "iced",
@@ -2931,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "nexo-core"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "aes-gcm",
  "directories",

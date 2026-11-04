@@ -6,7 +6,8 @@ use crate::lively::scrollable;
 use crate::lively::text_input;
 use crate::lively::toggler;
 use crate::lively::Tint;
-use iced::widget::{column, container, image, row, text, Space};
+use iced::widget::{column, container, image, row, Space};
+use crate::lively::text;
 use iced::{Element, Fill, Font};
 use nexo_core::browse;
 use nexo_core::instance::InstalledMod;
@@ -64,7 +65,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .next()
         .map(|c| c.to_uppercase().collect::<String>())
         .unwrap_or_default();
-    let tile = container(text(initial).size(16).font(theme::BOLD))
+    let tile = container(text(initial).size(16).font(theme::bold()))
         .width(44)
         .height(44)
         .center_x(44)
@@ -72,7 +73,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .tinted(theme::initial_tile(true));
 
     let heading = column![
-        text(&instance.name).size(20).font(theme::BOLD).color(theme::text()),
+        text(&instance.name).size(20).font(theme::bold()).color(theme::text()),
         text(format!(
             "Minecraft {} · {}{}",
             instance.game_version,
@@ -118,7 +119,7 @@ fn tab_bar<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         let selected = app.tab == tab;
         let amount = app.motion.get(("tab", tab.label()), if selected { 1.0 } else { 0.0 });
 
-        let mut label = row![text(tab.label()).size(13).font(theme::BOLD)]
+        let mut label = row![text(tab.label()).size(13).font(theme::bold())]
             .spacing(8)
             .align_y(iced::Center);
 
@@ -183,7 +184,7 @@ fn launch_control<'a>(
         col = col.push(
             row![
                 text(name).size(12).color(theme::mint()),
-                button(text("STOP").size(12).font(theme::BOLD).center())
+                button(text("STOP").size(12).font(theme::bold()).center())
                     .width(96)
                     .padding([10, 0])
                     .style(theme::stop_button)
@@ -206,7 +207,7 @@ fn launch_control<'a>(
 
     // Padded rather than fixed-width: "PREPARING…" must fit the same button,
     // and at this padding "PLAY" comes out at the mockup's 96px.
-    let play = button(crate::lively::changed(label, text(label).size(12).font(theme::BOLD).center()))
+    let play = button(crate::lively::changed(label, text(label).size(12).font(theme::bold()).center()))
         .padding([11, 32])
         // The one place the full ramp is spent — see `theme::hero_button`.
         .style(theme::hero_button)
@@ -699,7 +700,7 @@ fn filter_panel<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message
             .align_y(iced::Center)
     };
 
-    let mut list = column![text("FILTERS").size(11).font(theme::BOLD).color(theme::muted())]
+    let mut list = column![text("FILTERS").size(11).font(theme::bold()).color(theme::muted())]
         .spacing(0)
         .width(Fill);
     list = list.push(Space::new().height(6));
@@ -747,7 +748,7 @@ fn result_row<'a>(
 
     let mut name = row![text(&hit.title)
         .size(15)
-        .font(theme::BOLD)
+        .font(theme::bold())
         .color(theme::text())
         .wrapping(iced::widget::text::Wrapping::None)]
         .spacing(6)
@@ -777,7 +778,7 @@ fn result_row<'a>(
     .clip(true);
 
     let action = if installed {
-        button(text("INSTALLED").size(11).font(theme::BOLD).center())
+        button(text("INSTALLED").size(11).font(theme::bold()).center())
             .width(104)
             .padding([10, 0])
             .style(theme::ghost_button)
@@ -787,14 +788,14 @@ fn result_row<'a>(
         .position(|q| q.instance == instance.id && q.project == hit.project_id)
     {
         let label = if place == 0 { "INSTALLING…" } else { "QUEUED" };
-        button(crate::lively::changed(label, text(label).size(11).font(theme::BOLD).center()))
+        button(crate::lively::changed(label, text(label).size(11).font(theme::bold()).center()))
             .width(104)
             .padding([10, 0])
             .style(theme::ghost_button)
     } else {
         // Stays clickable during other installs, so a list can be worked down
         // as fast as it can be clicked.
-        button(text("INSTALL").size(11).font(theme::BOLD).center())
+        button(text("INSTALL").size(11).font(theme::bold()).center())
             .width(104)
             .padding([10, 0])
             .style(theme::primary_button)
@@ -1569,7 +1570,7 @@ fn icon_or_initial<'a>(app: &'a App, project: &str, title: &str, size: f32) -> E
         None => container(
             text(title.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default())
                 .size(16)
-                .font(theme::BOLD),
+                .font(theme::bold()),
         )
         .width(size)
         .height(size)

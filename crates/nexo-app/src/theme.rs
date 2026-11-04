@@ -455,11 +455,28 @@ pub fn mint() -> Color { palette().mint }
 /// Unchecked boxes, off switches, idle tiles: a little brighter than `control`.
 fn dim_edge() -> Color { blend(control(), muted(), 0.07) }
 
+/// The typeface the window is set in. Every text names it (see `lively::text`),
+/// so changing it here changes the window on the next frame.
+static FONT: RwLock<Font> = RwLock::new(Font::DEFAULT);
+
+pub fn regular() -> Font {
+    *FONT.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn set_font(font: Font) {
+    *FONT.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = font;
+}
+
 /// Headings and button labels. Weight, not size, carries the hierarchy.
-pub const BOLD: Font = Font {
-    weight: iced::font::Weight::Bold,
-    ..Font::DEFAULT
-};
+pub fn bold() -> Font {
+    let font = regular();
+    // Asking a font for a weight it lacks gets another font, so the galactic and
+    // custom ones (a single file each) stay regular rather than turn sans-serif.
+    match font.family {
+        iced::font::Family::SansSerif | iced::font::Family::Name("Monocraft") => Font { weight: iced::font::Weight::Bold, ..font },
+        _ => font,
+    }
+}
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color {

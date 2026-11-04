@@ -13,7 +13,8 @@ use crate::lively::scrollable;
 use crate::lively::text_input;
 use crate::lively::toggler;
 use crate::lively::Tint;
-use iced::widget::{Space, column, container, row, text};
+use iced::widget::{Space, column, container, row};
+use crate::lively::text;
 use iced::{Color, Element, Fill, Font, Point, Rectangle, Renderer, Theme};
 use nexo_core::hosting::{HostedServer, Sample};
 use std::time::Instant;
@@ -63,7 +64,7 @@ fn tab_bar(app: &App) -> Element<'_, Message> {
         let amount = app.motion.get(("hosttab", tab.label()), if app.host.tab == tab { 1.0 } else { 0.0 });
         bar = bar.push(
             column![
-                button(text(tab.label()).size(13).font(theme::BOLD))
+                button(text(tab.label()).size(13).font(theme::bold()))
                     .padding([9, 16])
                     .style(theme::tab_button(amount))
                     .on_press(host(Msg::Tab(tab))),
@@ -108,7 +109,7 @@ fn header<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
                 .padding([6, 12])
                 .style(theme::ghost_button)
                 .on_press(Message::Navigate(crate::Screen::Servers)),
-            container(text(initial).size(20).font(theme::BOLD))
+            container(text(initial).size(20).font(theme::bold()))
                 .width(48)
                 .height(48)
                 .align_x(iced::Center)
@@ -116,7 +117,7 @@ fn header<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
                 .tinted(theme::initial_tile(phase == Phase::Online)),
             column![
                 row![
-                    text(&server.name).size(22).font(theme::BOLD).color(theme::text()),
+                    text(&server.name).size(22).font(theme::bold()).color(theme::text()),
                     container(crate::lively::changed(label, text(label).size(11))).padding([2, 9]).tinted(theme::pill(color)),
                 ]
                 .spacing(10)
@@ -165,7 +166,7 @@ fn side_panel<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message
 
     let mut col = column![
         row![
-            text("Online players").size(15).font(theme::BOLD).color(theme::text()),
+            text("Online players").size(15).font(theme::bold()).color(theme::text()),
             Space::new().width(Fill),
             text(count).size(13).color(theme::muted()),
         ],
@@ -202,7 +203,7 @@ fn side_panel<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message
 
 fn section<'a>(heading: &'a str, sub: &'a str) -> Element<'a, Message> {
     column![
-        text(heading).size(20).font(theme::BOLD).color(theme::text()),
+        text(heading).size(20).font(theme::bold()).color(theme::text()),
         text(sub).size(13).color(theme::muted())
     ]
     .spacing(4)
@@ -285,7 +286,7 @@ fn overview<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
         tiles,
         container(
             column![
-                row![text("Performance graph").size(15).font(theme::BOLD).color(theme::text()), Space::new().width(Fill), ranges]
+                row![text("Performance graph").size(15).font(theme::bold()).color(theme::text()), Space::new().width(Fill), ranges]
                     .align_y(iced::Center),
                 graph,
                 row![legend(theme::magenta(), "CPU (% of this PC)"), legend(theme::mint(), "RAM (MB)")].spacing(18),
@@ -304,7 +305,7 @@ fn tile<'a>(label: &'a str, value: String, share: f32, color: Color) -> Element<
     let share = share.clamp(0.0, 1.0);
     let bar = crate::lively::meter(share, 4.0, color, theme::control());
     container(
-        column![text(label).size(13).color(theme::muted()), crate::lively::ticking(value.clone(), text(value).size(26).font(theme::BOLD)), bar].spacing(8),
+        column![text(label).size(13).color(theme::muted()), crate::lively::ticking(value.clone(), text(value).size(26).font(theme::bold())), bar].spacing(8),
     )
     .padding(16)
     .width(Fill)
@@ -439,6 +440,7 @@ fn label(frame: &mut Frame, content: String, at: Point) {
         position: at,
         color: theme::muted(),
         size: 11.0.into(),
+        font: theme::regular(),
         ..Default::default()
     });
 }
@@ -586,7 +588,7 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         section("Players", "Who's on, and who may join. Every action is a console command, so it shows up in the console too."),
         container(
             column![
-                text("Any player, online or not").size(14).font(theme::BOLD).color(theme::text()),
+                text("Any player, online or not").size(14).font(theme::bold()).color(theme::text()),
                 row![
                     text_input("Minecraft username", &app.host.player_input)
                         .on_input(|s| host(Msg::PlayerInput(s)))
@@ -604,7 +606,7 @@ fn players<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         )
         .padding(16)
         .style(theme::well),
-        text("Online now").size(14).font(theme::BOLD).color(theme::text()),
+        text("Online now").size(14).font(theme::bold()).color(theme::text()),
         scrollable(list).height(Fill),
     ]
     .spacing(14);
@@ -656,7 +658,7 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
 
     let gameplay = container(
         column![
-            text("Gameplay").size(16).font(theme::BOLD).color(theme::text()),
+            text("Gameplay").size(16).font(theme::bold()).color(theme::text()),
             pick("Game mode", "gamemode", &GAME_MODES),
             flag("Force game mode on join", "force-gamemode"),
             pick("Difficulty", "difficulty", &DIFFICULTIES),
@@ -680,7 +682,7 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
 
     let performance = container(
         column![
-            text("Performance").size(16).font(theme::BOLD).color(theme::text()),
+            text("Performance").size(16).font(theme::bold()).color(theme::text()),
             row![number("Max players", "max-players", "20"), number("Spawn protection", "spawn-protection", "16")].spacing(12),
             row![number("View distance", "view-distance", "10"), number("Simulation distance", "simulation-distance", "10")]
                 .spacing(12),
@@ -734,7 +736,7 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
     let tunnel = container(
         row![
             column![
-                text("Public address").size(15).font(theme::BOLD).color(theme::text()),
+                text("Public address").size(15).font(theme::bold()).color(theme::text()),
                 text("Through e4mc's relay, so friends join without port forwarding. The address changes each time it opens, and closes when Nexo does.")
                     .size(12)
                     .color(theme::muted()),
@@ -782,7 +784,7 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         container(
             row![
                 column![
-                    text("Delete server").size(15).font(theme::BOLD).color(theme::danger()),
+                    text("Delete server").size(15).font(theme::bold()).color(theme::danger()),
                     text(if running { "Stop it first." } else { "Removes the folder, world included. There is no undo." })
                         .size(12)
                         .color(theme::muted()),

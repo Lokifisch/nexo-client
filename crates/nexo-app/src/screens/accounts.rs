@@ -2,7 +2,8 @@ use crate::theme;
 use crate::{empty_state, App, Message};
 use crate::lively::button;
 use crate::lively::scrollable;
-use iced::widget::{column, container, image, row, text, Space};
+use iced::widget::{column, container, image, row, Space};
+use crate::lively::text;
 use iced::{Element, Fill};
 use nexo_core::Account;
 

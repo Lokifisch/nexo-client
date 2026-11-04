@@ -5,7 +5,8 @@ use crate::backdrop::{self, Effect, Tuning};
 use crate::lively::{button, scrollable, text_input, toggler};
 use crate::theme::{self, Custom, Palette, PALETTES};
 use crate::{App, Armed, Message};
-use iced::widget::{column, container, row, slider, stack, text, Space};
+use iced::widget::{column, container, row, slider, stack, Space};
+use crate::lively::text;
 use iced::{Color, Element, Fill, Task};
 use nexo_core::settings::{AfterLaunch, Settings};
 
@@ -14,6 +15,132 @@ const FILE: &str = "appearance.txt";
 const NAME_LIMIT: usize = 32;
 /// How long after a slider last moved its colour is written to disk.
 const SAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
+
+const MONOCRAFT: &[u8] = include_bytes!("../../../../assets/fonts/Monocraft.ttf");
+const MONOCRAFT_BOLD: &[u8] = include_bytes!("../../../../assets/fonts/Monocraft-Bold.ttf");
+const GALACTIC: &[u8] = include_bytes!("../../../../assets/fonts/StandardGalacticAlphabet.ttf");
+/// The OFL asks every copy of a font to carry its licence; the fonts travel inside
+/// the binary, so their licences do too, shown at the bottom of Appearance.
+const MONOCRAFT_LICENCE: &str = include_str!("../../../../assets/fonts/Monocraft-OFL.txt");
+const GALACTIC_LICENCE: &str = include_str!("../../../../assets/fonts/StandardGalacticAlphabet-OFL.txt");
+
+/// What the window's text is set in. Kept on its own `font=` line of `appearance.txt`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Typeface {
+    #[default]
+    Minecraft,
+    /// The system's sans-serif, what the launcher used before there was a choice.
+    Modern,
+    /// The enchanting table's alphabet.
+    Galactic,
+    Custom(std::path::PathBuf),
+}
+
+impl Typeface {
+    fn serialize(&self) -> String {
+        match self {
+            Self::Minecraft => "font=minecraft\n".into(),
+            Self::Modern => "font=modern\n".into(),
+            Self::Galactic => "font=galactic\n".into(),
+            Self::Custom(path) => format!("font=custom:{}\n", path.display()),
+        }
+    }
+
+    fn parse(contents: &str) -> Self {
+        let value = contents.lines().find_map(|line| line.strip_prefix("font="));
+        match value {
+            Some("modern") => Self::Modern,
+            Some("galactic") => Self::Galactic,
+            Some(other) => match other.strip_prefix("custom:") {
+                Some(path) if !path.is_empty() => Self::Custom(path.into()),
+                _ => Self::Minecraft,
+            },
+            None => Self::Minecraft,
+        }
+    }
+
+    /// The font it names, among those [`startup_fonts`] loaded.
+    fn font(&self, custom_family: Option<&'static str>) -> iced::Font {
+        match self {
+            Self::Minecraft => iced::Font::with_name("Monocraft"),
+            Self::Modern => iced::Font::DEFAULT,
+            Self::Galactic => iced::Font::with_name("Standard Galactic Alphabet"),
+            Self::Custom(_) => custom_family.map_or(iced::Font::with_name("Monocraft"), iced::Font::with_name),
+        }
+    }
+}
+
+/// A font file's family name, which is what a font is asked for by. Read by
+/// fontdb, which is what loads it, so a file it turns down is turned down here too.
+fn family_name(bytes: &[u8]) -> Option<String> {
+    let mut db = fontdb::Database::new();
+    db.load_font_data(bytes.to_vec());
+    let face = db.faces().next()?;
+    face.families.first().map(|(name, _)| name.clone()).filter(|name| !name.trim().is_empty())
+}
+
+/// Bigger than any real font. The custom one is read before the window opens, so
+/// a pipe or a huge file named in `appearance.txt` would hang every start.
+const FONT_LIMIT: u64 = 32 * 1024 * 1024;
+
+fn read_font(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() || meta.len() > FONT_LIMIT {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a font file of a sensible size"));
+    }
+    std::fs::read(path)
+}
+
+/// Left in the data directory while a custom font is first being drawn. Found at
+/// the next start, the font crashed the launcher, and the built-in one comes back:
+/// otherwise a bad font would crash every start with no way back but a text editor.
+const TRYING: &str = "font.trying";
+/// How long a custom font has to have drawn without trouble.
+const TRIED_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The fonts to hand iced at startup and the one to set the window in. Every
+/// built-in one is loaded whichever is chosen, so the picker can show each in
+/// its own letters. A custom file that has gone or isn't a font falls back.
+pub fn startup_fonts() -> (Vec<std::borrow::Cow<'static, [u8]>>, iced::Font) {
+    let root = nexo_core::Paths::discover().ok().map(|paths| paths.root().to_path_buf());
+    let contents = root.as_ref().and_then(|root| std::fs::read_to_string(root.join(FILE)).ok()).unwrap_or_default();
+    let mut typeface = Typeface::parse(&contents);
+    let mut fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![MONOCRAFT.into(), MONOCRAFT_BOLD.into(), GALACTIC.into()];
+    let mut custom_family = None;
+    if let (Typeface::Custom(path), Some(root)) = (&typeface, &root) {
+        let trying = root.join(TRYING);
+        if trying.exists() {
+            tracing::warn!("the custom font {} crashed the last start; back to the built-in one", path.display());
+            let kept: String = contents.lines().filter(|line| !line.starts_with("font=")).map(|line| format!("{line}\n")).collect();
+            let _ = std::fs::write(root.join(FILE), kept + &Typeface::Minecraft.serialize());
+            let _ = std::fs::remove_file(&trying);
+            typeface = Typeface::Minecraft;
+        } else {
+            match read_font(path).map(|bytes| (family_name(&bytes), bytes)) {
+                Ok((Some(family), bytes)) => {
+                    // Leaked once per run: iced asks for fonts by `&'static str`.
+                    custom_family = Some(&*Box::leak(family.into_boxed_str()));
+                    fonts.push(bytes.into());
+                    if std::fs::write(&trying, "").is_ok() {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(TRIED_AFTER);
+                            let _ = std::fs::remove_file(trying);
+                        });
+                    }
+                }
+                Ok((None, _)) => tracing::warn!("{} is not a font the launcher can read", path.display()),
+                Err(error) => tracing::warn!("could not read the custom font {}: {error}", path.display()),
+            }
+        }
+    }
+    if let Some(family) = custom_family {
+        let _ = STARTUP_CUSTOM.set(family);
+    }
+    (fonts, typeface.font(custom_family))
+}
+
+/// The custom font's family, if [`startup_fonts`] loaded one.
+static STARTUP_CUSTOM: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// What `appearance.txt` holds.
 #[derive(Debug, PartialEq)]
@@ -136,6 +263,8 @@ pub struct Appearance {
     pub particles: Tuning,
     pub reduce_motion: bool,
     pub settings: Settings,
+    pub font: Typeface,
+    pub custom_family: Option<&'static str>,
 }
 
 /// Applies the saved theme. A missing or damaged file just means the defaults.
@@ -178,6 +307,9 @@ pub fn load() -> Appearance {
         particles: saved.particles,
         reduce_motion: saved.reduce_motion,
         settings,
+        // Read after `startup_fonts`, so it sees any fall-back that wrote.
+        font: Typeface::parse(&contents),
+        custom_family: STARTUP_CUSTOM.get().copied(),
     }
 }
 
@@ -187,7 +319,7 @@ fn save(app: &App) {
     if let Err(error) = app.settings.save(&paths) {
         tracing::warn!("could not save the settings: {error}");
     }
-    let contents = serialize(theme::selected(), app.effect, &app.custom_themes, app.particles, app.reduce_motion);
+    let contents = serialize(theme::selected(), app.effect, &app.custom_themes, app.particles, app.reduce_motion) + &app.font.serialize();
     let path = paths.root().join(FILE);
     // By way of a temporary file, so a crash mid-write can't lose the themes.
     let temporary = path.with_extension("txt.tmp");
@@ -236,6 +368,15 @@ pub enum Msg {
     JvmArgs(String),
     AfterLaunch(AfterLaunch),
     AutoUpdateMod(bool),
+    Font(Typeface),
+    BrowseFont,
+    /// A font file that read as a font: its path, family name and bytes.
+    FontPicked(std::path::PathBuf, String, std::sync::Arc<Vec<u8>>),
+    FontRefused(String),
+    /// A picked font has finished loading, so the window can switch to it.
+    FontLoaded(Typeface),
+    /// A picked font that read as one but iced wouldn't load.
+    FontFailed(std::path::PathBuf),
     New,
     Delete,
     Name(String),
@@ -410,6 +551,77 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::AutoUpdateMod(on) => {
             app.settings.auto_update_mod = on;
             save(app);
+            return Task::none();
+        }
+        Msg::Font(typeface) => {
+            theme::set_font(typeface.font(app.custom_family));
+            app.font = typeface;
+            save(app);
+            return Task::none();
+        }
+        // Only if it is still the one chosen: another may have been picked meanwhile.
+        Msg::FontLoaded(typeface) => {
+            if app.font == typeface {
+                theme::set_font(typeface.font(app.custom_family));
+                save(app);
+            }
+            return Task::none();
+        }
+        Msg::BrowseFont => {
+            return Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .set_title("Pick a font")
+                        .add_filter("Fonts", &["ttf", "otf", "TTF", "OTF"])
+                        .pick_file()
+                        .await?;
+                    let path = file.path().to_path_buf();
+                    let shown = path.display().to_string();
+                    // Saved on one line of a text file, so it has to be text without breaks.
+                    if path.to_str().is_none_or(|path| path.chars().any(char::is_control)) {
+                        return Some(Msg::FontRefused(format!("{shown} has a name the launcher can't save; rename or move it first.")));
+                    }
+                    let read = tokio::task::spawn_blocking({
+                        let path = path.clone();
+                        move || read_font(&path)
+                    });
+                    Some(match read.await.map_err(std::io::Error::other).and_then(|read| read) {
+                        Ok(bytes) => match family_name(&bytes) {
+                            Some(family) => Msg::FontPicked(path, family, std::sync::Arc::new(bytes)),
+                            None => Msg::FontRefused(format!("{shown} is not a font the launcher can read.")),
+                        },
+                        Err(error) => Msg::FontRefused(format!("Could not read {shown}: {error}")),
+                    })
+                },
+                |picked| picked.map_or(Message::Noop, Message::ThemeEditor),
+            );
+        }
+        Msg::FontPicked(path, family, bytes) => {
+            // ponytail: leaks a family name per font picked in a session, a few bytes each.
+            app.custom_family = Some(Box::leak(family.into_boxed_str()));
+            app.font = Typeface::Custom(path.clone());
+            // Switched to and saved once loaded: asked for before, its text would be laid
+            // out in a fallback, and if drawing it crashes, the choice isn't kept.
+            return iced::font::load(std::sync::Arc::unwrap_or_clone(bytes)).map(move |loaded| {
+                Message::ThemeEditor(match loaded {
+                    Ok(()) => Msg::FontLoaded(Typeface::Custom(path.clone())),
+                    Err(_) => Msg::FontFailed(path.clone()),
+                })
+            });
+        }
+        Msg::FontFailed(path) => {
+            // Back to the last choice that was saved, which this one never was.
+            if app.font == Typeface::Custom(path.clone()) {
+                app.font = nexo_core::Paths::discover()
+                    .ok()
+                    .and_then(|paths| std::fs::read_to_string(paths.root().join(FILE)).ok())
+                    .map_or_else(Typeface::default, |contents| Typeface::parse(&contents));
+            }
+            app.status = crate::Status::Error(format!("{} could not be loaded.", path.display()));
+            return Task::none();
+        }
+        Msg::FontRefused(why) => {
+            app.status = crate::Status::Error(why);
             return Task::none();
         }
         Msg::New => {
@@ -640,7 +852,7 @@ pub enum Tab {
 }
 
 fn heading(label: &str) -> iced::widget::Text<'_> {
-    text(label).size(15).font(theme::BOLD).color(theme::text())
+    text(label).size(15).font(theme::bold()).color(theme::text())
 }
 
 /// A labelled row: the label, the control, and a line of help under them.
@@ -788,6 +1000,53 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+fn font_card<'a>(name: String, font: iced::Font, chosen: bool, on_press: Msg) -> Element<'a, Message> {
+    button(
+        column![
+            container(text("Play Nexo").size(18).font(font).color(theme::text()))
+                .width(Fill)
+                .height(48)
+                .center_y(48)
+                .padding([0, 10])
+                .style(theme::well),
+            // In the system font whatever is chosen, so a font nobody can read
+            // can still be found and switched back.
+            text(name).size(14).font(iced::Font::DEFAULT).color(theme::text()),
+        ]
+        .spacing(8),
+    )
+    .width(Fill)
+    .padding(10)
+    .style(if chosen { theme::selected_tile } else { theme::tile })
+    .on_press(Message::ThemeEditor(on_press))
+    .into()
+}
+
+fn fonts_view(app: &App) -> Element<'_, Message> {
+    let builtin = [
+        ("Minecraft", Typeface::Minecraft),
+        ("Modern", Typeface::Modern),
+        ("Enchanting table", Typeface::Galactic),
+    ];
+    let mut cards: Vec<Element<'_, Message>> = builtin
+        .into_iter()
+        .map(|(name, typeface)| font_card(name.to_string(), typeface.font(None), app.font == typeface, Msg::Font(typeface)))
+        .collect();
+    let custom_chosen = matches!(app.font, Typeface::Custom(_));
+    let custom_font = app.custom_family.map_or(iced::Font::DEFAULT, iced::Font::with_name);
+    let custom_name = match &app.font {
+        Typeface::Custom(path) => {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("Custom");
+            // Chosen but not loaded at start: gone, moved or not a font after all.
+            if app.custom_family.is_none() { format!("{name} (couldn't load)") } else { name.to_string() }
+        }
+        _ => "Custom… (pick a file)".to_string(),
+    };
+    cards.push(font_card(custom_name, custom_font, custom_chosen, Msg::BrowseFont));
+
+    grid(cards, 4)
+}
+
 fn appearance_view(app: &App) -> Element<'_, Message> {
 
     let mut themes: Vec<Element<'_, Message>> = PALETTES
@@ -804,6 +1063,7 @@ fn appearance_view(app: &App) -> Element<'_, Message> {
     let percent = |value| format!("{value}%");
 
     let mut page = column![heading("Theme"), grid(themes, 3)].spacing(12);
+    page = page.push(Space::new().height(8)).push(heading("Font").font(iced::Font { weight: iced::font::Weight::Bold, ..iced::Font::DEFAULT })).push(fonts_view(app));
     if let Some(at) = showing_custom() {
         page = page.push(editor(app, at));
     }
@@ -820,6 +1080,15 @@ fn appearance_view(app: &App) -> Element<'_, Message> {
             "Pages and buttons change straight away instead of animating. The background has its own Off.",
             toggler(app.reduce_motion).on_toggle(|on| Message::ThemeEditor(Msg::ReduceMotion(on))).style(theme::toggle),
         ))
+        .push(Space::new().height(8))
+        .push(heading("Font licences"))
+        .push(
+            text("Monocraft by Idrees Hassan (github.com/IdreesInc/Monocraft) and Standard Galactic Alphabet by Dao Creation God, both under the SIL Open Font License 1.1:")
+                .size(13)
+                .color(theme::muted()),
+        )
+        .push(text(MONOCRAFT_LICENCE).size(11).color(theme::muted()))
+        .push(text(GALACTIC_LICENCE).size(11).color(theme::muted()))
         .into()
 }
 
@@ -857,6 +1126,20 @@ mod tests {
         // A theme pointing past the end, say after the file was edited by hand.
         assert_eq!(parse("theme=custom:9\n").selected, 0);
         assert_eq!(parse("theme=custom:-1\n").selected, 0);
+    }
+
+    #[test]
+    fn fonts() {
+        for typeface in [Typeface::Minecraft, Typeface::Modern, Typeface::Galactic, Typeface::Custom("/f/My Font.ttf".into())] {
+            assert_eq!(Typeface::parse(&format!("theme=x\n{}", typeface.serialize())), typeface);
+        }
+        assert_eq!(Typeface::parse(""), Typeface::Minecraft, "the default for a new install and an old file");
+        assert_eq!(Typeface::parse("font=custom:\n"), Typeface::Minecraft);
+        // The names `Typeface::font` asks for must be the ones in the files.
+        assert_eq!(family_name(MONOCRAFT).as_deref(), Some("Monocraft"));
+        assert_eq!(family_name(MONOCRAFT_BOLD).as_deref(), Some("Monocraft"));
+        assert_eq!(family_name(GALACTIC).as_deref(), Some("Standard Galactic Alphabet"));
+        assert_eq!(family_name(b"not a font"), None);
     }
 
     #[test]

@@ -5,7 +5,8 @@ use crate::dropdown::dropdown;
 use crate::lively::scrollable;
 use crate::lively::text_input;
 use crate::lively::Tint;
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, row};
+use crate::lively::text;
 use iced::{Element, Fill};
 use nexo_core::{nexo_mod, Instance};
 
@@ -38,14 +39,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     let header = row![
-        text("Instances").size(26).font(theme::BOLD).color(theme::text()).width(Fill),
+        text("Instances").size(26).font(theme::bold()).color(theme::text()).width(Fill),
         text_input("Search instances", &app.instance_query)
             .on_input(Message::InstanceQueryChanged)
             .padding([10, 12])
             .size(13)
             .style(theme::input)
             .width(300),
-        button(crate::lively::changed(app.creating, text(if app.creating { "CANCEL" } else { "+ NEW INSTANCE" }).size(12).font(theme::BOLD)))
+        button(crate::lively::changed(app.creating, text(if app.creating { "CANCEL" } else { "+ NEW INSTANCE" }).size(12).font(theme::bold())))
             .padding([11, 16])
             .style(theme::lit_button)
             .on_press(Message::ToggleCreateForm),
@@ -151,8 +152,8 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     };
 
     let mut title = row![
-        text(&instance.name).size(17).font(theme::BOLD).color(theme::text()),
-        container(crate::lively::changed(tag, text(tag).size(10).font(theme::BOLD)))
+        text(&instance.name).size(17).font(theme::bold()).color(theme::text()),
+        container(crate::lively::changed(tag, text(tag).size(10).font(theme::bold())))
             .padding([3, 7])
             .tinted(theme::tag(lit)),
     ]
@@ -162,7 +163,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     let release = app.nexo_release.as_ref().filter(|release| release.manifest.supports(instance));
     if app.nexo_mod_outdated(instance) && release.is_none() {
         title = title.push(
-            container(text("NEXO UPDATE").size(10).font(theme::BOLD))
+            container(text("NEXO UPDATE").size(10).font(theme::bold()))
                 .padding([3, 7])
                 .tinted(theme::tag(true)),
         );
@@ -203,7 +204,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
     // Play becomes Stop while the game is up, mirroring the details screen so
     // the same instance never shows two different states.
     let action: iced::Element<'a, Message> = if running {
-        button(text("STOP").size(12).font(theme::BOLD).center())
+        button(text("STOP").size(12).font(theme::bold()).center())
             .width(96)
             .padding([11, 0])
             .style(theme::stop_button)
@@ -211,7 +212,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             .into()
     } else {
         let can_launch = !app.is_busy() && app.active_account().is_some();
-        button(text("PLAY").size(12).font(theme::BOLD).center())
+        button(text("PLAY").size(12).font(theme::bold()).center())
             .width(96)
             .padding([11, 0])
             .style(theme::primary_button)
@@ -226,7 +227,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         .next()
         .map(|c| c.to_uppercase().collect::<String>())
         .unwrap_or_default();
-    let tile = container(text(initial).size(18).font(theme::BOLD))
+    let tile = container(text(initial).size(18).font(theme::bold()))
         .width(52)
         .height(52)
         .center_x(52)
@@ -240,7 +241,7 @@ fn card<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
             Some(_) => return None,
         };
         Some(
-            button(text(label).size(12).font(theme::BOLD).center())
+            button(text(label).size(12).font(theme::bold()).center())
                 .padding([11, 12])
                 .style(theme::lit_button)
                 .on_press_maybe((!app.is_busy() && !running).then(|| Message::InstallNexoMod {

@@ -292,7 +292,7 @@ where
         let room = (bounds.width - self.padding.x() - CHEVRON_SIZE - 6.0).max(0.0);
         if let Some(label) = &self.label {
             renderer.fill_text(
-                text_of(label.clone(), self.text_size, Size::new(room, bounds.height), renderer.default_font(), text::Alignment::Left),
+                text_of(label.clone(), self.text_size, Size::new(room, bounds.height), crate::theme::regular(), text::Alignment::Left),
                 Point::new(bounds.x + self.padding.left, bounds.center_y()),
                 faded(look.value, state.label_in),
                 Rectangle { width: room, x: bounds.x + self.padding.left, ..bounds }.intersection(viewport).unwrap_or(bounds),
@@ -563,7 +563,7 @@ impl<T: ToString + Clone, M> overlay::Overlay<M, Theme, Renderer> for List<'_, T
                         self.options[index].to_string(),
                         self.text_size,
                         Size::new(bounds.width - self.pad_x - INSET * 2.0 - 20.0, self.row),
-                        renderer.default_font(),
+                        crate::theme::regular(),
                         text::Alignment::Left,
                     ),
                     Point::new(x, y + self.row / 2.0),

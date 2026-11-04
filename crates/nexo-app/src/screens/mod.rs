@@ -9,11 +9,13 @@ pub mod server_dashboard;
 pub mod server_wizard;
 pub mod settings;
 pub mod skins;
+pub mod welcome;
 
 use crate::theme;
 use crate::{App, Message, Screen, Status};
 use crate::lively::button;
-use iced::widget::{mouse_area, stack, Space, column, container, image, row, svg, text, tooltip};
+use iced::widget::{mouse_area, stack, Space, column, container, image, row, svg, tooltip};
+use crate::lively::text;
 use iced::{Element, Fill};
 use std::sync::LazyLock;
 
@@ -383,7 +385,7 @@ pub fn header<'a>(
     subtitle: &'a str,
     action: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut left = column![text(title).size(24).font(theme::BOLD).color(theme::text())].spacing(4);
+    let mut left = column![text(title).size(24).font(theme::bold()).color(theme::text())].spacing(4);
     if !subtitle.is_empty() {
         left = left.push(text(subtitle).size(13).color(theme::muted()));
     }

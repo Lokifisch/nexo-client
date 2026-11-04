@@ -10,7 +10,8 @@ use crate::dropdown::dropdown;
 use crate::lively::text_input;
 use crate::lively::toggler;
 use crate::lively::Tint;
-use iced::widget::{Space, column, container, image, row, scrollable, slider, stack, text};
+use iced::widget::{Space, column, container, image, row, scrollable, slider, stack};
+use crate::lively::text;
 use iced::{Color, Element, Fill, Font, Length};
 use nexo_core::hosting::ServerKind;
 
@@ -96,7 +97,7 @@ fn stepper(w: &Wizard, roomy: bool) -> Element<'_, Message> {
             .align_y(iced::Center)
             .tinted(theme::step_dot(current, done));
         let label = crate::lively::tinted_text(
-            text(step.label()).size(14).font(if current { theme::BOLD } else { Font::DEFAULT }),
+            text(step.label()).size(14).font(if current { theme::bold() } else { theme::regular() }),
             if current { theme::text() } else { theme::muted() },
         );
         let content = if roomy || current { row![dot, label] } else { row![dot] };
@@ -111,9 +112,9 @@ fn stepper(w: &Wizard, roomy: bool) -> Element<'_, Message> {
     container(steps).width(Fill).align_x(iced::Center).into()
 }
 
-fn title<'a>(heading: &'a str, sub: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+fn title<'a>(heading: &'a str, sub: impl iced::widget::text::IntoFragment<'a>) -> Element<'a, Message> {
     column![
-        text(heading).size(24).font(theme::BOLD).color(theme::text()),
+        text(heading).size(24).font(theme::bold()).color(theme::text()),
         text(sub).size(13).color(theme::muted()),
     ]
     .spacing(6)
@@ -123,7 +124,7 @@ fn title<'a>(heading: &'a str, sub: impl text::IntoFragment<'a>) -> Element<'a, 
 }
 
 fn field_label(label: &str) -> Element<'_, Message> {
-    text(label).size(14).font(theme::BOLD).color(theme::text()).into()
+    text(label).size(14).font(theme::bold()).color(theme::text()).into()
 }
 
 // ------------------------------------------------------------------- step 1
@@ -197,7 +198,7 @@ fn kind_card(kind: ServerKind, selected: bool) -> Element<'static, Message> {
 
     button(
         column![
-            text(kind.label()).size(20).font(theme::BOLD).color(theme::text()),
+            text(kind.label()).size(20).font(theme::bold()).color(theme::text()),
             text(blurb).size(13).color(theme::muted()),
             Space::new().height(Fill),
             row![text("Performance").size(12).color(theme::muted()), Space::new().width(Fill), text(rating).size(12)],
@@ -282,7 +283,7 @@ fn content_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let mut col = column![
         title("Add-ons", format!("Pick {noun} to install. The right build for Minecraft {} is downloaded when the server is made, with anything it needs.", w.version)),
         essentials_section(app, w),
-        text(format!("More {noun}")).size(16).font(theme::BOLD).color(theme::text()),
+        text(format!("More {noun}")).size(16).font(theme::bold()).color(theme::text()),
         column![search, filters].spacing(6),
         crate::lively::eased_scrollbar(
             scrollable(picked).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(3).scroller_width(3))),
@@ -310,7 +311,7 @@ fn essentials_section<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     column![
         row![
             column![
-                text("Essentials").size(16).font(theme::BOLD).color(theme::text()),
+                text("Essentials").size(16).font(theme::bold()).color(theme::text()),
                 text("Hand-picked, and checked against your version as you look.").size(12).color(theme::muted()),
             ]
             .spacing(3)
@@ -354,7 +355,7 @@ fn essential_card<'a>(app: &'a App, w: &'a Wizard, e: &'a Essential) -> Element<
             icon,
             column![
                 row![
-                    text(e.name).size(14).font(theme::BOLD).color(theme::text()),
+                    text(e.name).size(14).font(theme::bold()).color(theme::text()),
                     container(text(e.tag).size(10)).padding([1, 7]).tinted(theme::pill(theme::accent())),
                 ]
                 .spacing(8)
@@ -391,7 +392,7 @@ fn hit_card<'a>(app: &'a App, w: &'a Wizard, hit: &'a nexo_core::modrinth::Searc
         row![
             icon,
             column![
-                row![text(&hit.title).size(15).font(theme::BOLD).color(theme::text()).width(Fill), toggle]
+                row![text(&hit.title).size(15).font(theme::bold()).color(theme::text()).width(Fill), toggle]
                     .align_y(iced::Center),
                 text(clip(&hit.description, 80)).size(12).color(theme::muted()),
                 text(format!("↓ {}   ♥ {}", compact(hit.downloads), compact(hit.follows))).size(11).color(theme::muted()),
@@ -512,7 +513,7 @@ fn performance_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
     let tunnel = container(
         row![
             column![
-                text("Public address").size(14).font(theme::BOLD).color(theme::text()),
+                text("Public address").size(14).font(theme::bold()).color(theme::text()),
                 text("Friends join from anywhere through e4mc's relay — no port forwarding, no account. Open while Nexo runs. The whitelist starts on: add friends under Players.")
                     .size(12)
                     .color(theme::muted()),
@@ -608,14 +609,14 @@ pub fn ram_picker<'a>(
 
     column![
         row![
-            text(format!("{value} MB")).size(22).font(theme::BOLD).color(theme::text()),
+            text(format!("{value} MB")).size(22).font(theme::bold()).color(theme::text()),
             text(format!("  ≈ {} GB", hosting::format_gb(value))).size(13).color(theme::muted()),
         ]
         .align_y(iced::Center),
         picker,
         scale,
         container(
-            column![text(verdict).size(13).font(theme::BOLD), text(detail).size(12)].spacing(3)
+            column![text(verdict).size(13).font(theme::bold()), text(detail).size(12)].spacing(3)
         )
         .padding([10, 14])
         .width(Fill)
@@ -759,7 +760,7 @@ fn setup_view<'a>(app: &'a App, setup: &'a Setup) -> Element<'a, Message> {
         );
     }
 
-    let mut col = column![text("Setting up your server").size(20).font(theme::BOLD).color(theme::text()), list].spacing(16);
+    let mut col = column![text("Setting up your server").size(20).font(theme::bold()).color(theme::text()), list].spacing(16);
 
     if let Some(err) = &setup.error {
         col = col.push(crate::lively::appear(container(text(err.as_str()).size(13)).padding([10, 14]).width(Fill).style(theme::banner(true))));

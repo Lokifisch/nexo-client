@@ -107,9 +107,66 @@ impl Rgba {
 pub struct Skin {
     texture: Rgba,
     model: SkinModel,
-    /// Old 64×32 skins have no left-limb regions, so the right ones get
-    /// mirrored instead.
+    /// An old 64×32 skin, laid out the modern way on decoding. Kept because
+    /// those predate slim arms.
     legacy: bool,
+}
+
+/// Lays a 64×32 skin out as 64×64: the same top half, with the right arm and
+/// leg mirrored into the left limbs' slots, which is how the game draws an old
+/// skin. Everything that maps the texture then has one layout to know.
+fn modernise(old: &Rgba) -> Rgba {
+    let mut out = Rgba::new(64, 64);
+    for y in 0..32 {
+        for x in 0..64 {
+            out.set(x, y, old.get(x, y));
+        }
+    }
+    // The game's rules for old skins: the base layers have no transparency,
+    // and a hat layer with no transparent pixel at all is taken as unused,
+    // or the many old skins that filled it with black get a box on the head.
+    for (x0, y0, x1, y1) in [(0, 0, 32, 16), (0, 16, 64, 32)] {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let [r, g, b, _] = out.get(x, y);
+                out.set(x, y, [r, g, b, 255]);
+            }
+        }
+    }
+    if (0..16).all(|y| (32..64).all(|x| out.get(x, y)[3] == 255)) {
+        for y in 0..16 {
+            for x in 32..64 {
+                out.set(x, y, [0, 0, 0, 0]);
+            }
+        }
+    }
+    // Box origins: right leg to left leg, right arm to left arm.
+    for (from, to) in [((0, 16), (16, 48)), ((40, 16), (32, 48))] {
+        mirror_limb(old, &mut out, from, to);
+    }
+    out
+}
+
+/// Copies a 4×12×4 limb's unwrap as its mirror image: every face flipped
+/// left to right, and the inner and outer sides swapped.
+fn mirror_limb(src: &Rgba, dst: &mut Rgba, (u, v): (u32, u32), (tu, tv): (u32, u32)) {
+    let (w, h, d) = (4, 12, 4);
+    let faces = [
+        ((u + d, v, w, d), (tu + d, tv)),                     // top
+        ((u + d + w, v, w, d), (tu + d + w, tv)),             // bottom
+        // A side's place swaps, but it stays the outer (or inner) side.
+        ((u, v + d, d, h), (tu + d + w, tv + d)),             // outer side
+        ((u + d + w, v + d, d, h), (tu, tv + d)),             // inner side
+        ((u + d, v + d, w, h), (tu + d, tv + d)),             // front
+        ((u + d + w + d, v + d, w, h), (tu + d + w + d, tv + d)), // back
+    ];
+    for ((sx, sy, sw, sh), (dx, dy)) in faces {
+        for y in 0..sh {
+            for x in 0..sw {
+                dst.set(dx + sw - 1 - x, dy + y, src.get(sx + x, sy + y));
+            }
+        }
+    }
 }
 
 impl Skin {
@@ -125,15 +182,9 @@ impl Skin {
             )));
         }
 
-        Ok(Self {
-            texture: Rgba {
-                width,
-                height,
-                pixels: decoded.into_raw(),
-            },
-            model,
-            legacy: height == 32,
-        })
+        let texture = Rgba { width, height, pixels: decoded.into_raw() };
+        let legacy = height == 32;
+        Ok(Self { texture: if legacy { modernise(&texture) } else { texture }, model, legacy })
     }
 
     /// The raw texture, for callers that map it onto their own geometry
@@ -182,8 +233,7 @@ impl Skin {
         }
     }
 
-    /// Copies a rectangle out of the texture, optionally mirrored (needed
-    /// when synthesising left limbs from right ones on legacy skins).
+    /// Copies a rectangle out of the texture, optionally mirrored.
     fn part(&self, x: u32, y: u32, w: u32, h: u32, mirror: bool) -> Rgba {
         let mut out = Rgba::new(w, h);
         for row in 0..h {
@@ -238,50 +288,19 @@ impl Skin {
         self.draw(&mut canvas, &hat, torso_x, 0);
 
         // Torso + jacket.
-        let torso = self.part(20, 20, 8, 12, false);
-        self.draw(&mut canvas, &torso, torso_x, 8);
-        if !self.legacy {
-            let jacket = self.part(20, 36, 8, 12, false);
-            self.draw(&mut canvas, &jacket, torso_x, 8);
-        }
-
-        // The player's right arm/leg appear on the viewer's left.
-        let right_arm = self.part(44, 20, arm, 12, false);
-        self.draw(&mut canvas, &right_arm, 0, 8);
-        if !self.legacy {
-            let right_sleeve = self.part(44, 36, arm, 12, false);
-            self.draw(&mut canvas, &right_sleeve, 0, 8);
-        }
-
-        // Legacy skins store only one arm and one leg; the other side is a
-        // mirror image, which is exactly how the game rendered them.
-        let left_arm = if self.legacy {
-            self.part(44, 20, arm, 12, true)
-        } else {
-            self.part(36, 52, arm, 12, false)
-        };
-        self.draw(&mut canvas, &left_arm, torso_x + 8, 8);
-        if !self.legacy {
-            let left_sleeve = self.part(52, 52, arm, 12, false);
-            self.draw(&mut canvas, &left_sleeve, torso_x + 8, 8);
-        }
-
-        let right_leg = self.part(4, 20, 4, 12, false);
-        self.draw(&mut canvas, &right_leg, torso_x, 20);
-        if !self.legacy {
-            let right_pant = self.part(4, 36, 4, 12, false);
-            self.draw(&mut canvas, &right_pant, torso_x, 20);
-        }
-
-        let left_leg = if self.legacy {
-            self.part(4, 20, 4, 12, true)
-        } else {
-            self.part(20, 52, 4, 12, false)
-        };
-        self.draw(&mut canvas, &left_leg, torso_x + 4, 20);
-        if !self.legacy {
-            let left_pant = self.part(4, 52, 4, 12, false);
-            self.draw(&mut canvas, &left_pant, torso_x + 4, 20);
+        // An old skin's overlay regions are empty after `modernise`, and its
+        // left limbs are already the mirrored right ones.
+        let parts = [
+            ((20, 20, 8), (20, 36), (torso_x, 8)),
+            // The player's right arm and leg appear on the viewer's left.
+            ((44, 20, arm), (44, 36), (0, 8)),
+            ((36, 52, arm), (52, 52), (torso_x + 8, 8)),
+            ((4, 20, 4), (4, 36), (torso_x, 20)),
+            ((20, 52, 4), (4, 52), (torso_x + 4, 20)),
+        ];
+        for ((x, y, w), (ox, oy), (at_x, at_y)) in parts {
+            self.draw(&mut canvas, &self.part(x, y, w, 12, false), at_x, at_y);
+            self.draw(&mut canvas, &self.part(ox, oy, w, 12, false), at_x, at_y);
         }
 
         canvas.scaled(scale)
@@ -346,6 +365,11 @@ pub fn decode_texture(bytes: &[u8]) -> Result<Rgba> {
         .map_err(|err| Error::invalid(format!("could not read texture: {err}")))?
         .to_rgba8();
     let (width, height) = decoded.dimensions();
+    // Skins are 64 px and capes 64x32; anything past a GPU's texture limit would
+    // crash the window when uploaded, so a texture this big is refused here.
+    if width > 1024 || height > 1024 {
+        return Err(Error::invalid(format!("texture is {width}x{height}, larger than 1024 px")));
+    }
     Ok(Rgba {
         width,
         height,
@@ -439,6 +463,26 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn an_old_skin_gets_mirrored_left_limbs() {
+        let mut image = image::RgbaImage::new(64, 32);
+        // The left edge of the right arm's front, and of the right leg's outer side.
+        image.put_pixel(44, 20, image::Rgba([0, 255, 0, 255]));
+        image.put_pixel(0, 20, image::Rgba([0, 0, 255, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+
+        let skin = Skin::decode(&png, SkinModel::Slim).unwrap();
+        let texture = skin.texture();
+        assert_eq!((texture.width, texture.height), (64, 64));
+        assert_eq!(texture.get(44, 20), [0, 255, 0, 255], "the top half is kept");
+        // Mirrored: the front's left edge becomes the left arm front's right edge.
+        assert_eq!(texture.get(39, 52), [0, 255, 0, 255]);
+        // And the outer side stays the outer side, flipped.
+        assert_eq!(texture.get(27, 52), [0, 0, 255, 255]);
+        assert_eq!(skin.detect_model(), SkinModel::Classic, "old skins predate slim arms");
     }
 
     #[test]

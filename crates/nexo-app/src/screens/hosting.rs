@@ -11,7 +11,8 @@ use crate::{App, Message, Screen, Status, empty_state, theme};
 use crate::lively::button;
 use crate::lively::scrollable;
 use crate::lively::Tint;
-use iced::widget::{Space, column, container, row, text};
+use iced::widget::{Space, column, container, row};
+use crate::lively::text;
 use iced::{Element, Fill, Task};
 use nexo_core::hosting::{Created, HostedServer, Players, Sample, ServerKind, ServerSpec, WorldSource};
 use nexo_core::modrinth::SearchHit;
@@ -1366,7 +1367,7 @@ pub fn list_view(app: &App) -> Element<'_, Message> {
     if !app.paper_servers.is_empty() {
         list = list.push(Space::new().height(8)).push(
             column![
-                text("Converted worlds").size(15).font(theme::BOLD).color(theme::text()),
+                text("Converted worlds").size(15).font(theme::bold()).color(theme::text()),
                 text("Singleplayer worlds hosted with Paper from an instance's Worlds tab — stopping one copies the world back.")
                     .size(12)
                     .color(theme::muted()),
@@ -1415,7 +1416,7 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
 
     let mut details = column![
         row![
-            text(&server.name).size(17).font(theme::BOLD).color(theme::text()),
+            text(&server.name).size(17).font(theme::bold()).color(theme::text()),
             container(text(label).size(11)).padding([2, 8]).tinted(theme::pill(color)),
         ]
         .spacing(10)
@@ -1437,7 +1438,7 @@ fn server_card<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Messag
 
     container(
         row![
-            container(text(initial).size(18).font(theme::BOLD))
+            container(text(initial).size(18).font(theme::bold()))
                 .width(44)
                 .height(44)
                 .align_x(iced::Center)

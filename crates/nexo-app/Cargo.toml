@@ -34,6 +34,8 @@ tracing-subscriber.workspace = true
 # Opens the Microsoft sign-in page in the user's default browser.
 open = "5"
 glam = "0.33.3"
+# Reads a custom font's family name the way iced's text stack will. Already in the tree through iced.
+fontdb = { version = "0.23", default-features = false, features = ["std"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 # `xdg-portal` is a Linux-only feature of rfd: the deps it pulls sit behind a
 # Linux `[target]` table upstream, so it is inert on Windows and the Win32

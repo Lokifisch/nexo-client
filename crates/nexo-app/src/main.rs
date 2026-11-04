@@ -51,9 +51,6 @@ const WINDOW_ICON: &[u8] = include_bytes!("../../../assets/icons/256.png");
 /// nearest-neighbour sampling.
 const FACE_SCALE: u32 = 4;
 
-/// Upscale for the saved-skin tiles. A body render is 16x32 texture pixels,
-/// so this puts it at a size a skin is recognisable from.
-const LIBRARY_SCALE: u32 = 3;
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -67,6 +64,9 @@ fn main() -> iced::Result {
     // previous binary next to the new one for the next start to clear. A
     // no-op on every other platform.
     nexo_core::self_update::clear_previous();
+
+    let (fonts, default_font) = screens::settings::startup_fonts();
+    theme::set_font(default_font);
 
     iced::application(App::boot, App::update, App::view)
         .title("Nexo")
@@ -83,6 +83,8 @@ fn main() -> iced::Result {
         // generic placeholder icon in the task switcher instead.
         .settings(iced::Settings {
             id: Some(APP_ID.to_string()),
+            fonts,
+            default_font,
             ..Default::default()
         })
         .window(iced::window::Settings {
@@ -329,6 +331,9 @@ pub struct App {
     pub particles: backdrop::Tuning,
     pub reduce_motion: bool,
     pub settings: nexo_core::settings::Settings,
+    /// The chosen font. The window's is `theme::regular`, which follows it.
+    pub font: screens::settings::Typeface,
+    pub custom_family: Option<&'static str>,
     pub settings_tab: screens::settings::Tab,
     /// Whether a launch minimised the window, so the game's exit can bring it back.
     pub minimized_for_game: bool,
@@ -404,15 +409,22 @@ pub struct App {
 
     // Skin and cape management.
     capes: Vec<nexo_core::cosmetics::Cape>,
-    cape_previews: std::collections::HashMap<String, image::Handle>,
-    /// The cape reveal in progress, if any. The 3D model derives its turn
-    /// from this, so the animation can't be knocked out of step.
-    cape_reveal: Option<skin3d::Reveal>,
+    /// Each owned cape's texture, for drawing it on the player.
+    cape_textures: std::collections::HashMap<String, Arc<skin::Rgba>>,
 
     // Saved skins.
     saved_skins: Vec<nexo_core::skin_library::SavedSkin>,
-    /// Face previews for the library, keyed by saved-skin id.
-    skin_previews: std::collections::HashMap<String, image::Handle>,
+    /// The library's textures, keyed by saved-skin id, with the arm width the
+    /// texture itself shows.
+    saved_textures: std::collections::HashMap<String, (Arc<skin::Rgba>, nexo_core::SkinModel)>,
+    /// What the skin search box holds.
+    skin_query: String,
+    /// The saved skin being renamed, and the name typed so far.
+    renaming_skin: Option<(String, String)>,
+    /// "Continue without an account" was pressed on the welcome screen.
+    welcome_dismissed: bool,
+    /// The account list has been read once, so an empty one means none.
+    accounts_loaded: bool,
     /// Which tile the cursor is over, so its delete button can appear.
     hovered_skin: Option<String>,
     /// Awaiting a yes/no on deleting this one.
@@ -616,11 +628,10 @@ pub enum Message {
     // Skins and capes
     LoadCapes,
     CapesLoaded(Result<Vec<nexo_core::cosmetics::Cape>, String>),
-    CapePreviewLoaded {
+    CapeTextureLoaded {
         cape: String,
-        handle: image::Handle,
+        texture: Arc<skin::Rgba>,
     },
-    SetSkinModel(nexo_core::SkinModel),
     UploadSkin,
     ResetSkin,
     WearCape(String),
@@ -630,11 +641,21 @@ pub enum Message {
     // Saved skins
     LoadSavedSkins,
     SavedSkinsLoaded(Vec<nexo_core::skin_library::SavedSkin>),
-    SkinPreviewLoaded {
+    SkinTextureLoaded {
         skin: String,
-        handle: image::Handle,
+        texture: Arc<skin::Rgba>,
+        model: nexo_core::SkinModel,
     },
+    SkinQuery(String),
+    /// Starts renaming a saved skin.
+    RenameSkin(String),
+    RenameDraft(String),
+    /// Keeps the typed name.
+    RenameDone,
+    ContinueWithoutAccount,
     HoverSkin(Option<String>),
+    /// The cursor left this skin's tile.
+    UnhoverSkin(String),
     WearSavedSkin(String),
     AskDeleteSkin(String),
     CancelDeleteSkin,
@@ -728,6 +749,8 @@ impl App {
             particles: appearance.particles,
             reduce_motion: appearance.reduce_motion,
             settings: appearance.settings,
+            font: appearance.font,
+            custom_family: appearance.custom_family,
             settings_tab: Default::default(),
             minimized_for_game: false,
             stopped_by_user: Default::default(),
@@ -758,10 +781,13 @@ impl App {
             content_searching: false,
             icons: std::collections::HashMap::new(),
             capes: Vec::new(),
-            cape_previews: std::collections::HashMap::new(),
-            cape_reveal: None,
+            cape_textures: std::collections::HashMap::new(),
             saved_skins: Vec::new(),
-            skin_previews: std::collections::HashMap::new(),
+            saved_textures: std::collections::HashMap::new(),
+            skin_query: String::new(),
+            renaming_skin: None,
+            welcome_dismissed: false,
+            accounts_loaded: false,
             hovered_skin: None,
             confirm_delete: None,
         };
@@ -864,6 +890,7 @@ impl App {
                 self.instances = instances;
                 self.accounts = accounts;
                 self.active_account = active;
+                self.accounts_loaded = true;
 
                 let mut tasks = Vec::new();
 
@@ -2504,7 +2531,7 @@ impl App {
             Message::SavedSkinsLoaded(skins) => {
                 let mut fetches = Vec::new();
                 for saved in &skins {
-                    if self.skin_previews.contains_key(&saved.id) {
+                    if self.saved_textures.contains_key(&saved.id) {
                         continue;
                     }
                     let Some(core) = self.core.clone() else {
@@ -2519,16 +2546,11 @@ impl App {
                             // The stored model can be wrong; the texture
                             // can't be, and slim arms drawn as classic come
                             // out full of holes.
-                            decoded.use_detected_model();
-                            // A whole figure rather than a head: one static
-                            // render per skin, all from the same angle.
-                            Some((id, decoded.body(LIBRARY_SCALE)))
+                            let model = decoded.use_detected_model();
+                            Some((id, Arc::new(decoded.texture().clone()), model))
                         },
                         |loaded| match loaded {
-                            Some((skin, face)) => Message::SkinPreviewLoaded {
-                                skin,
-                                handle: to_handle(face),
-                            },
+                            Some((skin, texture, model)) => Message::SkinTextureLoaded { skin, texture, model },
                             None => Message::Noop,
                         },
                     ));
@@ -2538,8 +2560,59 @@ impl App {
                 Task::batch(fetches)
             }
 
-            Message::SkinPreviewLoaded { skin, handle } => {
-                self.skin_previews.insert(skin, handle);
+            Message::SkinTextureLoaded { skin, texture, model } => {
+                self.saved_textures.insert(skin, (texture, model));
+                Task::none()
+            }
+
+            Message::SkinQuery(query) => {
+                self.skin_query = query;
+                // A rename the search hides would have no way to finish.
+                self.renaming_skin = None;
+                Task::none()
+            }
+
+            Message::RenameSkin(id) => {
+                let current = self.saved_skins.iter().find(|s| s.id == id).and_then(|s| s.name.clone()).unwrap_or_default();
+                self.renaming_skin = Some((id, current));
+                Task::none()
+            }
+
+            Message::RenameDraft(draft) => {
+                if let Some((_, name)) = &mut self.renaming_skin {
+                    *name = draft.chars().take(nexo_core::skin_library::NAME_LIMIT).collect();
+                }
+                Task::none()
+            }
+
+            Message::RenameDone => {
+                let Some(core) = self.core.clone() else { return Task::none() };
+                let Some((id, name)) = self.renaming_skin.take() else { return Task::none() };
+                // Shown at once; the list read back afterwards says the same.
+                if let Some(saved) = self.saved_skins.iter_mut().find(|s| s.id == id) {
+                    saved.name = nexo_core::skin_library::clean_name(&name);
+                }
+                Task::perform(
+                    async move {
+                        if let Err(err) = core.skins.rename(&id, &name).await {
+                            tracing::warn!(%err, "could not rename the skin");
+                        }
+                    },
+                    |()| Message::LoadSavedSkins,
+                )
+            }
+
+            Message::ContinueWithoutAccount => {
+                self.welcome_dismissed = true;
+                Task::none()
+            }
+
+            Message::UnhoverSkin(id) => {
+                // Only if nothing else has been entered since: leaving one tile
+                // and entering the next can arrive in either order.
+                if self.hovered_skin.as_deref() == Some(id.as_str()) {
+                    self.hovered_skin = None;
+                }
                 Task::none()
             }
 
@@ -2560,7 +2633,7 @@ impl App {
 
             Message::ConfirmDeleteSkin(id) => {
                 self.confirm_delete = None;
-                self.skin_previews.remove(&id);
+                self.saved_textures.remove(&id);
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
@@ -2578,11 +2651,13 @@ impl App {
                 else {
                     return Task::none();
                 };
+                // The model read off the texture, which is what its tile says;
+                // the stored one came from the profile and can be wrong.
                 let model = self
-                    .saved_skins
-                    .iter()
-                    .find(|s| s.id == id)
-                    .map(|s| s.model)
+                    .saved_textures
+                    .get(&id)
+                    .map(|(_, model)| *model)
+                    .or_else(|| self.saved_skins.iter().find(|s| s.id == id).map(|s| s.model))
                     .unwrap_or_default();
                 self.status = Status::Busy("Changing skin".into());
 
@@ -2641,7 +2716,7 @@ impl App {
                 // each so a slow texture doesn't hold up the others.
                 let mut fetches = Vec::new();
                 for cape in &capes {
-                    if self.cape_previews.contains_key(&cape.id) {
+                    if self.cape_textures.contains_key(&cape.id) {
                         continue;
                     }
                     let Some(core) = self.core.clone() else {
@@ -2657,20 +2732,7 @@ impl App {
                                 .map(|texture| (id, texture))
                         },
                         |loaded| match loaded {
-                            Some((cape, texture)) => Message::CapePreviewLoaded {
-                                cape,
-                                handle: {
-                                    // Crop to the panel that actually hangs
-                                    // off the back; the rest of a cape
-                                    // texture is empty space.
-                                    let panel = nexo_core::skin::cape_panel(&texture, 4);
-                                    image::Handle::from_rgba(
-                                        panel.width,
-                                        panel.height,
-                                        panel.pixels,
-                                    )
-                                },
-                            },
+                            Some((cape, texture)) => Message::CapeTextureLoaded { cape, texture: Arc::new(texture) },
                             None => Message::Noop,
                         },
                     ));
@@ -2685,15 +2747,8 @@ impl App {
                 Task::none()
             }
 
-            Message::CapePreviewLoaded { cape, handle } => {
-                self.cape_previews.insert(cape, handle);
-                Task::none()
-            }
-
-            Message::SetSkinModel(model) => {
-                // Recorded locally; it is applied to the account with the next
-                // upload, since the model is a property of the uploaded skin.
-                self.skin_model = model;
+            Message::CapeTextureLoaded { cape, texture } => {
+                self.cape_textures.insert(cape, texture);
                 Task::none()
             }
 
@@ -2704,7 +2759,6 @@ impl App {
                 let Some(account) = self.active_account().cloned() else {
                     return Task::none();
                 };
-                let model = self.skin_model;
                 self.status = Status::Busy("Uploading skin".into());
 
                 Task::perform(
@@ -2718,6 +2772,13 @@ impl App {
                             // Cancelled, which is not a failure.
                             return Ok(());
                         };
+                        // The arm width is read off the texture, the way the
+                        // library and the 3D model already do, rather than asked.
+                        let model = tokio::fs::read(handle.path())
+                            .await
+                            .ok()
+                            .and_then(|bytes| skin::Skin::decode(&bytes, nexo_core::SkinModel::Classic).ok())
+                            .map_or(nexo_core::SkinModel::Classic, |decoded| decoded.detect_model());
 
                         core.cosmetics
                             .upload_skin(&account, handle.path(), model)
@@ -2754,14 +2815,6 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Changing cape".into());
-                // Stamped on press, not on completion, so the model starts
-                // turning while the request is still in flight. Extends a
-                // reveal already on screen rather than restarting it, or
-                // switching capes would snap the model to the front first.
-                self.cape_reveal = Some(skin3d::Reveal::trigger(
-                    self.cape_reveal,
-                    std::time::Instant::now(),
-                ));
 
                 Task::perform(
                     async move {
@@ -2781,10 +2834,6 @@ impl App {
                     return Task::none();
                 };
                 self.status = Status::Busy("Removing cape".into());
-                self.cape_reveal = Some(skin3d::Reveal::trigger(
-                    self.cape_reveal,
-                    std::time::Instant::now(),
-                ));
 
                 Task::perform(
                     async move {
@@ -3026,6 +3075,11 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // The first start, and anyone who signed out of every account. Not
+        // before the list is read, or it would flash up for everyone.
+        if self.accounts_loaded && self.accounts.is_empty() && !self.welcome_dismissed {
+            return screens::welcome::view(self);
+        }
         let body = match &self.screen {
             Screen::Home => screens::home::view(self),
             Screen::Instances => screens::instances::view(self),
@@ -3383,6 +3437,53 @@ fn dev_screen() -> Task<Message> {
             let signed_in = later(Message::Loaded { instances: Vec::new(), accounts: vec![account], active });
             if run { signed_in.chain(later(Message::QuickSetup)) } else { signed_in }
         }
+        // The Skins page as a signed-in player: wearing the first skin of the
+        // library on disk, with two capes made from the cached cape texture.
+        Some("skins") | Some("home") => {
+            let home = spec.starts_with("home");
+            let account = Account {
+                uuid: "00000000000000000000000000000000".to_string(),
+                username: "Friend".to_string(),
+                access_token: String::new(),
+                refresh_token: String::new(),
+                expires_at: 0,
+                skin_url: None,
+                skin_model: Default::default(),
+                cape_url: None,
+            };
+            let active = Some(account.uuid.clone());
+            let root = nexo_core::Paths::discover().map(|paths| paths.root().to_path_buf()).unwrap_or_default();
+            let first_png = |dir: std::path::PathBuf, suffix: &str| {
+                let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+                files.sort();
+                files.into_iter().find(|p| p.to_string_lossy().ends_with(suffix)).and_then(|p| std::fs::read(p).ok())
+            };
+            let skin = first_png(root.join("skins"), ".png").and_then(|bytes| skin::Skin::decode(&bytes, Default::default()).ok());
+            let cape = first_png(root.join("skin-cache"), ".cape.png").and_then(|bytes| skin::decode_texture(&bytes).ok()).map(Arc::new);
+            use nexo_core::cosmetics::Cape;
+            let capes = vec![Cape::new("a", "Migrator", "http://127.0.0.1:9/a", true), Cape::new("b", "Pan", "http://127.0.0.1:9/b", false)];
+            let mut tasks = vec![later(Message::Loaded { instances: Vec::new(), accounts: vec![account], active })];
+            if let Some(mut skin) = skin {
+                let model = skin.use_detected_model();
+                tasks.push(later(Message::SkinLoaded {
+                    uuid: None,
+                    face: to_handle(skin.face(FACE_SCALE)),
+                    skin: Arc::new(skin.texture().clone()),
+                    cape: cape.clone(),
+                    model,
+                }));
+            }
+            if !home {
+                tasks.push(Task::done(Message::CapesLoaded(Ok(capes))));
+                if let Some(cape) = cape {
+                    for id in ["a", "b"] {
+                        tasks.push(Task::done(Message::CapeTextureLoaded { cape: id.to_string(), texture: cape.clone() }));
+                    }
+                }
+                tasks.push(later(Message::Navigate(Screen::Skins)));
+            }
+            tasks.into_iter().reduce(Task::chain).unwrap_or_else(Task::none)
+        }
         Some("settings") => {
             use screens::settings::{Msg, Tab};
             let tab = if parts.next() == Some("games") { Tab::Games } else { Tab::Appearance };
@@ -3616,7 +3717,7 @@ fn fetch_skin(core: Nexo, account: Option<Account>, keep_shown: bool) -> Task<Me
             // Keep a copy of whatever is being worn. Mojang only stores the
             // current one, so without this a skin is gone the moment it is
             // replaced.
-            if let Err(err) = core.skins.save(&raw, model).await {
+            if let Err(err) = core.skins.save(&raw, model, &account.username).await {
                 tracing::warn!(%err, "could not add this skin to the library");
             }
 
@@ -3657,8 +3758,8 @@ fn to_handle(rgba: skin::Rgba) -> image::Handle {
 fn empty_state<'a>(title: &'a str, hint: &'a str) -> Element<'a, Message> {
     iced::widget::container(
         iced::widget::column![
-            iced::widget::text(title).size(18).color(theme::text()),
-            iced::widget::text(hint).size(14).color(theme::muted()),
+            crate::lively::text(title).size(18).color(theme::text()),
+            crate::lively::text(hint).size(14).color(theme::muted()),
         ]
         .spacing(8),
     )
@@ -3688,6 +3789,120 @@ mod motion_frames {
         snapshot.matches_image(dir().join(format!("{name}.png"))).unwrap();
     }
 
+    /// The welcome, Home and Skins screens, drawn from the skins and cached
+    /// cape in `NEXO_SHOT_DATA` (a Nexo data folder) as a pretend account.
+    /// `NEXO_FRAME_DIR=<dir> NEXO_SHOT_DATA=~/.local/share/nexo cargo test -p nexo-app screens_offscreen -- --ignored`
+    #[test]
+    #[ignore = "writes images; run by hand"]
+    fn screens_offscreen() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let data = std::path::PathBuf::from(std::env::var("NEXO_SHOT_DATA").expect("set NEXO_SHOT_DATA"));
+        let (fonts, font) = screens::settings::startup_fonts();
+        theme::set_font(font);
+        let shoot = |app: &App, name: &str, frames: usize| {
+            let settings = iced::Settings { fonts: fonts.clone(), default_font: font, ..Default::default() };
+            // `NEXO_SHOT_SIZE=1600x864` for the website's pictures.
+            let size = std::env::var("NEXO_SHOT_SIZE").ok().and_then(|size| {
+                let (w, h) = size.split_once('x')?;
+                Some(iced::Size::new(w.parse().ok()?, h.parse().ok()?))
+            });
+            // Tall for Skins, so the capes under the skins are in the picture.
+            let size = size.unwrap_or(iced::Size::new(1280.0, if name == "skins" { 1500.0 } else { 800.0 }));
+            let mut ui = Simulator::with_size(settings, size, app.view());
+            if name == "capes" {
+                // Down to the capes, under the skins.
+                let at = iced::Point::new(size.width / 2.0, size.height / 2.0);
+                ui.point_at(at);
+                for _ in 0..3 {
+                    let _ = ui.snapshot(&theme::current());
+                    ui.simulate([iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y: -2000.0 } })]);
+                }
+            }
+            for frame in 0..frames {
+                // Halfway, the cursor goes to the top left, for the head to follow.
+                if frame == frames / 2 && frames > 1 {
+                    let at = iced::Point::new(200.0, 120.0);
+                    ui.point_at(at);
+                    ui.simulate([iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at })]);
+                }
+                let snapshot = ui.snapshot(&theme::current()).unwrap();
+                if frame + 1 == frames || frame % 15 == 0 {
+                    snapshot.matches_image(dir().join(format!("{name}-{frame:02}.png"))).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(33));
+            }
+        };
+
+        let (mut app, _) = App::boot();
+        app.accounts_loaded = true;
+        app.focused = true;
+        // There's no core in a test, so boot's "Starting up" would stay up.
+        app.status = Status::Idle;
+        shoot(&app, "welcome", 1);
+
+        app.accounts = vec![Account {
+            uuid: "00000000000000000000000000000000".into(),
+            username: "Friend".into(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            skin_url: None,
+            skin_model: Default::default(),
+            cape_url: None,
+        }];
+        app.active_account = Some(app.accounts[0].uuid.clone());
+        let mut pngs: Vec<_> = std::fs::read_dir(data.join("skins")).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "png")).collect();
+        pngs.sort();
+        // Skins to leave out of the pictures, by id.
+        let skip = std::env::var("NEXO_SHOT_SKIP").unwrap_or_default();
+        pngs.retain(|p| !skip.split(',').any(|id| !id.is_empty() && p.to_string_lossy().contains(id)));
+        for (index, png) in pngs.iter().take(7).enumerate() {
+            let mut decoded = skin::Skin::decode(&std::fs::read(png).unwrap(), Default::default()).unwrap();
+            let model = decoded.use_detected_model();
+            let id = png.file_stem().unwrap().to_string_lossy().to_string();
+            let texture = Arc::new(decoded.texture().clone());
+            if index == 0 {
+                app.skin_texture = Some(Arc::clone(&texture));
+                app.skin_model = model;
+            }
+            app.saved_textures.insert(id.clone(), (texture, model));
+            app.saved_skins.push(nexo_core::skin_library::SavedSkin { id, model, added_at: 0, name: Some(["Friend", "Builder", "Night", "Summer"][index % 4].into()) });
+        }
+        let cape = std::fs::read_dir(data.join("skin-cache")).unwrap().flatten().map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".cape.png"))
+            .map(|p| Arc::new(skin::decode_texture(&std::fs::read(p).unwrap()).unwrap()));
+        app.cape_texture = cape.clone();
+        use nexo_core::cosmetics::Cape;
+        app.capes = vec![Cape::new("a", "Migrator", "", true), Cape::new("b", "Pan", "", false)];
+        if let Some(cape) = cape {
+            app.cape_textures.insert("a".into(), cape.clone());
+            app.cape_textures.insert("b".into(), cape);
+        }
+        app.instances = Vec::new();
+        shoot(&app, "home", 46);
+        // Home in other themes, each with the background it comes with, for
+        // the website's picture of them side by side.
+        if std::env::var("NEXO_SHOT_THEMES").is_ok() {
+            for (index, palette) in theme::PALETTES.iter().enumerate().skip(1) {
+                screens::settings::pick(&mut app, index);
+                shoot(&app, &format!("theme-{}", palette.name.to_lowercase().replace(' ', "-")), 40);
+            }
+            screens::settings::pick(&mut app, 0);
+        }
+        app.screen = Screen::Skins;
+        app.hovered_skin = app.saved_skins.get(1).map(|s| s.id.clone());
+        shoot(&app, "skins", 1);
+        app.hovered_skin = None;
+        shoot(&app, "capes", 1);
+        // Page changes run on the app's own clock, which the simulator never
+        // ticks; with reduced motion they finish at once.
+        crate::motion::set_reduced(true);
+        let _ = app.update(Message::Navigate(Screen::Settings));
+        shoot(&app, "settings", 1);
+        crate::motion::set_reduced(false);
+    }
+
     /// Frames of the dropdown opening and a button lighting up, on a real clock.
     #[test]
     #[ignore = "writes images; run by hand"]
@@ -3699,8 +3914,8 @@ mod motion_frames {
         let bar = iced::widget::column![
             iced::widget::row![
                 crate::dropdown::dropdown(versions.as_slice(), Some(&chosen), |_: String| Message::DismissStatus).width(220),
-                crate::lively::button(iced::widget::text("Ghost")).padding([8, 14]).style(theme::ghost_button).on_press(Message::DismissStatus),
-                crate::lively::button(iced::widget::text("PLAY")).padding([8, 24]).style(theme::hero_button).on_press(Message::DismissStatus),
+                crate::lively::button(crate::lively::text("Ghost")).padding([8, 14]).style(theme::ghost_button).on_press(Message::DismissStatus),
+                crate::lively::button(crate::lively::text("PLAY")).padding([8, 24]).style(theme::hero_button).on_press(Message::DismissStatus),
                 crate::lively::toggler(true).on_toggle(|_| Message::DismissStatus),
                 crate::lively::toggler(false).on_toggle(|_| Message::DismissStatus),
             ]

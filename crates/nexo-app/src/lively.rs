@@ -487,9 +487,15 @@ impl<'a, M: Clone + 'a> From<Button<'a, M>> for Element<'a, M> {
     }
 }
 
+/// `iced::widget::text` in the chosen font. iced fixes its default font when the
+/// window opens, so a font picked later reaches text only by being named on it.
+pub fn text<'a>(fragment: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a, Theme, Renderer> {
+    iced::widget::text(fragment).font(crate::theme::regular())
+}
+
 /// `iced::widget::text_input`, easing into focus and hover.
 pub fn text_input<'a, M: Clone + 'a>(placeholder: &str, value: &str) -> Input<'a, M> {
-    Input { inner: ti::TextInput::new(placeholder, value), style: Box::new(crate::theme::input), enabled: false }
+    Input { inner: ti::TextInput::new(placeholder, value).font(crate::theme::regular()), style: Box::new(crate::theme::input), enabled: false }
 }
 
 pub struct Input<'a, M> {
@@ -558,7 +564,7 @@ impl<'a, M: Clone + 'a> From<Input<'a, M>> for Element<'a, M> {
 
 /// `iced::widget::checkbox`, its tick fading in instead of appearing.
 pub fn checkbox<'a, M: 'a>(checked: bool) -> Check<'a, M> {
-    Check { inner: c::Checkbox::new(checked), checked, enabled: false, style: Box::new(crate::theme::check) }
+    Check { inner: c::Checkbox::new(checked).font(crate::theme::regular()), checked, enabled: false, style: Box::new(crate::theme::check) }
 }
 
 pub struct Check<'a, M> {

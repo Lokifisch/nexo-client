@@ -32,6 +32,11 @@ pub struct Cape {
 }
 
 impl Cape {
+    /// A cape as the profile would list it, for showing screens without an account.
+    pub fn new(id: &str, alias: &str, url: &str, active: bool) -> Self {
+        Self { id: id.into(), alias: alias.into(), url: url.into(), state: if active { "ACTIVE" } else { "INACTIVE" }.into() }
+    }
+
     pub fn is_active(&self) -> bool {
         self.state.eq_ignore_ascii_case("ACTIVE")
     }

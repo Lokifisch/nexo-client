@@ -1,7 +1,8 @@
 use crate::theme;
 use crate::{App, Message, Screen};
 use crate::lively::button;
-use iced::widget::{column, container, text, Space};
+use iced::widget::{column, container, Space};
+use crate::lively::text;
 use iced::{Element, Fill};
 
 /// The whole setup as one button, for someone who has nothing yet. Anything they
@@ -23,7 +24,7 @@ fn setup_prompt(app: &App) -> Element<'_, Message> {
 
     let ready = app.nexo_release.is_some() && !app.is_busy();
     let mut prompt = column![
-        button(text("Install Nexo & Play").size(16).font(theme::BOLD))
+        button(text("Install Nexo & Play").size(16).font(theme::bold()))
             .padding([12, 28])
             .style(theme::hero_button)
             .on_press_maybe(ready.then_some(Message::QuickSetup)),
@@ -63,18 +64,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     };
 
     let character: Element<'_, Message> = match &app.skin_texture {
-        Some(texture) => iced::widget::shader(crate::skin3d::SkinViewer::new(
-            std::sync::Arc::clone(texture),
-            app.cape_texture.clone(),
-            app.skin_model,
-            app.skin_key,
+        Some(texture) => iced::widget::shader(
+            crate::skin3d::SkinViewer::new(
+                std::sync::Arc::clone(texture),
+                app.cape_texture.clone(),
+                app.skin_model,
+                app.skin_key,
+                0,
+                crate::skin3d::Stance::Idle,
+            )
             // Only the signed-out placeholder wears the border.
-            account.is_none(),
-            app.focused,
-            // Home never turns the model round; that belongs to the cape
-            // screen, where the back is the thing being changed.
-            None,
-        ))
+            .outlined(account.is_none())
+            .live(app.focused),
+        )
         .width(280)
         .height(380)
         .into(),
@@ -118,7 +120,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let (label, launch) = crate::screens::last_instance_launch(app);
         content = content.push(Space::new().height(16));
         content = content.push(
-            button(text(label).size(15).font(theme::BOLD))
+            button(text(label).size(15).font(theme::bold()))
                 .padding([10, 22])
                 .style(theme::hero_button)
                 .on_press_maybe(launch),
