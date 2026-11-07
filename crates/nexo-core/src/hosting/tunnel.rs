@@ -16,8 +16,10 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
-/// Nexo's own QUIClime relay. Players reach `<words>.relay.nexomc.dev` without
-/// typing a port: a wildcard `_minecraft._tcp` SRV record points them at 25570.
+/// Nexo's own QUIClime relay: hosts connect over QUIC on UDP 25570, players
+/// join `<words>.relay.nexomc.dev` on the default TCP 25565. Not through an SRV
+/// record: a joining client puts the SRV *target* in its handshake, so the
+/// relay could no longer tell which tunnel was meant.
 const RELAY_HOST: &str = "relay.nexomc.dev";
 const RELAY_PORT: u16 = 25570;
 const ALPN: &[u8] = b"quiclime";
