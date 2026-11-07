@@ -91,7 +91,7 @@ async fn exchange(host: &str, port: u16) -> Result<Response> {
 
     let mut handshake = Vec::new();
     // A real protocol number, not the -1 ("unspecified") the protocol allows:
-    // e4mc's relay resets any handshake declaring -1, so a server shared
+    // QUIClime (e4mc's relay, and Nexo's) resets any handshake declaring -1, so a server shared
     // through it read as offline. Servers describe themselves whatever the
     // number — a mismatch only changes the version they report, and that
     // field comes from the server, not from this.

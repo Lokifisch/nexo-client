@@ -40,7 +40,7 @@ const fn e(slug: &'static str, name: &'static str, tag: &'static str, why: &'sta
 
 /// Picked by hand and checked on Modrinth (2026-10-28) for a `paper` build.
 /// Left out on purpose: Geyser and Simple Voice Chat — both need UDP, and
-/// e4mc's relay carries TCP only, so neither works for friends joining
+/// The relay carries TCP only, so neither works for friends joining
 /// through the public address.
 pub const PAPER_ESSENTIALS: [Essential; 8] = [
     e("viaversion", "ViaVersion", "Compatibility", "Lets players on newer Minecraft versions join.", true),

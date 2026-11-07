@@ -1,5 +1,5 @@
-//! Public address for a hosted server through e4mc's relay — the same relay
-//! and the same "quiclime" protocol Nexo Mod's `lantunnel/LanTunnelSession`
+//! Public address for a hosted server through Nexo's QUIClime relay (relay.nexomc.dev), the
+//! same "quiclime" protocol Nexo Mod's `lantunnel/LanTunnelSession`
 //! speaks (adapted there from e4mc, MIT; see `Mod/THIRD-PARTY-NOTICES.md`).
 //! This side is written fresh against that protocol, not ported line by line.
 //!
@@ -11,22 +11,18 @@
 //! RCON is never reachable through here.
 
 use crate::error::{Error, Result};
-use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
-const BROKER: &str = "https://broker.e4mc.link/getBestRelay";
+/// Nexo's own QUIClime relay. Players reach `<words>.relay.nexomc.dev` without
+/// typing a port: a wildcard `_minecraft._tcp` SRV record points them at 25570.
+const RELAY_HOST: &str = "relay.nexomc.dev";
+const RELAY_PORT: u16 = 25570;
 const ALPN: &[u8] = b"quiclime";
 const ASSIGN_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONTROL_FRAME: usize = 64 * 1024;
-
-#[derive(Deserialize)]
-struct Relay {
-    host: String,
-    port: u16,
-}
 
 /// A live tunnel. Dropping it doesn't close it; call [`Tunnel::close`].
 pub struct Tunnel {
@@ -46,23 +42,14 @@ impl Tunnel {
     }
 }
 
-/// Connects to the best relay, gets a public domain assigned, and starts
+/// Connects to Nexo's relay, gets a public domain assigned, and starts
 /// forwarding joining players to `127.0.0.1:game_port`.
-pub async fn open(http: &reqwest::Client, game_port: u16) -> Result<Tunnel> {
-    let relay: Relay = http
-        .get(BROKER)
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-
-    let addr = tokio::net::lookup_host((relay.host.as_str(), relay.port))
+pub async fn open(game_port: u16) -> Result<Tunnel> {
+    let addr = tokio::net::lookup_host((RELAY_HOST, RELAY_PORT))
         .await
-        .map_err(|e| Error::invalid(format!("could not resolve the relay {}: {e}", relay.host)))?
+        .map_err(|e| Error::invalid(format!("could not resolve the relay {RELAY_HOST}: {e}")))?
         .next()
-        .ok_or_else(|| Error::invalid(format!("the relay {} has no address", relay.host)))?;
+        .ok_or_else(|| Error::invalid(format!("the relay {RELAY_HOST} has no address")))?;
 
     let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
     let mut endpoint = quinn::Endpoint::client(bind.parse().expect("literal address"))
@@ -70,7 +57,7 @@ pub async fn open(http: &reqwest::Client, game_port: u16) -> Result<Tunnel> {
     endpoint.set_default_client_config(client_config()?);
 
     let connection = endpoint
-        .connect(addr, &relay.host)
+        .connect(addr, RELAY_HOST)
         .map_err(|e| Error::invalid(format!("relay connection failed: {e}")))?
         .await
         .map_err(|e| Error::invalid(format!("relay connection failed: {e}")))?;
@@ -99,7 +86,7 @@ pub async fn open(http: &reqwest::Client, game_port: u16) -> Result<Tunnel> {
     })
     .await
     .map_err(|_| Error::invalid("the relay never assigned an address"))??;
-    tracing::info!(%domain, relay = %relay.host, "tunnel open");
+    tracing::info!(%domain, relay = RELAY_HOST, "tunnel open");
 
     let (closed_tx, closed) = watch::channel(None);
     let conn = connection.clone();

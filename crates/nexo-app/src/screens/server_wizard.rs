@@ -514,7 +514,7 @@ fn performance_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
         row![
             column![
                 text("Public address").size(14).font(theme::bold()).color(theme::text()),
-                text("Friends join from anywhere through e4mc's relay — no port forwarding, no account. Open while Nexo runs. The whitelist starts on: add friends under Players.")
+                text("Friends join from anywhere through Nexo's relay — no port forwarding, no account. Open while Nexo runs. The whitelist starts on: add friends under Players.")
                     .size(12)
                     .color(theme::muted()),
             ]
@@ -681,7 +681,7 @@ fn review_step<'a>(app: &'a App, w: &'a Wizard) -> Element<'a, Message> {
             line("Memory", format!("{} MB", w.memory_mb)),
             line("World", world),
             line("Add-ons", addons),
-            line("Public address", if w.tunnel { "On — e4mc relay, whitelist on".into() } else { "Off — this PC only".into() }),
+            line("Public address", if w.tunnel { "On — Nexo relay, whitelist on".into() } else { "Off — this PC only".into() }),
             line("Saved under", location),
         ]
         .spacing(12),

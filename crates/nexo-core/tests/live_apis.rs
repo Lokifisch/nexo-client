@@ -514,20 +514,20 @@ async fn an_explicit_port_bypasses_srv() {
     );
 }
 
-/// e4mc's broker and relay answer the quiclime handshake with a public domain.
+/// Nexo's relay answers the quiclime handshake with a three-word public domain.
 #[tokio::test]
 #[ignore]
-async fn e4mc_relay_assigns_a_domain() {
-    let http = reqwest::Client::new();
-    let tunnel = nexo_core::hosting::tunnel::open(&http, 25565)
+async fn nexo_relay_assigns_a_domain() {
+    let tunnel = nexo_core::hosting::tunnel::open(25565)
         .await
         .expect("tunnel should open");
-    assert!(tunnel.domain.contains('.'), "domain: {}", tunnel.domain);
+    let label = tunnel.domain.strip_suffix(".relay.nexomc.dev").expect("a relay.nexomc.dev name");
+    assert_eq!(label.split('-').count(), 3, "domain: {}", tunnel.domain);
     println!("assigned {}", tunnel.domain);
     tunnel.close();
 }
 
-/// The whole hosting path against the real Paper/Modrinth/e4mc services and a
+/// The whole hosting path against the real Paper/Modrinth services and Nexo's relay and a
 /// real JVM: make a server with a plugin, start it, run a command, open the
 /// public address, stop it, delete it. Several minutes; needs Java 25+.
 #[tokio::test]

@@ -1,5 +1,5 @@
 //! Servers made from scratch — Paper, vanilla or Fabric — run on this
-//! machine, optionally made public through e4mc's relay ([`tunnel`]).
+//! machine, optionally made public through Nexo's relay ([`tunnel`]).
 //!
 //! Lives beside `paper_server` rather than inside it: that module's on-disk
 //! record is a contract with Nexo Mod, and every record there is a converted
@@ -89,7 +89,7 @@ pub struct HostedServer {
     pub memory_mb: u32,
     pub port: u16,
     pub rcon: Rcon,
-    /// Open a public e4mc address whenever the server starts.
+    /// Open a public relay address whenever the server starts.
     pub tunnel: bool,
     #[serde(default)]
     pub pid: Option<u32>,
@@ -720,7 +720,7 @@ impl Hosting {
         }
         let generation = self.generation(id);
         let server = self.read(id).await?;
-        let tunnel = tunnel::open(&self.http, server.port).await?;
+        let tunnel = tunnel::open(server.port).await?;
 
         // Opening takes seconds. Only keep the result if nothing closed the
         // tunnel meanwhile, the server still wants one and still runs, and

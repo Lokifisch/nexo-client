@@ -737,7 +737,7 @@ fn files<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> {
         row![
             column![
                 text("Public address").size(15).font(theme::bold()).color(theme::text()),
-                text("Through e4mc's relay, so friends join without port forwarding. The address changes each time it opens, and closes when Nexo does.")
+                text("Through Nexo's relay, so friends join without port forwarding. The address changes each time it opens, and closes when Nexo does.")
                     .size(12)
                     .color(theme::muted()),
             ]
