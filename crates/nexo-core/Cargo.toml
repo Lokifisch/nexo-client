@@ -10,6 +10,7 @@ description = "Instance management, auth, and content APIs for the Nexo client"
 [dependencies]
 tokio.workspace = true
 reqwest.workspace = true
+base64 = "0.22"
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -48,6 +49,7 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 
 [dev-dependencies]
 reqwest.workspace = true
+base64 = "0.22"
 # Only to hand-build a response for the rate-limit tests. reqwest already
 # depends on it, so this pins no new tree.
 http = "1"

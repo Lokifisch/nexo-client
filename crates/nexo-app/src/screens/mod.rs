@@ -1,5 +1,7 @@
 pub mod accounts;
+pub mod capes;
 pub mod home;
+pub mod history;
 pub mod hosting;
 pub mod instance;
 pub mod instances;
@@ -38,6 +40,10 @@ static ACCOUNTS: LazyLock<svg::Handle> =
     LazyLock::new(|| icon("M12 12a4 4 0 100-8 4 4 0 000 8zM4 21a8 8 0 0116 0"));
 static SKINS: LazyLock<svg::Handle> =
     LazyLock::new(|| icon("M8 3l-5 3 2 4 3-1v12h8V9l3 1 2-4-5-3c-1 2-3 2-4 2s-3 0-4-2z"));
+static CAPES: LazyLock<svg::Handle> =
+    LazyLock::new(|| icon("M7 3h10l1 3-2 15-4-2-4 2-2-15zM7 3c1 2 3 3 5 3s4-1 5-3"));
+static HISTORY: LazyLock<svg::Handle> =
+    LazyLock::new(|| icon("M12 8v5l3 2M3 12a9 9 0 109-9 9 9 0 00-6.4 2.6L3 8M3 3v5h5"));
 static SERVERS: LazyLock<svg::Handle> =
     LazyLock::new(|| icon("M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01"));
 static SETTINGS: LazyLock<svg::Handle> = LazyLock::new(|| {
@@ -78,8 +84,10 @@ pub fn rail_y(section: &Screen) -> f32 {
         Screen::Instances => 1.0,
         Screen::Accounts => 2.0,
         Screen::Skins => 3.0,
-        Screen::Settings => 5.0,
-        _ => 4.0,
+        Screen::Capes => 4.0,
+        Screen::History => 5.0,
+        Screen::Settings => 7.0,
+        _ => 6.0,
     };
     FIRST + index * STEP
 }
@@ -153,7 +161,9 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
         nav_entry("Home", &HOME, Screen::Home),
         nav_entry("Instances", &INSTANCES, Screen::Instances),
         nav_entry("Accounts", &ACCOUNTS, Screen::Accounts),
-        nav_entry("Skin & capes", &SKINS, Screen::Skins),
+        nav_entry("Skins", &SKINS, Screen::Skins),
+        nav_entry("Capes", &CAPES, Screen::Capes),
+        nav_entry("History", &HISTORY, Screen::History),
         nav_entry("Servers", &SERVERS, Screen::Servers),
         nav_entry("Settings", &SETTINGS, Screen::Settings),
         Space::new().height(Fill),

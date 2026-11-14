@@ -214,6 +214,11 @@ pub struct Pose {
     /// first frame rather than at construction, so both start when the
     /// widget appears.
     started: Option<Instant>,
+    /// A cape shown from behind: its physics, whether the cursor is over it
+    /// (which blows a breeze at it), and its last step.
+    cape: Option<crate::cape_sim::CapeSim>,
+    hovered: bool,
+    cape_tick: Option<Instant>,
 }
 
 impl Default for Pose {
@@ -230,6 +235,9 @@ impl Default for Pose {
             released_at: None,
             last_tick: None,
             started: None,
+            cape: None,
+            hovered: false,
+            cape_tick: None,
         }
     }
 }
@@ -333,6 +341,11 @@ impl SkinViewer {
         self
     }
 
+    /// A cape from behind moves while hovered, and settles after.
+    fn cape_moves(&self) -> bool {
+        self.stance == Stance::Back && self.cape.is_some() && self.live && !crate::motion::reduced()
+    }
+
     fn idle_moves(&self) -> bool {
         self.stance == Stance::Idle && self.live && !crate::motion::reduced()
     }
@@ -361,6 +374,9 @@ impl<Message> shader::Program<Message> for SkinViewer {
         use iced::window::Event as Window;
         use iced::Event as E;
 
+        if self.stance == Stance::Back {
+            return self.update_cape(state, event, bounds, cursor);
+        }
         // The still poses don't respond to anything.
         if self.stance != Stance::Idle {
             return None;
@@ -493,10 +509,12 @@ impl<Message> shader::Program<Message> for SkinViewer {
             }
             Stance::Back => (BACK_YAW, REST_PITCH, Rig::back()),
         };
+        // A cape that has been blown about keeps the shape its physics left it in.
+        let strips = state.cape.as_ref().filter(|_| self.stance == Stance::Back).map(crate::cape_sim::CapeSim::angles);
 
         Scene {
             mvp: mvp(yaw, pitch, rig.bob, bounds),
-            geometry: Arc::new(build_model(self.model, self.cape.is_some(), rig)),
+            geometry: Arc::new(build_model(self.model, self.cape.is_some(), rig, strips.as_ref())),
             skin: Arc::clone(&self.skin),
             cape: self.cape.clone(),
             key: self.key,
@@ -520,6 +538,48 @@ impl<Message> shader::Program<Message> for SkinViewer {
             mouse::Interaction::Grab
         } else {
             mouse::Interaction::default()
+        }
+    }
+}
+
+impl SkinViewer {
+    /// The Back stance's only motion: the cape, in a breeze while the cursor is over it.
+    fn update_cape<Message>(&self, state: &mut Pose, event: &iced::Event, bounds: Rectangle, cursor: mouse::Cursor) -> Option<shader::Action<Message>> {
+        use iced::mouse::Event as Mouse;
+        use iced::window::Event as Window;
+        use iced::Event as E;
+
+        if !self.cape_moves() {
+            state.cape_tick = None;
+            return None;
+        }
+        match event {
+            E::Mouse(Mouse::CursorMoved { .. }) | E::Mouse(Mouse::CursorLeft) => {
+                let over = cursor.is_over(bounds);
+                if over == state.hovered {
+                    return None;
+                }
+                state.hovered = over;
+                Some(shader::Action::request_redraw())
+            }
+            E::Window(Window::RedrawRequested(now)) => {
+                // Again here: a tile scrolled out from under a still cursor gets no move event.
+                state.hovered = cursor.is_over(bounds);
+                let previous = state.cape_tick.replace(*now);
+                let started = *state.started.get_or_insert(*now);
+                let dt = previous.map_or(1.0 / 60.0, |p| now.duration_since(p).as_secs_f32()).min(0.1);
+                let wind = if state.hovered { crate::cape_sim::CapeSim::breeze(now.duration_since(started).as_secs_f32()) } else { 0.0 };
+                let sim = state.cape.get_or_insert_with(Default::default);
+                sim.advance(dt, wind);
+                if state.hovered || !sim.settled() {
+                    Some(shader::Action::request_redraw())
+                } else {
+                    // Still: no more frames until the cursor comes back.
+                    state.cape_tick = None;
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }
@@ -706,7 +766,7 @@ fn pose_part(vertices: &mut [Vertex], pivot: [f32; 3], rotation: glam::Mat4) {
 
 /// Builds the player model, standing on y = 0, in skin-pixel units, with
 /// each part turned as `rig` says.
-fn build_model(model: SkinModel, with_cape: bool, rig: Rig) -> Geometry {
+fn build_model(model: SkinModel, with_cape: bool, rig: Rig, strips: Option<&[f32; crate::cape_sim::LINES - 1]>) -> Geometry {
     use glam::Mat4;
     let mut v = Vec::new();
     let skin = [64.0, 64.0];
@@ -743,7 +803,21 @@ fn build_model(model: SkinModel, with_cape: bool, rig: Rig) -> Geometry {
 
     let cape_start = v.len() as u32;
 
-    if with_cape {
+    if let (true, Some(strips)) = (with_cape, strips) {
+        // One pixel-high box per texture row, each hung from the bottom of the one above
+        // and turned by its own angle: the cape bends where the physics bent it. A box's
+        // texture origin one row down picks that row of every face.
+        let mut joint = glam::Vec3::new(0.0, 24.0, -3.2);
+        for (row, angle) in strips.iter().enumerate() {
+            let from = v.len();
+            let top = 24.0 - row as f32;
+            push_box(&mut v, [0.0, top - 0.5, -3.2], [10.0, 1.0, 1.0], [0.0, row as f32], [64.0, 32.0], 0.0, true);
+            let rotation = Mat4::from_rotation_x(*angle);
+            let pivot = glam::Vec3::new(0.0, top, -3.2);
+            pose_part(&mut v[from..], pivot.into(), Mat4::from_translation(joint - pivot) * rotation);
+            joint += rotation.transform_vector3(glam::Vec3::new(0.0, -1.0, 0.0));
+        }
+    } else if with_cape {
         // Hangs off the back of the torso, top edge level with the shoulders.
         // Cape textures are 64x32, and the visible design sits where a body
         // box would put its *back*, hence the face flip.
@@ -1730,7 +1804,7 @@ mod tests {
 
     #[test]
     fn model_has_geometry_for_every_part() {
-        let model = build_model(SkinModel::Classic, false, Rig::default());
+        let model = build_model(SkinModel::Classic, false, Rig::default(), None);
         // Six base parts plus six overlays, six faces each, two triangles a
         // face, three vertices a triangle.
         assert_eq!(model.vertices.len(), 12 * 6 * 6);
@@ -1739,8 +1813,8 @@ mod tests {
 
     #[test]
     fn cape_is_appended_after_the_body() {
-        let without = build_model(SkinModel::Classic, false, Rig::default());
-        let with = build_model(SkinModel::Classic, true, Rig::default());
+        let without = build_model(SkinModel::Classic, false, Rig::default(), None);
+        let with = build_model(SkinModel::Classic, true, Rig::default(), None);
 
         assert_eq!(with.cape_start, without.vertices.len() as u32);
         assert_eq!(with.vertices.len(), without.vertices.len() + 36);
@@ -1748,8 +1822,8 @@ mod tests {
 
     #[test]
     fn slim_arms_are_narrower_and_hang_closer() {
-        let classic = build_model(SkinModel::Classic, false, Rig::default());
-        let slim = build_model(SkinModel::Slim, false, Rig::default());
+        let classic = build_model(SkinModel::Classic, false, Rig::default(), None);
+        let slim = build_model(SkinModel::Slim, false, Rig::default(), None);
         assert_eq!(classic.vertices.len(), slim.vertices.len());
 
         let widest = |g: &Geometry| {
@@ -1763,7 +1837,7 @@ mod tests {
 
     #[test]
     fn expand_directions_point_away_from_their_own_box() {
-        let model = build_model(SkinModel::Classic, false, Rig::default());
+        let model = build_model(SkinModel::Classic, false, Rig::default(), None);
         // A normalized direction, or zero — never anything longer, which
         // would make the outline uneven.
         for vertex in &model.vertices {
@@ -1804,7 +1878,7 @@ mod tests {
     /// order the two turns are applied in decides which.
     #[test]
     fn a_raised_arm_stays_out_to_the_side() {
-        let model = build_model(SkinModel::Classic, false, POSES[0].1);
+        let model = build_model(SkinModel::Classic, false, POSES[0].1, None);
         // The right arm's base box is the third part: head and torso come first,
         // each a base and an overlay box of 36 vertices.
         let arm = &model.vertices[4 * 36..5 * 36];
@@ -1839,7 +1913,7 @@ mod tests {
     /// left column the player's left (+X), seen from below.
     #[test]
     fn the_underside_is_laid_out_as_the_game_does() {
-        let model = build_model(SkinModel::Classic, false, Rig::default());
+        let model = build_model(SkinModel::Classic, false, Rig::default(), None);
         // The head's base box, sixth face; its first corner is (+X, bottom, back).
         let corner = model.vertices[5 * 6];
         assert_eq!(corner.position, [4.0, 24.0, -4.0]);
@@ -1849,7 +1923,7 @@ mod tests {
     #[test]
     fn the_cape_lifts_away_from_the_back() {
         let lifted = Rig { cape: 0.3, ..Rig::default() };
-        let cape = build_model(SkinModel::Classic, true, lifted);
+        let cape = build_model(SkinModel::Classic, true, lifted, None);
         let deepest = cape.vertices[cape.cape_start as usize..].iter().map(|v| v.position[2]).fold(f32::MAX, f32::min);
         assert!(deepest < -6.0, "a lifted cape swings out behind, reached z = {deepest}");
     }

@@ -98,7 +98,7 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         Tab::Logs => logs_tab(app, instance),
     };
 
-    column![
+    let page = column![
         row![tile, heading, launch_control(app, instance, running)]
             .spacing(14)
             .align_y(iced::Center),
@@ -106,8 +106,51 @@ pub fn view<'a>(app: &'a App, instance: &'a Instance) -> Element<'a, Message> {
         super::reveal(body, app.tab_content_progress(), app.page_rise),
     ]
     .spacing(14)
-    .height(Fill)
-    .into()
+    .height(Fill);
+    match &app.export_pick {
+        Some((id, rows)) if *id == instance.id => iced::widget::stack![page, export_popup(rows)].into(),
+        _ => page.into(),
+    }
+}
+
+/// Modal checklist of what goes into the exported pack.
+fn export_popup<'a>(rows: &'a [(String, bool)]) -> Element<'a, Message> {
+    let mut list = column![].spacing(6).padding(iced::Padding { right: 14.0, ..Default::default() });
+    for (i, (name, on)) in rows.iter().enumerate() {
+        list = list.push(
+            crate::lively::checkbox(*on)
+                .label(name.clone())
+                .on_toggle(move |_| Message::ExportToggle(i)),
+        );
+    }
+    let mut card = column![
+        text("Export which folders and files?").size(15).font(theme::bold()),
+        scrollable(list).height(320),
+    ]
+    .spacing(12);
+    if rows.iter().any(|r| r.0 == "config" && r.1) {
+        card = card.push(
+            text("config/ can contain tokens or webhook URLs. Check it before sharing.")
+                .size(11)
+                .color(theme::muted()),
+        );
+    }
+    card = card.push(
+        row![
+            button(text("Export").size(13)).padding([7, 13]).style(theme::ghost_button).on_press(Message::ExportGo),
+            button(text("Cancel").size(13)).padding([7, 13]).style(theme::ghost_button).on_press(Message::ExportCancel),
+        ]
+        .spacing(10),
+    );
+    let card = container(card).padding(22).width(460).style(theme::panel);
+    iced::widget::opaque(
+        container(crate::lively::appear(card))
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(theme::veil(0.72)),
+    )
 }
 
 /// The tab strip: compact tabs on one 1px rule, the selected one standing on

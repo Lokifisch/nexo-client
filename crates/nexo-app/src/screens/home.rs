@@ -63,13 +63,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None => text("Not signed in").size(22).color(theme::muted()).into(),
     };
 
+    // A Nexo cape, when worn, over the Mojang one; its own key so changing cape re-uploads it.
+    let (cape, cape_key) = app.home_cape();
     let character: Element<'_, Message> = match &app.skin_texture {
         Some(texture) => iced::widget::shader(
             crate::skin3d::SkinViewer::new(
                 std::sync::Arc::clone(texture),
-                app.cape_texture.clone(),
+                cape,
                 app.skin_model,
-                app.skin_key,
+                app.skin_key ^ cape_key,
                 0,
                 crate::skin3d::Stance::Idle,
             )

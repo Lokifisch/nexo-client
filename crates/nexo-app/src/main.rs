@@ -9,6 +9,7 @@
 //! ~1,000-file install runs underneath it.
 
 mod backdrop;
+mod cape_sim;
 mod dropdown;
 mod lively;
 mod motion;
@@ -133,6 +134,10 @@ pub enum Screen {
     Instances,
     Accounts,
     Skins,
+    /// Vanilla and Nexo custom capes.
+    Capes,
+    /// Name and skin history of any player, from crafty.gg.
+    History,
     /// Every Paper server this machine knows about — see `Mod/ROADMAP.md`
     /// Phase 7. Cross-instance, unlike the other screens: a hosted server
     /// outlives the "open instance" concept the details screen is scoped to.
@@ -176,6 +181,21 @@ pub struct ServerForm {
 /// `image::Handle` immediately, so the megabyte-scale PNG bytes are not held
 /// twice — once here and once in the widget — for every server in the list.
 pub type ServerStatus = nexo_core::server_ping::Status;
+
+/// A cape chosen for upload, shown in a popup to be named before it is sent.
+#[derive(Debug, Clone)]
+pub struct CapeDraft {
+    pub path: std::path::PathBuf,
+    /// The account it is for: a popup left open across an account switch must not upload to the other one.
+    pub account: String,
+    /// The file as it was checked and previewed, which is what gets sent; and the decoded
+    /// image for the preview, or why it can't be a cape.
+    pub bytes: Arc<Vec<u8>>,
+    pub texture: Result<Arc<skin::Rgba>, String>,
+    pub name: String,
+    pub sending: bool,
+    pub error: Option<String>,
+}
 
 /// Transient feedback shown in the header strip.
 #[derive(Debug, Clone, Default)]
@@ -236,6 +256,8 @@ pub struct App {
     new_version: String,
     /// Whether a new instance gets Nexo Mod, when its version can have it.
     new_with_nexo: bool,
+    /// Open export picker: instance id and (top-level entry, included).
+    export_pick: Option<(String, Vec<(String, bool)>)>,
 
     /// True while the browser sign-in is outstanding, so the button can't be
     /// pressed twice — the second attempt would fail to bind the callback
@@ -412,6 +434,32 @@ pub struct App {
     /// Each owned cape's texture, for drawing it on the player.
     cape_textures: std::collections::HashMap<String, Arc<skin::Rgba>>,
 
+    // Nexo's custom capes.
+    cape_tab: screens::capes::CapeTab,
+    cape_query: String,
+    capes_catalog: Vec<nexo_core::nexo_capes::CustomCape>,
+    capes_catalog_error: Option<String>,
+    /// The signed-in account's uploads and choices, with the UUID they belong to.
+    capes_mine_for: Option<(String, nexo_core::nexo_capes::Mine)>,
+    capes_mine_error: Option<String>,
+    capes_review_for: Option<(String, nexo_core::nexo_capes::ReviewQueue)>,
+    nexo_cape_textures: std::collections::HashMap<String, Arc<skin::Rgba>>,
+    /// Which upload asks "delete?" in its tile.
+    cape_delete_armed: Option<String>,
+    cape_report_armed: Option<String>,
+    /// The upload popup: a chosen file, waiting for its name.
+    cape_draft: Option<CapeDraft>,
+    /// What the shared file says this account wears, read at sign-in, until the service has said.
+    nexo_worn_hint: Option<(String, Option<String>)>,
+    cape_sort: nexo_core::nexo_capes::CapeSort,
+    /// A friend's cape code, being typed.
+    cape_code: String,
+    /// The review status of each upload the player has already seen, so a new
+    /// decision can be pointed out once. Read from disk on first need.
+    capes_seen: Option<std::collections::BTreeMap<String, String>>,
+    /// Which account's file shared with the game was last looked at, and when it had last changed.
+    capes_share_seen: Option<(String, Option<std::time::SystemTime>)>,
+
     // Saved skins.
     saved_skins: Vec<nexo_core::skin_library::SavedSkin>,
     /// The library's textures, keyed by saved-skin id, with the arm width the
@@ -419,6 +467,8 @@ pub struct App {
     saved_textures: std::collections::HashMap<String, (Arc<skin::Rgba>, nexo_core::SkinModel)>,
     /// What the skin search box holds.
     skin_query: String,
+    history_query: String,
+    history: screens::history::State,
     /// The saved skin being renamed, and the name typed so far.
     renaming_skin: Option<(String, String)>,
     /// "Continue without an account" was pressed on the welcome screen.
@@ -638,6 +688,38 @@ pub enum Message {
     HideCape,
     CosmeticsDone(Result<(), String>),
 
+    // Nexo's custom capes
+    CapeTab(screens::capes::CapeTab),
+    CapeQuery(String),
+    LoadNexoCapes,
+    /// The sort it was asked for, so a slow reply for an old sort can't replace a newer one.
+    NexoCatalogLoaded(nexo_core::nexo_capes::CapeSort, Result<Vec<nexo_core::nexo_capes::CustomCape>, String>),
+    NexoMineLoaded(String, Result<nexo_core::nexo_capes::Mine, String>),
+    NexoReviewLoaded(String, Result<nexo_core::nexo_capes::ReviewQueue, String>),
+    NexoCapeTexture(String, Arc<skin::Rgba>),
+    UploadNexoCape,
+    WearNexoCape(Option<String>),
+    FavoriteNexoCape(String, bool),
+    ArmCapeDelete(Option<String>),
+    DeleteNexoCape(String),
+    ReviewNexoCape(String, bool),
+    OpenCapeTemplate,
+    /// The file dialog's answer: a file and its preview, or nothing when cancelled.
+    CapeDraftPicked(Option<(std::path::PathBuf, Arc<Vec<u8>>, Result<Arc<skin::Rgba>, String>)>),
+    CapeDraftName(String),
+    CapeDraftCancel,
+    CapeDraftSend,
+    CapeDraftSent(String, Result<nexo_core::nexo_capes::Mine, String>),
+    CapeSort(nexo_core::nexo_capes::CapeSort),
+    CapeCode(String),
+    WearByCode,
+    ArmCapeReport(Option<String>),
+    ReportNexoCape(String),
+    CopyCapeCode(String),
+    CapeNotice(Result<String, String>),
+    /// Once a second on the Capes screen: did the game change the shared file?
+    CapesShareTick,
+
     // Saved skins
     LoadSavedSkins,
     SavedSkinsLoaded(Vec<nexo_core::skin_library::SavedSkin>),
@@ -647,6 +729,9 @@ pub enum Message {
         model: nexo_core::SkinModel,
     },
     SkinQuery(String),
+    HistoryQuery(String),
+    HistorySearch,
+    HistoryLoaded(Result<Arc<screens::history::Loaded>, String>),
     /// Starts renaming a saved skin.
     RenameSkin(String),
     RenameDraft(String),
@@ -665,6 +750,9 @@ pub enum Message {
     OpenFolder(String),
     ImportPack,
     ExportPack(String),
+    ExportToggle(usize),
+    ExportCancel,
+    ExportGo,
     PackImported(Result<String, String>),
 
     // Options sync — copies options.txt from one instance to every other.
@@ -716,6 +804,7 @@ impl App {
             instance_query: String::new(),
             new_version: DEFAULT_GAME_VERSION.to_string(),
             new_with_nexo: true,
+            export_pick: None,
             signing_in: false,
             faces: std::collections::HashMap::new(),
             skin_texture: None,
@@ -782,9 +871,27 @@ impl App {
             icons: std::collections::HashMap::new(),
             capes: Vec::new(),
             cape_textures: std::collections::HashMap::new(),
+            cape_tab: Default::default(),
+            cape_query: String::new(),
+            capes_catalog: Vec::new(),
+            capes_catalog_error: None,
+            capes_mine_for: None,
+            capes_mine_error: None,
+            capes_review_for: None,
+            nexo_cape_textures: std::collections::HashMap::new(),
+            cape_delete_armed: None,
+            cape_report_armed: None,
+            cape_draft: None,
+            nexo_worn_hint: None,
+            cape_sort: Default::default(),
+            cape_code: String::new(),
+            capes_seen: None,
+            capes_share_seen: None,
             saved_skins: Vec::new(),
             saved_textures: std::collections::HashMap::new(),
             skin_query: String::new(),
+            history_query: String::new(),
+            history: screens::history::State::default(),
             renaming_skin: None,
             welcome_dismissed: false,
             accounts_loaded: false,
@@ -897,7 +1004,13 @@ impl App {
                 // Only re-fetch the 3D textures when the active account
                 // actually changed; reload() runs after nearly every action.
                 if changed && let Some(core) = self.core.clone() {
-                    tasks.push(load_skin(core, self.active_account().cloned()));
+                    tasks.push(load_skin(core.clone(), self.active_account().cloned()));
+                    // The Nexo cape for Home's figure, from the file the game shares: no sign-in needed.
+                    if let Some(uuid) = self.active_account.clone() {
+                        let worn = nexo_core::nexo_capes::shared::read(core.paths.root(), &uuid).and_then(|s| s.worn);
+                        self.nexo_worn_hint = Some((uuid, worn));
+                        tasks.push(self.fetch_worn_cape());
+                    }
                 }
 
                 // Every account gets an avatar, not just the active one.
@@ -943,6 +1056,7 @@ impl App {
             Message::Navigate(screen) => {
                 self.armed = None;
                 let opening_skins = screen == Screen::Skins && self.screen != Screen::Skins;
+                let opening_capes = screen == Screen::Capes && self.screen != Screen::Capes;
                 let opening_servers = screen == Screen::Servers && self.screen != Screen::Servers;
                 let opening_console = matches!(&screen, Screen::PaperConsole(_)) && screen != self.screen;
                 let opening_settings = screen == Screen::Settings && self.screen != Screen::Settings;
@@ -957,12 +1071,12 @@ impl App {
                     self.paper_console_response = None;
                     return Task::done(Message::PaperConsoleFollowLog);
                 }
+                if opening_capes {
+                    self.cape_delete_armed = None;
+                    return Task::batch([Task::done(Message::LoadCapes), Task::done(Message::LoadNexoCapes)]);
+                }
                 if opening_skins {
-                    let mut tasks = vec![Task::done(Message::LoadSavedSkins)];
-                    if self.capes.is_empty() {
-                        tasks.push(Task::done(Message::LoadCapes));
-                    }
-                    return Task::batch(tasks);
+                    return Task::done(Message::LoadSavedSkins);
                 }
                 if opening_servers {
                     // Re-read every visit rather than caching: a server can
@@ -2360,12 +2474,52 @@ impl App {
             }
 
             Message::ExportPack(id) => {
+                let Some(core) = self.core.as_ref() else {
+                    return Task::none();
+                };
+                let root = core.paths.instance(&id);
+                let mut names: Vec<String> = std::fs::read_dir(&root)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n != "nexo-instance.json")
+                    .collect();
+                names.sort();
+                // Allowlist: config can hold tokens, so it starts unticked.
+                let on_by_default = ["mods", "resourcepacks", "shaderpacks", "datapacks", "options.txt"];
+                self.export_pick = Some((
+                    id,
+                    names
+                        .into_iter()
+                        .map(|n| { let on = on_by_default.contains(&n.as_str()); (n, on) })
+                        .collect(),
+                ));
+                Task::none()
+            }
+            Message::ExportToggle(i) => {
+                if let Some((_, rows)) = self.export_pick.as_mut() {
+                    if let Some(r) = rows.get_mut(i) {
+                        r.1 = !r.1;
+                    }
+                }
+                Task::none()
+            }
+            Message::ExportCancel => {
+                self.export_pick = None;
+                Task::none()
+            }
+            Message::ExportGo => {
+                let Some((id, rows)) = self.export_pick.take() else {
+                    return Task::none();
+                };
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
                 let Some(instance) = self.instances.iter().find(|i| i.id == id).cloned() else {
                     return Task::none();
                 };
+                let include: Vec<String> = rows.into_iter().filter(|r| r.1).map(|r| r.0).collect();
                 self.status = Status::Busy("Exporting modpack".into());
 
                 Task::perform(
@@ -2381,7 +2535,7 @@ impl App {
                         };
 
                         core.mrpack
-                            .export(&instance, handle.path())
+                            .export(&instance, handle.path(), &include)
                             .await
                             .map_err(|e| e.to_string())?;
                         Ok(format!("Exported {}", instance.name))
@@ -2562,6 +2716,28 @@ impl App {
 
             Message::SkinTextureLoaded { skin, texture, model } => {
                 self.saved_textures.insert(skin, (texture, model));
+                Task::none()
+            }
+
+            Message::HistoryQuery(query) => {
+                self.history_query = query;
+                Task::none()
+            }
+
+            Message::HistorySearch => {
+                let (Some(core), false) = (self.core.clone(), matches!(self.history, screens::history::State::Loading)) else {
+                    return Task::none();
+                };
+                self.history = screens::history::State::Loading;
+                let name = self.history_query.trim().to_string();
+                Task::perform(screens::history::load(core, name), Message::HistoryLoaded)
+            }
+
+            Message::HistoryLoaded(result) => {
+                self.history = match result {
+                    Ok(loaded) => screens::history::State::Ready(loaded),
+                    Err(message) => screens::history::State::Failed(message),
+                };
                 Task::none()
             }
 
@@ -2862,6 +3038,241 @@ impl App {
                 let account = self.active_account().cloned();
                 Task::batch([reload(core.clone()), reload_capes, load_skin(core, account)])
             }
+            Message::CapeTab(tab) => {
+                self.cape_tab = tab;
+                self.cape_delete_armed = None;
+                self.cape_report_armed = None;
+                if tab == screens::capes::CapeTab::Mine {
+                    self.mark_capes_seen();
+                }
+                if tab == screens::capes::CapeTab::Review {
+                    return self.load_cape_review();
+                }
+                Task::none()
+            }
+            Message::CapeQuery(query) => {
+                self.cape_query = query;
+                Task::none()
+            }
+            Message::LoadNexoCapes => {
+                let Some(core) = self.core.clone() else {
+                    return Task::none();
+                };
+                // The capes dev screen shows fake lists; the real service would replace them.
+                if cfg!(debug_assertions) && std::env::var("NEXO_DEV_SCREEN").is_ok_and(|s| s.starts_with("capes")) {
+                    return Task::none();
+                }
+                let sort = self.cape_sort;
+                let catalog = Task::perform(
+                    { let core = core.clone(); async move { core.nexo_capes.catalog(sort).await.map_err(|e| e.to_string()) } },
+                    move |result| Message::NexoCatalogLoaded(sort, result),
+                );
+                let Some(uuid) = self.active_account.clone() else {
+                    return catalog;
+                };
+                let mine = Task::perform(
+                    with_valid_account(core, |core, account| async move { core.nexo_capes.me(&account).await }),
+                    move |result| Message::NexoMineLoaded(uuid.clone(), result),
+                );
+                Task::batch([catalog, mine])
+            }
+            Message::NexoCatalogLoaded(sort, _) if sort != self.cape_sort => Task::none(),
+            Message::NexoCatalogLoaded(_, Ok(capes)) => {
+                self.capes_catalog_error = None;
+                // ponytail: the first 60 up front, which is several screens of tiles; fetch
+                // per visible tile (and page the catalog) once there are hundreds of capes.
+                let fetch = self.fetch_nexo_textures(capes.iter().take(60), false);
+                self.capes_catalog = capes;
+                fetch
+            }
+            Message::NexoCatalogLoaded(_, Err(err)) => {
+                // Keeps whatever list is shown: a failed refresh is not "no capes".
+                self.capes_catalog_error = Some(err);
+                Task::none()
+            }
+            Message::NexoMineLoaded(uuid, Ok(mine)) => {
+                self.capes_mine_error = None;
+                self.share_capes(&uuid, &mine);
+                // An answer for an account no longer active (an upload that finished after a switch)
+                // is written to that account's file and goes no further.
+                if Some(uuid.as_str()) != self.active_account.as_deref() {
+                    return Task::none();
+                }
+                self.note_cape_decisions(&mine);
+                self.nexo_worn_hint = Some((uuid.clone(), mine.worn.clone()));
+                let worn_fetch = self.fetch_worn_cape();
+                let fetch = self.fetch_nexo_textures(mine.mine.iter(), true);
+                let review = mine.admin;
+                self.capes_mine_for = Some((uuid, mine));
+                if review { Task::batch([fetch, worn_fetch, self.load_cape_review()]) } else { Task::batch([fetch, worn_fetch]) }
+            }
+            Message::NexoMineLoaded(_, Err(err)) => {
+                self.capes_mine_error = Some(format!("Could not sign in to the cape service: {err}"));
+                Task::none()
+            }
+            Message::NexoReviewLoaded(uuid, Ok(queue)) => {
+                let fetch = Task::batch([self.fetch_nexo_textures(queue.pending.iter(), true), self.fetch_nexo_textures(queue.approved.iter(), false)]);
+                self.capes_review_for = Some((uuid, queue));
+                fetch
+            }
+            Message::NexoReviewLoaded(_, Err(err)) => {
+                self.status = Status::Error(format!("Could not read the review queue: {err}"));
+                Task::none()
+            }
+            Message::NexoCapeTexture(id, texture) => {
+                self.nexo_cape_textures.insert(id, texture);
+                Task::none()
+            }
+            Message::UploadNexoCape => Task::perform(
+                async move {
+                    let handle = rfd::AsyncFileDialog::new().set_title("Choose a cape").add_filter("Cape PNG", &["png"]).pick_file().await?;
+                    let path = handle.path().to_path_buf();
+                    let (bytes, texture) = check_cape_file(&path).await;
+                    Some((path, Arc::new(bytes), texture.map(Arc::new)))
+                },
+                Message::CapeDraftPicked,
+            ),
+            Message::CapeDraftPicked(None) => Task::none(),
+            // A second dialog's answer while the first cape is on its way: that one finishes first.
+            Message::CapeDraftPicked(Some(_)) if self.cape_draft.as_ref().is_some_and(|d| d.sending) => Task::none(),
+            Message::CapeDraftPicked(Some((path, bytes, texture))) => {
+                let Some(account) = self.active_account.clone() else { return Task::none() };
+                // Named after its file to start with; the popup is where it gets its real name.
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let name: String = stem.chars().filter(|c| !c.is_control()).take(32).collect();
+                self.cape_draft = Some(CapeDraft { path, account, bytes, texture, name: name.trim().to_string(), sending: false, error: None });
+                self.cape_tab = screens::capes::CapeTab::Mine;
+                iced::widget::operation::focus(screens::capes::NAME_FIELD)
+            }
+            Message::CapeDraftName(name) => {
+                if let Some(draft) = self.cape_draft.as_mut() {
+                    draft.name = name.chars().take(32).collect();
+                    draft.error = None;
+                }
+                Task::none()
+            }
+            Message::CapeDraftCancel => {
+                // Not while it is on its way: the answer still has to land somewhere.
+                if self.cape_draft.as_ref().is_some_and(|d| !d.sending) {
+                    self.cape_draft = None;
+                }
+                Task::none()
+            }
+            Message::CapeDraftSend => {
+                let (Some(core), Some(uuid)) = (self.core.clone(), self.active_account.clone()) else {
+                    return Task::none();
+                };
+                let Some(draft) = self.cape_draft.as_mut().filter(|d| d.texture.is_ok() && !d.name.trim().is_empty() && !d.sending) else {
+                    return Task::none();
+                };
+                if draft.account != uuid {
+                    draft.error = Some("You switched accounts since choosing this file. Choose it again for this account.".into());
+                    return Task::none();
+                }
+                draft.sending = true;
+                draft.error = None;
+                let (name, bytes) = (draft.name.trim().to_string(), draft.bytes.as_ref().clone());
+                Task::perform(
+                    with_valid_account(core, move |core, account| async move {
+                        // Refused rather than sent to whoever is signed in by the time the token is renewed.
+                        if account.uuid != uuid {
+                            return Err(nexo_core::Error::invalid("the account changed while uploading"));
+                        }
+                        core.nexo_capes.upload(&account, &name, bytes).await.map(|mine| (account.uuid, mine))
+                    }),
+                    |result| match result {
+                        Ok((uuid, mine)) => Message::CapeDraftSent(uuid, Ok(mine)),
+                        Err(err) => Message::CapeDraftSent(String::new(), Err(err)),
+                    },
+                )
+            }
+            Message::CapeDraftSent(uuid, Ok(mine)) => {
+                let name = self.cape_draft.take().map(|d| d.name).unwrap_or_default();
+                self.status = Status::Notice(format!("“{}” is uploaded and waiting for review.", name.trim()));
+                Task::done(Message::NexoMineLoaded(uuid, Ok(mine)))
+            }
+            Message::CapeDraftSent(_, Err(err)) => {
+                // The popup stays, with the reason, so the name or the file can be fixed.
+                if let Some(draft) = self.cape_draft.as_mut() {
+                    draft.sending = false;
+                    draft.error = Some(err);
+                }
+                Task::none()
+            }
+            Message::WearNexoCape(cape) => self.cape_change(move |core, account| async move { core.nexo_capes.wear(&account, cape.as_deref()).await }),
+            Message::FavoriteNexoCape(cape, on) => self.cape_change(move |core, account| async move { core.nexo_capes.favorite(&account, &cape, on).await }),
+            Message::ArmCapeDelete(cape) => {
+                self.cape_delete_armed = cape;
+                Task::none()
+            }
+            Message::DeleteNexoCape(cape) => {
+                self.cape_delete_armed = None;
+                self.cape_change(move |core, account| async move { core.nexo_capes.delete(&account, &cape).await })
+            }
+            Message::ReviewNexoCape(cape, approve) => {
+                let (Some(core), Some(uuid)) = (self.core.clone(), self.active_account.clone()) else {
+                    return Task::none();
+                };
+                Task::perform(
+                    with_valid_account(core, move |core, account| async move { core.nexo_capes.review(&account, &cape, approve).await }),
+                    move |result| Message::NexoReviewLoaded(uuid.clone(), result),
+                )
+                .chain(Task::done(Message::LoadNexoCapes))
+            }
+            Message::CapeSort(sort) => {
+                self.cape_sort = sort;
+                let Some(core) = self.core.clone() else { return Task::none() };
+                Task::perform(async move { core.nexo_capes.catalog(sort).await.map_err(|e| e.to_string()) }, move |result| Message::NexoCatalogLoaded(sort, result))
+            }
+            Message::CapeCode(code) => {
+                self.cape_code = code;
+                Task::none()
+            }
+            Message::WearByCode => {
+                let code = self.cape_code.clone();
+                self.cape_change(move |core, account| async move {
+                    let cape = core.nexo_capes.by_code(&code).await?;
+                    core.nexo_capes.wear(&account, Some(&cape.id)).await
+                })
+            }
+            Message::ArmCapeReport(cape) => {
+                self.cape_report_armed = cape;
+                Task::none()
+            }
+            Message::ReportNexoCape(cape) => {
+                self.cape_report_armed = None;
+                let Some(core) = self.core.clone() else { return Task::none() };
+                Task::perform(
+                    with_valid_account(core, move |core, account| async move { core.nexo_capes.report(&account, &cape).await }),
+                    |result| Message::CapeNotice(result.map(|()| "Reported. A reviewer will look at it.".to_string())),
+                )
+            }
+            Message::CopyCapeCode(code) => {
+                self.status = Status::Notice(format!("Copied cape code {code}. A friend can paste it into Wear code."));
+                iced::clipboard::write(code)
+            }
+            Message::CapeNotice(Ok(text)) => {
+                self.status = Status::Notice(text);
+                Task::none()
+            }
+            Message::CapeNotice(Err(err)) => {
+                self.status = Status::Error(err);
+                Task::none()
+            }
+            Message::CapesShareTick => {
+                let (Some(core), Some(uuid)) = (self.core.as_ref(), self.active_account.clone()) else { return Task::none() };
+                let modified = nexo_core::nexo_capes::shared::modified(core.paths.root(), &uuid);
+                // The first look at an account's file only learns its time; after that a change came from the game.
+                let changed = matches!(&self.capes_share_seen, Some((seen, time)) if *seen == uuid && *time != modified);
+                self.capes_share_seen = Some((uuid, modified));
+                if changed { Task::done(Message::LoadNexoCapes) } else { Task::none() }
+            }
+            Message::OpenCapeTemplate => {
+                if let Err(err) = open::that_detached(nexo_core::nexo_capes::TEMPLATE_URL) {
+                    self.status = Status::Error(format!("Could not open the template: {err}"));
+                }
+                Task::none()
+            }
             Message::CosmeticsDone(Err(err)) => {
                 self.status = Status::Error(err);
                 Task::none()
@@ -3015,6 +3426,10 @@ impl App {
             }
 
             Message::SetActiveAccount(uuid) => {
+                // A chosen file belongs to the account it was chosen for.
+                if self.cape_draft.as_ref().is_some_and(|d| !d.sending) {
+                    self.cape_draft = None;
+                }
                 let Some(core) = self.core.clone() else {
                     return Task::none();
                 };
@@ -3085,6 +3500,8 @@ impl App {
             Screen::Instances => screens::instances::view(self),
             Screen::Accounts => screens::accounts::view(self),
             Screen::Skins => screens::skins::view(self),
+            Screen::Capes => screens::capes::view(self),
+            Screen::History => screens::history::view(self),
             Screen::Servers => screens::hosting::list_view(self),
             Screen::Settings => screens::settings::view(self),
             Screen::NewServer => screens::server_wizard::view(self),
@@ -3231,6 +3648,180 @@ impl App {
         self.accounts.iter().find(|a| a.uuid == uuid)
     }
 
+    /// This account's custom-cape state, if it has been read for the account now signed in.
+    fn capes_mine(&self) -> Option<&nexo_core::nexo_capes::Mine> {
+        let (uuid, mine) = self.capes_mine_for.as_ref()?;
+        (Some(uuid.as_str()) == self.active_account.as_deref()).then_some(mine)
+    }
+
+    fn capes_review(&self) -> Option<&nexo_core::nexo_capes::ReviewQueue> {
+        let (uuid, queue) = self.capes_review_for.as_ref()?;
+        (Some(uuid.as_str()) == self.active_account.as_deref()).then_some(queue)
+    }
+
+    /// Writes what this account wears and has waiting to the file the game watches,
+    /// and remembers the file's new time so this window doesn't react to its own write.
+    fn share_capes(&mut self, uuid: &str, mine: &nexo_core::nexo_capes::Mine) {
+        let Some(core) = self.core.as_ref() else { return };
+        let pending = mine.mine.iter().filter(|c| c.status.as_deref() == Some("pending")).map(|c| c.id.clone()).collect();
+        match nexo_core::nexo_capes::shared::record(core.paths.root(), uuid, mine.worn.as_deref(), pending) {
+            Ok(true) => self.capes_share_seen = Some((uuid.to_string(), nexo_core::nexo_capes::shared::modified(core.paths.root(), uuid))),
+            Ok(false) => {}
+            Err(err) => tracing::warn!(%err, "could not write the cape file shared with the game"),
+        }
+    }
+
+    /// Points out uploads decided since the player last looked. The first time,
+    /// with nothing on record, it only records: every old decision is not news.
+    fn note_cape_decisions(&mut self, mine: &nexo_core::nexo_capes::Mine) {
+        let decided = |c: &&nexo_core::nexo_capes::CustomCape| matches!(c.status.as_deref(), Some("approved" | "rejected"));
+        if self.capes_seen.is_none() {
+            let stored = self.core.as_ref().and_then(|core| nexo_core::nexo_capes::shared::read_seen(core.paths.root()));
+            match stored {
+                Some(seen) => self.capes_seen = Some(seen),
+                None => {
+                    self.capes_seen = Some(mine.mine.iter().filter(decided).map(|c| (c.id.clone(), c.status.clone().unwrap_or_default())).collect());
+                    self.save_capes_seen();
+                    return;
+                }
+            }
+        }
+        let seen = self.capes_seen.as_ref().expect("filled above");
+        let news: Vec<String> = mine
+            .mine
+            .iter()
+            .filter(decided)
+            .filter(|c| seen.get(&c.id) != c.status.as_ref())
+            .map(|c| match c.status.as_deref() {
+                Some("approved") => format!("Your cape “{}” was approved.", c.name),
+                _ => format!("Your cape “{}” was rejected{}.", c.name, c.reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default()),
+            })
+            .collect();
+        if !news.is_empty() {
+            self.status = Status::Notice(news.join(" "));
+        }
+        if self.cape_tab == screens::capes::CapeTab::Mine && self.screen == Screen::Capes {
+            self.mark_capes_seen();
+        }
+    }
+
+    fn mark_capes_seen(&mut self) {
+        let Some((_, mine)) = self.capes_mine_for.as_ref() else { return };
+        let decided: std::collections::BTreeMap<String, String> = mine
+            .mine
+            .iter()
+            .filter(|c| matches!(c.status.as_deref(), Some("approved" | "rejected")))
+            .map(|c| (c.id.clone(), c.status.clone().unwrap_or_default()))
+            .collect();
+        self.capes_seen.get_or_insert_with(Default::default).extend(decided);
+        self.save_capes_seen();
+    }
+
+    fn save_capes_seen(&self) {
+        if let (Some(core), Some(seen)) = (self.core.as_ref(), self.capes_seen.as_ref())
+            && let Err(err) = nexo_core::nexo_capes::shared::write_seen(core.paths.root(), seen)
+        {
+            tracing::warn!(%err, "could not record which cape decisions were seen");
+        }
+    }
+
+    /// The Nexo cape this account wears, as the service last said or else the shared file.
+    fn worn_nexo_cape(&self) -> Option<&str> {
+        if let Some(mine) = self.capes_mine() {
+            return mine.worn.as_deref();
+        }
+        let (uuid, worn) = self.nexo_worn_hint.as_ref()?;
+        (Some(uuid.as_str()) == self.active_account.as_deref()).then_some(worn.as_deref()).flatten()
+    }
+
+    /// The figure's cape on Home: the Nexo cape when one is worn and here, else the Mojang one.
+    fn home_cape(&self) -> (Option<Arc<skin::Rgba>>, u64) {
+        match self.worn_nexo_cape().and_then(|id| self.nexo_cape_textures.get(id).map(|t| (id, t))) {
+            Some((id, texture)) => (Some(Arc::clone(texture)), skin3d::slot(&format!("home-cape:{id}"))),
+            None => (self.cape_texture.clone(), 0),
+        }
+    }
+
+    /// Downloads the worn Nexo cape's texture if it isn't here yet. Approved, so no sign-in.
+    fn fetch_worn_cape(&self) -> Task<Message> {
+        let (Some(core), Some(id)) = (self.core.clone(), self.worn_nexo_cape().map(str::to_string)) else {
+            return Task::none();
+        };
+        if self.nexo_cape_textures.contains_key(&id) {
+            return Task::none();
+        }
+        Task::perform(async move { core.nexo_capes.texture(None, &id).await.ok().map(|t| (id, t)) }, |loaded| match loaded {
+            Some((id, texture)) => Message::NexoCapeTexture(id, Arc::new(texture)),
+            None => Message::Noop,
+        })
+    }
+
+    /// Whether an upload was decided since the player last opened Your capes.
+    fn capes_news(&self) -> bool {
+        let (Some(mine), Some(seen)) = (self.capes_mine(), self.capes_seen.as_ref()) else { return false };
+        mine.mine.iter().any(|c| matches!(c.status.as_deref(), Some("approved" | "rejected")) && seen.get(&c.id) != c.status.as_ref())
+    }
+
+    /// A change to this account's capes, then the catalog again for its counts.
+    fn cape_change<F, Fut>(&self, work: F) -> Task<Message>
+    where
+        F: FnOnce(nexo_core::Nexo, Account) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = nexo_core::Result<nexo_core::nexo_capes::Mine>> + Send + 'static,
+    {
+        let (Some(core), Some(uuid)) = (self.core.clone(), self.active_account.clone()) else {
+            return Task::none();
+        };
+        let sort = self.cape_sort;
+        let catalog = { let core = core.clone(); Task::perform(async move { core.nexo_capes.catalog(sort).await.map_err(|e| e.to_string()) }, move |result| Message::NexoCatalogLoaded(sort, result)) };
+        Task::perform(with_valid_account(core, work), move |result| match result {
+            Ok(mine) => Message::NexoMineLoaded(uuid.clone(), Ok(mine)),
+            Err(err) => Message::CosmeticsDone(Err(err)),
+        })
+        .chain(catalog)
+    }
+
+    fn load_cape_review(&self) -> Task<Message> {
+        let (Some(core), Some(uuid)) = (self.core.clone(), self.active_account.clone()) else {
+            return Task::none();
+        };
+        if !self.capes_mine().is_some_and(|m| m.admin) {
+            return Task::none();
+        }
+        Task::perform(
+            with_valid_account(core, |core, account| async move { core.nexo_capes.review_queue(&account).await }),
+            move |result| Message::NexoReviewLoaded(uuid.clone(), result),
+        )
+    }
+
+    /// Textures for capes not drawn yet, one task each. `authed` for unreviewed
+    /// ones, which only their owner and reviewers may download.
+    fn fetch_nexo_textures<'a>(&self, capes: impl Iterator<Item = &'a nexo_core::nexo_capes::CustomCape>, authed: bool) -> Task<Message> {
+        let Some(core) = self.core.clone() else {
+            return Task::none();
+        };
+        let tasks: Vec<_> = capes
+            .filter(|cape| !self.nexo_cape_textures.contains_key(&cape.id))
+            .map(|cape| {
+                let (core, id, authed) = (core.clone(), cape.id.clone(), authed && !cape.approved());
+                Task::perform(
+                    async move {
+                        let texture = if authed {
+                            with_valid_account(core, { let id = id.clone(); move |core, account| async move { core.nexo_capes.texture(Some(&account), &id).await } }).await.ok()
+                        } else {
+                            core.nexo_capes.texture(None, &id).await.ok()
+                        };
+                        texture.map(|texture| (id, texture))
+                    },
+                    |loaded| match loaded {
+                        Some((id, texture)) => Message::NexoCapeTexture(id, Arc::new(texture)),
+                        None => Message::Noop,
+                    },
+                )
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
     fn is_busy(&self) -> bool {
         self.other_work() || !self.install_queue.is_empty()
     }
@@ -3375,6 +3966,33 @@ impl App {
             return iced::Subscription::batch(feeds);
         }
 
+        // Escape closes the cape upload popup, even while its name field has the focus (which
+        // would otherwise take the first press), and only where the popup is shown.
+        if self.cape_draft.is_some() && self.screen == Screen::Capes {
+            feeds.push(iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. }) => {
+                    Some(Message::CapeDraftCancel)
+                }
+                _ => None,
+            }));
+        }
+
+        // Escape closes the export popup.
+        if self.export_pick.is_some() {
+            feeds.push(iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape), .. }) => {
+                    Some(Message::ExportCancel)
+                }
+                _ => None,
+            }));
+        }
+
+        // A cape picked in the game shows here within a second. Only on this screen:
+        // anywhere else the next visit reads it fresh.
+        if self.screen == Screen::Capes {
+            feeds.push(iced::time::every(REREAD).map(|_| Message::CapesShareTick));
+        }
+
         // Widgets and the Home backdrop request their own frames. The live-log
         // pulse is the one animation on this clock, and it only moves on
         // the Logs tab of a running instance. Anywhere else a 30 Hz repaint
@@ -3439,8 +4057,9 @@ fn dev_screen() -> Task<Message> {
         }
         // The Skins page as a signed-in player: wearing the first skin of the
         // library on disk, with two capes made from the cached cape texture.
-        Some("skins") | Some("home") => {
+        Some("skins") | Some("home") | Some("capes") => {
             let home = spec.starts_with("home");
+            let capes_tab = spec.strip_prefix("capes").map(|rest| index(rest.strip_prefix(':')));
             let account = Account {
                 uuid: "00000000000000000000000000000000".to_string(),
                 username: "Friend".to_string(),
@@ -3480,7 +4099,57 @@ fn dev_screen() -> Task<Message> {
                         tasks.push(Task::done(Message::CapeTextureLoaded { cape: id.to_string(), texture: cape.clone() }));
                     }
                 }
-                tasks.push(later(Message::Navigate(Screen::Skins)));
+                if capes_tab.is_none() {
+                    tasks.push(later(Message::Navigate(Screen::Skins)));
+                }
+            }
+            if let Some(tab) = capes_tab {
+                // Fake Nexo capes, all wearing the template, with this account as a reviewer.
+                use nexo_core::nexo_capes::{CustomCape, Mine, ReviewQueue};
+                let cape = |id: &str, name: &str, favorites, status: Option<&str>| CustomCape {
+                    id: id.repeat(64),
+                    name: name.into(),
+                    favorites,
+                    uses: favorites / 2,
+                    status: status.map(Into::into),
+                    reason: (status == Some("rejected")).then(|| "Too blurry".into()),
+                    code: format!("{}-{}", id.repeat(4).to_uppercase(), id.repeat(4).to_uppercase()),
+                    uploader: Some("Lokifisch".into()),
+                    reports: 0,
+                };
+                let catalog = vec![cape("a", "Nebula", 42, None), cape("b", "Ember", 17, None), cape("c", "Pixel Fox", 3, None)];
+                let mine = Mine {
+                    mine: vec![cape("c", "Pixel Fox", 3, Some("approved")), cape("d", "Draft", 0, Some("pending")), cape("e", "Old one", 0, Some("rejected"))],
+                    favorites: vec!["a".repeat(64)],
+                    worn: Some("b".repeat(64)),
+                    limit: 5,
+                    admin: true,
+                };
+                let reported = CustomCape { reports: 3, ..cape("c", "Pixel Fox", 3, Some("approved")) };
+                let review = ReviewQueue { pending: vec![cape("d", "Draft", 0, Some("pending"))], approved: catalog.clone(), reported: vec![reported] };
+                let uuid = "00000000000000000000000000000000".to_string();
+                let template = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../EmoteService/src/nexo_emotes/assets/cape_template.png"))
+                    .ok()
+                    .and_then(|bytes| skin::decode_texture(&bytes).ok())
+                    .map(Arc::new);
+                tasks.push(Task::done(Message::NexoCatalogLoaded(Default::default(), Ok(catalog))));
+                tasks.push(Task::done(Message::NexoMineLoaded(uuid.clone(), Ok(mine))));
+                tasks.push(Task::done(Message::NexoReviewLoaded(uuid, Ok(review))));
+                if let Some(texture) = template {
+                    for id in ["a", "b", "c", "d", "e"] {
+                        tasks.push(Task::done(Message::NexoCapeTexture(id.repeat(64), texture.clone())));
+                    }
+                }
+                let tabs = [screens::capes::CapeTab::Vanilla, screens::capes::CapeTab::Custom, screens::capes::CapeTab::Mine, screens::capes::CapeTab::Favorites, screens::capes::CapeTab::Review];
+                tasks.push(later(Message::Navigate(Screen::Capes)));
+                tasks.push(later(Message::CapeTab(tabs[tab.min(4)])));
+                // `capes:<tab>:upload` also opens the upload popup on the template.
+                if spec.ends_with(":upload") {
+                    let path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../EmoteService/src/nexo_emotes/assets/cape_template.png"));
+                    let bytes = std::fs::read(&path).unwrap_or_default();
+                    let texture = skin::decode_texture(&bytes).map_err(|e| e.to_string()).map(Arc::new);
+                    tasks.push(later(Message::CapeDraftPicked(Some((path.with_file_name("nexo_cape.png"), Arc::new(bytes), texture)))));
+                }
             }
             tasks.into_iter().reduce(Task::chain).unwrap_or_else(Task::none)
         }
@@ -3567,6 +4236,49 @@ fn load_versions(core: Nexo) -> Task<Message> {
         },
         Message::VersionsLoaded,
     )
+}
+
+/// A chosen file as a cape: its bytes, and its decoded image for the preview or why the
+/// service would refuse it. The service checks again; this only saves a wasted upload.
+async fn check_cape_file(path: &std::path::Path) -> (Vec<u8>, Result<skin::Rgba, String>) {
+    let size = match tokio::fs::metadata(path).await {
+        Ok(meta) => meta.len(),
+        Err(err) => return (Vec::new(), Err(err.to_string())),
+    };
+    if size > 1024 * 1024 {
+        return (Vec::new(), Err("This file is over 1 MB.".into()));
+    }
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(err) => return (Vec::new(), Err(err.to_string())),
+    };
+    let checked = cape_png_size(&bytes).and_then(|_| skin::decode_texture(&bytes).map_err(|_| "This isn't a readable PNG.".to_string()));
+    (bytes, checked)
+}
+
+/// A PNG's size from its header, refused before anything is decoded: a small file can
+/// claim a huge image, and the right message needs the size anyway.
+fn cape_png_size(bytes: &[u8]) -> Result<(u32, u32), String> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return Err("This isn't a PNG. Save the cape as a PNG and choose it again.".into());
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().expect("four bytes"));
+    let h = u32::from_be_bytes(bytes[20..24].try_into().expect("four bytes"));
+    if w != h.saturating_mul(2) || !(64..=1024).contains(&w) || !w.is_power_of_two() {
+        return Err(format!("This image is {w}×{h}. A cape is 64×32, or that times 2, 4, 8 or 16 (the template is 512×256)."));
+    }
+    Ok((w, h))
+}
+
+/// Runs `work` with the active account, its token renewed first.
+async fn with_valid_account<F, Fut, T>(core: nexo_core::Nexo, work: F) -> Result<T, String>
+where
+    F: FnOnce(nexo_core::Nexo, Account) -> Fut,
+    Fut: std::future::Future<Output = nexo_core::Result<T>>,
+{
+    let account = core.accounts.active_valid(&core.auth).await.map_err(|e| e.to_string())?;
+    work(core, account).await.map_err(|e| e.to_string())
 }
 
 /// Fetches the account's skin and cape, falling back to the placeholder for
@@ -4081,5 +4793,27 @@ mod motion_frames {
         let element: Element<'_, Message> = bar.into();
         let mut ui = Simulator::with_size(iced::Settings::default(), iced::Size::new(216.0, 110.0), element);
         ui.snapshot(&theme::current()).unwrap().matches_image(dir().join("underline.png")).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cape_upload_tests {
+    use super::cape_png_size;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        bytes.extend(w.to_be_bytes());
+        bytes.extend(h.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn the_header_decides_before_any_decoding() {
+        assert_eq!(cape_png_size(&png(512, 256)), Ok((512, 256)));
+        assert_eq!(cape_png_size(&png(64, 32)), Ok((64, 32)));
+        assert!(cape_png_size(&png(2048, 1024)).unwrap_err().contains("2048×1024"));
+        assert!(cape_png_size(&png(96, 48)).is_err(), "not a power of two");
+        assert!(cape_png_size(&png(64, 64)).is_err(), "not 2:1");
+        assert!(cape_png_size(b"\xff\xd8\xff\xe0 a jpeg pretending").unwrap_err().contains("isn't a PNG"));
     }
 }

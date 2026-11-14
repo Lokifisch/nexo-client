@@ -10,18 +10,18 @@ use std::sync::{Arc, LazyLock};
 static RENAME: LazyLock<svg::Handle> = LazyLock::new(|| super::icon("M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4"));
 static DELETE: LazyLock<svg::Handle> = LazyLock::new(|| super::icon("M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"));
 static DONE: LazyLock<svg::Handle> = LazyLock::new(|| super::icon("M5 12l5 5L20 7"));
-static PLACEHOLDER: LazyLock<Arc<nexo_core::skin::Rgba>> = LazyLock::new(|| Arc::new(nexo_core::skin::placeholder_texture()));
+pub(super) static PLACEHOLDER: LazyLock<Arc<nexo_core::skin::Rgba>> = LazyLock::new(|| Arc::new(nexo_core::skin::placeholder_texture()));
 
 /// A small icon button over a tile.
-fn tool<'a>(icon: &LazyLock<svg::Handle>, style: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style, message: Message) -> Element<'a, Message> {
+pub(super) fn tool<'a>(icon: &LazyLock<svg::Handle>, style: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style, message: Message) -> Element<'a, Message> {
     button(svg((*icon).clone()).width(14).height(14).style(theme::nav_icon(1.0))).padding(6).style(style).on_press(message).into()
 }
 
 /// Every tile is the same size, so the grids line up and wrap cleanly.
-const TILE_WIDTH: f32 = 196.0;
-const FIGURE_HEIGHT: f32 = 220.0;
+pub(super) const TILE_WIDTH: f32 = 196.0;
+pub(super) const FIGURE_HEIGHT: f32 = 220.0;
 
-/// Skin and cape management for the active account.
+/// Skin management for the active account. Capes have their own screen.
 ///
 /// Everything here is a server-side change to the Minecraft account, not a
 /// launcher setting — it applies wherever the account is used, so the copy
@@ -57,16 +57,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let page = column![
         section("Skins", "Changes apply to your Minecraft account everywhere, not just here. Every skin you wear is kept here."),
         skins_grid(app),
-        Space::new().height(12),
-        row![
-            section("Capes", "Shown on your skin. Only capes your account owns can be worn."),
-            button(text("Refresh").size(12))
-                .padding([6, 12])
-                .style(theme::ghost_button)
-                .on_press(Message::LoadCapes),
-        ]
-        .align_y(iced::Center),
-        capes_grid(app),
     ]
     .spacing(14)
     .width(Fill)
@@ -75,7 +65,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     column![toolbar, scrollable(page).height(Fill)].spacing(18).height(Fill).into()
 }
 
-fn section<'a>(title: &'a str, help: &'a str) -> Element<'a, Message> {
+pub(super) fn section<'a>(title: &'a str, help: &'a str) -> Element<'a, Message> {
     column![
         text(title).size(18).font(theme::bold()).color(theme::text()),
         text(help).size(12).color(theme::muted()),
@@ -88,17 +78,17 @@ fn section<'a>(title: &'a str, help: &'a str) -> Element<'a, Message> {
 /// Tiles in rows as wide as the window allows. Each is held to its width
 /// here: the arrival animation and the hover tools fill whatever they're given, and a
 /// tile that fills the row wraps alone.
-fn wrap<'a>(tiles: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+pub(super) fn wrap<'a>(tiles: Vec<Element<'a, Message>>) -> Element<'a, Message> {
     let tiles = tiles.into_iter().map(|tile| container(tile).width(TILE_WIDTH).into());
     row(tiles).spacing(14).width(Fill).wrap().vertical_spacing(14).into()
 }
 
-fn figure<'a>(viewer: SkinViewer) -> Element<'a, Message> {
+pub(super) fn figure<'a>(viewer: SkinViewer) -> Element<'a, Message> {
     shader(viewer).width(Fill).height(FIGURE_HEIGHT).into()
 }
 
 /// A tile: the figure, a name and a line under it. `chosen` outlines it.
-fn tile<'a>(figure: Element<'a, Message>, name: Element<'a, Message>, detail: Element<'a, Message>, chosen: bool, on_press: Option<Message>) -> Element<'a, Message> {
+pub(super) fn tile<'a>(figure: Element<'a, Message>, name: Element<'a, Message>, detail: Element<'a, Message>, chosen: bool, on_press: Option<Message>) -> Element<'a, Message> {
     button(column![figure, name, detail].spacing(4).align_x(iced::Center))
         .padding([10, 10])
         .width(TILE_WIDTH)
@@ -238,53 +228,4 @@ fn skin_tile<'a>(
         .on_enter(Message::HoverSkin(Some(saved.id.clone())))
         .on_exit(Message::UnhoverSkin(saved.id.clone()))
         .into()
-}
-
-/// One tile per cape the account owns, each drawn on the skin being worn,
-/// from behind: what you'd see turning round after putting it on.
-fn capes_grid(app: &App) -> Element<'_, Message> {
-    // Until the worn skin has loaded, or if it couldn't be, the capes go on
-    // the placeholder figure rather than disappearing with it.
-    let skin = app.skin_texture.as_ref().unwrap_or(&PLACEHOLDER);
-    let busy = app.is_busy();
-    let none_worn = !app.capes.iter().any(|c| c.is_active());
-    // The skin's own key is in each cape tile's, so changing skin redraws them.
-    let back = |name: &str, cape: Option<Arc<nexo_core::skin::Rgba>>| {
-        let slot = skin3d::slot(&format!("cape:{name}"));
-        figure(SkinViewer::new(Arc::clone(skin), cape, app.skin_model, slot ^ app.skin_key, slot, Stance::Back))
-    };
-    let caption = |worn: bool| -> Element<'_, Message> {
-        if worn {
-            text("Wearing").size(12).color(theme::mint()).into()
-        } else {
-            text("Click to wear").size(12).color(theme::muted()).into()
-        }
-    };
-
-    // "No cape" is a tile like any other, so taking one off is the same
-    // gesture as putting one on.
-    let mut tiles = vec![tile(
-        back("", None),
-        text("No cape").size(15).font(theme::bold()).color(theme::text()).into(),
-        caption(none_worn),
-        none_worn,
-        (!busy && !none_worn).then_some(Message::HideCape),
-    )];
-    for (index, cape) in app.capes.iter().enumerate() {
-        let worn = cape.is_active();
-        // Until its texture arrives, the cape tile shows the bare back.
-        let texture = app.cape_textures.get(&cape.id).cloned();
-        let tile = tile(
-            back(&format!("{}:{}", cape.id, texture.is_some()), texture),
-            text(cape.label()).size(15).font(theme::bold()).color(theme::text()).into(),
-            caption(worn),
-            worn,
-            (!busy && !worn).then(|| Message::WearCape(cape.id.clone())),
-        );
-        tiles.push(super::arrive(app, index + 1, tile));
-    }
-    if app.capes.is_empty() {
-        tiles.push(text("No capes on this account yet.").size(12).color(theme::muted()).into());
-    }
-    wrap(tiles)
 }

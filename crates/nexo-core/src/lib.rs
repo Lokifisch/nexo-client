@@ -10,6 +10,7 @@ pub mod auth;
 pub mod browse;
 pub mod content;
 pub mod cosmetics;
+pub mod nexo_capes;
 pub mod error;
 pub mod github;
 pub mod hosting;
@@ -32,6 +33,7 @@ pub mod shared_store;
 pub mod skin;
 pub mod skin_library;
 pub mod util;
+pub mod whois;
 
 pub use accounts::AccountStore;
 pub use auth::{Account, Auth, SkinModel};
@@ -53,6 +55,8 @@ pub struct Nexo {
     pub nexo_mod: nexo_mod::NexoMod,
     pub content: content::Content,
     pub cosmetics: cosmetics::Cosmetics,
+    /// Nexo's own capes, which only Nexo Mod players see.
+    pub nexo_capes: nexo_capes::NexoCapes,
     pub skins: skin_library::SkinLibrary,
     pub mrpack: mrpack::MrPack,
     /// Converts singleplayer worlds to locally-run Paper servers and back —
@@ -96,6 +100,7 @@ impl Nexo {
             nexo_mod: nexo_mod::NexoMod::new(http.clone(), paths.clone()),
             content: content::Content::new(http.clone(), paths.clone()),
             cosmetics: cosmetics::Cosmetics::new(http.clone()),
+            nexo_capes: nexo_capes::NexoCapes::new(http.clone()),
             skins: skin_library::SkinLibrary::new(&paths),
             mrpack: mrpack::MrPack::new(http.clone(), paths.clone()),
             paper_servers: paper_server::PaperServers::new(http.clone(), paths.clone()),

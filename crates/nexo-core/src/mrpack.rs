@@ -9,7 +9,6 @@
 //! local — a jar dropped in by hand, config — goes into `overrides/`, since
 //! there is no URL to point at.
 
-use crate::content::ProjectKind;
 use crate::error::{Error, IoContext, Result};
 use crate::instance::{InstalledMod, Instance, Loader, ModSource};
 use crate::paths::Paths;
@@ -99,6 +98,16 @@ const ALLOWED_DIRS: &[&str] = &[
 ];
 /// Top-level files a listed entry may write.
 const ALLOWED_ROOT_FILES: &[&str] = &["options.txt", "servers.dat"];
+/// Never exported, whatever the caller asks: they hold server addresses,
+/// name/UUID maps, typed commands or other mods' account data.
+fn never_export(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("servers") && n.ends_with(".dat")
+        || ["usercache.json", "command_history.txt", "realms_persistence.json", "essential", "meteor-client"].contains(&n.as_str())
+        || n.contains("account")
+        || n.contains("token")
+}
+
 const MAX_PACK_FILE: u64 = 512 * 1024 * 1024;
 
 /// What an import produced, so the UI can say what happened.
@@ -273,9 +282,13 @@ impl MrPack {
 
     /// Writes an instance out as a pack.
     ///
-    /// Modrinth-sourced content becomes index entries; everything else is
-    /// bundled into `overrides/`, because a local file has no URL to list.
-    pub async fn export(&self, instance: &Instance, destination: &Path) -> Result<()> {
+    /// The chosen top-level entries are bundled into `overrides/`.
+    pub async fn export(
+        &self,
+        instance: &Instance,
+        destination: &Path,
+        include: &[String],
+    ) -> Result<()> {
         let mut dependencies = std::collections::BTreeMap::new();
         dependencies.insert("minecraft".to_string(), instance.game_version.clone());
         if instance.loader == Loader::Fabric {
@@ -291,17 +304,9 @@ impl MrPack {
         // Only content with a real download can be listed; the rest is
         // gathered as overrides below.
         let mut files = Vec::new();
-        let mut bundled: Vec<(String, PathBuf)> = Vec::new();
         let root = self.paths.instance(&instance.id);
 
-        for installed in &instance.mods {
-            let relative = relative_path(installed);
-            let absolute = root.join(&relative);
-            if !absolute.exists() {
-                continue;
-            }
-            bundled.push((relative, absolute));
-        }
+        let bundled = gather(&root, include);
 
         let index = Index {
             format_version: FORMAT_VERSION,
@@ -323,16 +328,34 @@ impl MrPack {
     }
 }
 
-/// Where an installed file lives relative to the instance root.
-fn relative_path(installed: &InstalledMod) -> String {
-    // The kind isn't recorded, so infer from the extension: jars are mods,
-    // and zips are packs of some sort.
-    let folder = if installed.file_name.ends_with(".jar") {
-        ProjectKind::Mod.folder()
-    } else {
-        ProjectKind::ResourcePack.folder()
+/// The files to bundle: the chosen top-level entries, minus anything
+/// protected or never exported, sorted and unique by pack path.
+fn gather(root: &Path, include: &[String]) -> Vec<(String, PathBuf)> {
+    let mut bundled = Vec::new();
+    for top in include {
+        if top.contains(['/', '\\']) || top == ".." || top == "." || is_protected(Path::new(top)) || never_export(top) {
+            continue;
+        }
+        collect_files(&root.join(top), top, &mut bundled);
+    }
+    bundled.sort();
+    bundled.dedup_by(|a, b| a.0 == b.0);
+    bundled
+}
+
+fn collect_files(path: &Path, relative: &str, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
     };
-    format!("{folder}/{}", installed.file_name)
+    if meta.is_file() {
+        out.push((relative.to_string(), path.to_path_buf()));
+    } else if meta.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for e in entries.flatten() {
+                collect_files(&e.path(), &format!("{relative}/{}", e.file_name().to_string_lossy()), out);
+            }
+        }
+    }
 }
 
 fn file_name(path: &str) -> String {
@@ -500,15 +523,17 @@ fn write_pack(destination: &Path, index: &Index, bundled: &[(String, PathBuf)]) 
     let file = std::fs::File::create(destination).ctx(destination)?;
     let mut zip = zip::ZipWriter::new(file);
     let options: zip::write::FileOptions<'_, ()> =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip::write::FileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(true);
 
     zip.start_file("modrinth.index.json", options)?;
     zip.write_all(serde_json::to_string_pretty(index)?.as_bytes())?;
 
     for (relative, absolute) in bundled {
         zip.start_file(format!("overrides/{relative}"), options)?;
-        let contents = std::fs::read(absolute).ctx(absolute)?;
-        zip.write_all(&contents)?;
+        let mut src = std::fs::File::open(absolute).ctx(absolute)?;
+        std::io::copy(&mut src, &mut zip).ctx(absolute)?;
     }
 
     zip.finish()?;
@@ -518,6 +543,48 @@ fn write_pack(destination: &Path, index: &Index, bundled: &[(String, PathBuf)]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nexo-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn export_picks_only_chosen_safe_entries_and_round_trips() {
+        let root = scratch();
+        for f in ["mods/a.jar", "mods/sub/b.jar", "config/c.toml", "saves/w/level.dat", "essential/acct.json"] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, f).unwrap();
+        }
+        for f in ["options.txt", "servers.dat", "usercache.json", "nexo-instance.json"] {
+            std::fs::write(root.join(f), f).unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", root.join("mods/link.jar")).unwrap();
+
+        // Duplicated "mods" must not yield a duplicate zip entry.
+        let pick: Vec<String> = ["mods", "mods", "options.txt", "servers.dat", "usercache.json", "essential", "nexo-instance.json", "../x", "a/b"]
+            .iter().map(|s| s.to_string()).collect();
+        let files = gather(&root, &pick);
+        let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(names, ["mods/a.jar", "mods/sub/b.jar", "options.txt"]);
+
+        let pack = root.join("out.mrpack");
+        write_pack(&pack, &index(&[("minecraft", "26.3")]), &files).unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&pack).unwrap()).unwrap();
+        assert!(zip.by_name("modrinth.index.json").is_ok());
+        assert!(zip.by_name("overrides/mods/sub/b.jar").is_ok());
+
+        let dest = scratch();
+        let refused = extract_overrides(&pack, &dest).unwrap();
+        assert!(refused.is_empty());
+        assert!(dest.join("mods/a.jar").exists() && dest.join("options.txt").exists());
+        assert!(!dest.join("servers.dat").exists());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(dest);
+    }
 
     fn index(dependencies: &[(&str, &str)]) -> Index {
         Index {

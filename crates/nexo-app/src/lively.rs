@@ -523,6 +523,12 @@ impl<'a, M: Clone + 'a> Input<'a, M> {
         self.inner = self.inner.on_submit_maybe(message);
         self
     }
+
+    /// Names it, so a task can focus it.
+    pub fn id(mut self, id: &'static str) -> Self {
+        self.inner = self.inner.id(id);
+        self
+    }
     pub fn padding(mut self, padding: impl Into<Padding>) -> Self {
         self.inner = self.inner.padding(padding);
         self

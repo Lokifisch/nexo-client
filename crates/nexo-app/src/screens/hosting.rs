@@ -452,6 +452,8 @@ pub enum Msg {
     SettingsMemory(u32),
     SaveSettings,
     SettingsSaved(Result<(), String>),
+    SyncPack,
+    PackSynced(Result<usize, String>),
     Copy(String),
     Delete(String),
     Deleted(Result<(), String>),
@@ -1181,6 +1183,23 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 Err(err) => app.status = Status::Error(format!("Couldn't save the settings: {err}")),
             }
             Task::done(host(Msg::Load))
+        }
+        Msg::SyncPack => {
+            let Screen::Server(id) = &app.screen else { return Task::none() };
+            let id = id.clone();
+            app.status = Status::Notice("Copying the texture pack…".into());
+            call(
+                app,
+                move |core| async move { core.hosting.sync_resource_pack(&id).await.map_err(|e| e.to_string()) },
+                Msg::PackSynced,
+            )
+        }
+        Msg::PackSynced(result) => {
+            app.status = match result {
+                Ok(n) => Status::Notice(format!("Texture pack copied to {n} instance(s). Pick it in Resource Packs.")),
+                Err(err) => Status::Error(format!("Couldn't copy the texture pack: {err}")),
+            };
+            Task::none()
         }
         Msg::Copy(text) => iced::clipboard::write(text),
         Msg::Delete(id) => {

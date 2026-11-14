@@ -701,6 +701,11 @@ fn settings<'a>(app: &'a App, server: &'a HostedServer) -> Element<'a, Message> 
             .padding([8, 12])
             .style(theme::ghost_button)
             .on_press_maybe(app.core.as_ref().map(|c| Message::OpenPath(c.hosting.server_dir(&server.id).join("server.properties")))),
+        button(text("Copy texture pack to local").size(13))
+            .padding([8, 12])
+            .style(theme::ghost_button)
+            // Reads server.properties from disk, so unsaved edits would be ignored.
+            .on_press_maybe((!s.dirty).then_some(host(Msg::SyncPack))),
         button(text("Save changes").size(14))
             .padding([8, 16])
             .style(theme::primary_button)

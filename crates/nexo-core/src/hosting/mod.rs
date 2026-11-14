@@ -698,6 +698,77 @@ impl Hosting {
         self.write(&server).await
     }
 
+    /// Downloads the pack named by `resource-pack` in server.properties into
+    /// every local instance's `resourcepacks/` as `nexo-<id>.zip`, replacing
+    /// the last copy, so running it again re-syncs. Returns how many
+    /// instances got it.
+    pub async fn sync_resource_pack(&self, id: &str) -> Result<usize> {
+        const MAX: usize = 256 << 20;
+        self.read(id).await?;
+        let props = self.properties(id).await?;
+        let get = |key: &str| props.iter().find(|(k, _)| k == key).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+        let url = get("resource-pack");
+        if !url.starts_with("https://") {
+            return Err(Error::invalid("This server has no https resource pack URL set (resource-pack in server.properties)."));
+        }
+        // https only, including every redirect hop. ponytail: no private-IP check, add if the URL ever comes from untrusted input.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(|a| {
+                if a.previous().len() < 5 && a.url().scheme() == "https" { a.follow() } else { a.stop() }
+            }))
+            .build()?;
+        let fetch = async {
+            let mut resp = client.get(&url).send().await?.error_for_status()?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = resp.chunk().await? {
+                if bytes.len() + chunk.len() > MAX {
+                    return Err(Error::invalid("The resource pack is over 256 MB."));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok::<_, Error>(bytes)
+        };
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(300), fetch)
+            .await
+            .map_err(|_| Error::invalid("The resource pack download timed out."))?
+            .map_err(|e| match e {
+                Error::Http(e) => Error::invalid(format!("download failed: {}", e.without_url())),
+                e => e,
+            })?;
+        if !bytes.starts_with(b"PK\x03\x04") {
+            return Err(Error::invalid("The URL didn't return a zip file."));
+        }
+        let want = get("resource-pack-sha1");
+        if !want.is_empty() && !crate::util::sha1_hex(&bytes).eq_ignore_ascii_case(&want) {
+            return Err(Error::invalid("The pack doesn't match resource-pack-sha1."));
+        }
+        let root = self.paths.instances();
+        let mut entries = tokio::fs::read_dir(&root).await.ctx(&root)?;
+        let (mut copied, mut failed) = (0, 0);
+        while let Some(entry) = entries.next_entry().await.ctx(&root)? {
+            if !tokio::fs::try_exists(entry.path().join("nexo-instance.json")).await.unwrap_or(false) {
+                continue;
+            }
+            let dir = entry.path().join("resourcepacks");
+            let dest = dir.join(format!("nexo-{id}.zip"));
+            let part = dir.join(format!("nexo-{id}.zip.part"));
+            let ok = async {
+                tokio::fs::create_dir_all(&dir).await?;
+                tokio::fs::write(&part, &bytes).await?;
+                tokio::fs::rename(&part, &dest).await
+            }
+            .await;
+            if ok.is_ok() { copied += 1 } else { failed += 1 }
+        }
+        if copied == 0 {
+            return Err(Error::invalid("Couldn't copy the pack into any local instance (is the game running?)."));
+        }
+        if failed > 0 {
+            return Err(Error::invalid(format!("Copied to {copied} instance(s), {failed} failed (is the game running?).")));
+        }
+        Ok(copied)
+    }
+
     pub async fn set_tunnel(&self, id: &str, on: bool) -> Result<()> {
         let mut server = self.read(id).await?;
         server.tunnel = on;
